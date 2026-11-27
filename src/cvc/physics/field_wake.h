@@ -29,11 +29,14 @@
 // past the walls by the ewave's ghosts (their mirror images, so the walls stay no-flux). A read at
 // depth d interpolates between the two layers round d, and past the deepest decays as the window's
 // longest wave would. The layers reach as deep as the bodies in the window do (1.5 times their
-// deepest point below the top, at most kMaxLayers); how many is world state.
+// deepest point below the top, at most kMaxLayers); how many is world state. The layers are made
+// when first read after a wave step (ready_depths), not at every wave step: those taken while every
+// body sleeps, waiting for the waves to die away, make none.
 //
 // Deterministic: the bodies are taken in id order, the states summed in id order, ewave and
 // add_immersion give the same bits on every platform, and the module is built without FMA
-// contraction (the physics exact-math list). The reads are const and may run on several threads.
+// contraction (the physics exact-math list). The reads are const and may run on several threads
+// (ready_depths first, on one).
 
 #ifndef __CVC_PHYSICS_FIELD_WAKE_H__
 #define __CVC_PHYSICS_FIELD_WAKE_H__
@@ -109,8 +112,15 @@ public:
   // Their height alone (sample's h).
   double height(int own, double x, double y) const;
   // Their motion (sample's u, v, w, gx and gy; h is left 0) at `depth` metres below the top (at
-  // most 0: the top's, sample's own).
+  // most 0: the top's, sample's own). Below the top it reads the depths ready_depths made last.
   void motion(int own, double x, double y, double depth, wake_sample &out) const;
+  // Make the motion below the top current for the last wave step (or restore): each state's
+  // depths, then their sum. A wave step leaves this to the first read that needs it, so one that
+  // nothing reads below the top (every body asleep while the waves die away) does not pay for it;
+  // the depths come out the same bits whenever they are made. It fills caches: call it where the
+  // reads are serialized (before the field workers' reads, under the world's lock), never beside
+  // a motion() read.
+  void ready_depths() const;
   bool placed() const { return _placed; }
   // Layer l's depth below the top (l in 1 .. kMaxLayers): cell / 2 times 2^(l - 1), at most the
   // window's water depth.
@@ -140,11 +150,13 @@ private:
     std::vector<double> h, phi, w; // n^2 each
     std::vector<double> zeta;      // its body's columns at the last wave step
     std::vector<double> f;         // what it gives a reader: 6 per cell (h, u, v, w, gx, gy)
-    std::vector<double> deep;      // and below the top: per layer, 5 per cell (u, v, w, gx, gy)
+    // And below the top: per layer, 5 per cell (u, v, w, gx, gy), made by ready_depths.
+    mutable std::vector<double> deep;
   };
   void derive(state &s) const;
   // s.deep for the depths kept (_layers), from its fields extended past the walls.
-  void deepen(state &s);
+  void deepen(const state &s) const;
+  // _total, _ids and _byIndex from the states (the top's; ready_depths sums the depths).
   void sum();
   void shift(int di, int dj);
   // The window's cell for a world coordinate (false when it is not finite or absurdly far).
@@ -155,7 +167,7 @@ private:
   void remask();
   // Layer l's per-mode decay, sideways (grad phi, grad h) and up (dh/dt), with the inverse FFT's
   // 1 / n^2 folded in: made when first needed.
-  const std::vector<double> &decay(int l, bool up);
+  const std::vector<double> &decay(int l, bool up) const;
 
   field_wake _p;
   int _n = 0;
@@ -171,12 +183,15 @@ private:
   std::vector<std::uint32_t> _ids;     // the states' bodies in id order (index = own())
   std::vector<const state *> _byIndex; // and the states themselves
   std::vector<double> _total;          // 6 per cell: the sum of every state's f
-  std::vector<double> _deepTotal;      // per layer, 5 per cell: the sum of every state's deep
   int _outside = 0; // bodies in the water but not in the window, at the last wave step
   int _layers = 0;  // the depths below the top each state keeps its motion at
   std::vector<double> _mask; // n^2 at the window's place (with a shore and once placed): 1 water
-  std::vector<double> _decay[2][kMaxLayers]; // decay(l, up), per mode
-  std::vector<double> _work[2];              // complex work fields for deepen
+  // ready_depths' caches.
+  mutable bool _depthsDue = false;        // the states moved (a wave step, a restore) since it ran
+  mutable int _deepLayers = 0;            // the depths it made (_layers then)
+  mutable std::vector<double> _deepTotal; // per layer, 5 per cell: the sum of every state's deep
+  mutable std::vector<double> _decay[2][kMaxLayers]; // decay(l, up), per mode
+  mutable std::vector<double> _work[2];              // complex work fields for deepen
 };
 
 struct fluid_wake::saved {

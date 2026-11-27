@@ -220,6 +220,10 @@ const Mistake kMistakes[] = {
      "/windows/0/children/0/fmt", "'cmyk' is not one of the values this key takes", 6, 14},
     {"a bell that is neither a flag nor always", "notifications: sometimes\n", "/notifications",
      "'sometimes' is not any of the forms this key takes", 1, 16},
+    {"a list for the state: map", "state: [a, b]\n", "/state", "a list is the wrong type here", 1,
+     8},
+    {"a map in a state: list", "state:\n  a: [1, {b: 2}]\n", "/state/a/1",
+     "a map is the wrong type here", 2, 10},
 };
 
 const char *const kValid[] = {
@@ -260,6 +264,9 @@ const char *const kValid[] = {
     "root:\n  - load: cvc://components/conference.ari\n    as: site\n    name: (state-get "
     "\"site_name\")\n",
     "scene:\n  clock: {hz: 60, max_lag: 0.5}\n",
+    // state: (§5.3): nested and dotted keys, an app-root one, a list, nothing, a flag
+    "state:\n  run: {crop: 600, paused: 0, name: x}\n  view.camera: follow\n  /app.theme: dark\n"
+    "  pos: [1, 2, 3]\n  empty:\n  ready: true\n",
 };
 } // namespace
 

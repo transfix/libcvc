@@ -547,6 +547,12 @@ bool run_init(cvc::app &app, const std::string &prefix, const std::string &scrip
               const std::function<bool(const std::string &)> &has = {},
               const ActionIntrinsicProvider &own = {});
 
+// Write a `state:` block's seeds (LoadResult::state_seeds, a mount's Widget::state_seeds; §5.3),
+// each at resolve_bind(prefix, path), in order: the same keys an init: `(state-set path value)`
+// would write. Call it just before run_init, so init: reads the seeds and may override them, and
+// like init's they win over a widget's def:.
+void seed_state(cvc::app &app, const std::string &prefix, const StateSeeds &seeds);
+
 // ---------------------------------------------------------------------------
 // Host-contributed state_exec intrinsics for the PROGRAM lanes (init: and a program `on:` action).
 // A host binds native functions — e.g. nav verbs `(nav-step)` / `(nav-arrived)` — that a .ari

@@ -501,10 +501,13 @@ TEST(CityBundleV2, AGeneratedWorldReadsBackAsTheWorldItDraws) {
   EXPECT_EQ(w.water.wet_cells(), gw.water.wet_cells());
   EXPECT_EQ(w.water_ground.size(), gw.water_ground.size());
 
-  // The ground: the material painting at the bundle's size, texel for texel.
-  ASSERT_EQ(bw.ground.width, world_ground_size);
-  ASSERT_EQ(bw.ground.height, world_ground_size);
-  EXPECT_TRUE(bw.ground.rgb == paint_surface(gw, surface_color::material, world_ground_size));
+  // The ground: the material painting at the bundle's size for the world (the largest, on a world
+  // 400 m across), texel for texel.
+  const int T = world_ground_size_for(gw);
+  EXPECT_EQ(T, world_ground_size);
+  ASSERT_EQ(bw.ground.width, T);
+  ASSERT_EQ(bw.ground.height, T);
+  EXPECT_TRUE(bw.ground.rgb == paint_surface(gw, surface_color::material, T));
 
   // Written again, with its ground: the same bundle.
   const city_bundle_files again = generated_world_bundle(app, w, "test", &bw.ground);
@@ -514,6 +517,49 @@ TEST(CityBundleV2, AGeneratedWorldReadsBackAsTheWorldItDraws) {
       ASSERT_EQ(again.count(name), 1u) << name;
       EXPECT_TRUE(*again.at(name) == *bytes) << name;
     }
+}
+
+// A world under 256 m across has a ground of fewer texels: the fewest, a power of two, at most
+// world_ground_texel_m apart over its grid's extent. A 200 m world's is 1024 a side (2048 was 10 cm
+// a texel), and its bundle holds that painting, texel for texel.
+TEST(CityBundleV2, ASmallWorldsGroundIsSizedToIt) {
+  auto sized = [](double across) {
+    generated_world w;
+    w.grid.min_x = w.grid.min_y = -0.5 * across;
+    w.grid.max_x = w.grid.max_y = 0.5 * across;
+    return world_ground_size_for(w);
+  };
+  EXPECT_EQ(sized(100.0), 512); // the smallest world (half_m 50)
+  EXPECT_EQ(sized(200.0), 1024);
+  EXPECT_EQ(sized(255.0), 1024);
+  EXPECT_EQ(sized(256.0), world_ground_size);
+  EXPECT_EQ(sized(1200.0), world_ground_size); // the default world
+  EXPECT_EQ(sized(10000.0), world_ground_size);
+  EXPECT_EQ(sized(0.0), world_ground_size); // no extent: the largest
+  for (const double across : {100.0, 200.0, 255.0, 256.0, 1200.0}) {
+    const int T = sized(across);
+    if (T < world_ground_size) // fine enough
+      EXPECT_LE(across / (T - 1), world_ground_texel_m) << across;
+    if (T > 256) // and the fewest that are
+      EXPECT_GT(across / (T / 2 - 1), world_ground_texel_m) << across;
+  }
+
+  cvc::app app;
+  if (!have_glb())
+    GTEST_SKIP() << "no glb writer (Assimp off)";
+  generated_world_params p = small_params();
+  p.half_m = 100.0;
+  p.trees = 4;
+  p.rocks = 2;
+  p.buildings = 4;
+  const generated_world gw = generate_world(app, p);
+  ASSERT_EQ(world_ground_size_for(gw), 1024);
+  const city_bundle_files files = generated_world_bundle(app, gw, "test");
+  const city_bundle b = load_city_bundle(app, city_bundle_memory_reader(files), "small");
+  const bundle_world bw = world_from_bundle(app, b, city_bundle_memory_reader(files));
+  ASSERT_EQ(bw.ground.width, 1024);
+  ASSERT_EQ(bw.ground.height, 1024);
+  EXPECT_TRUE(bw.ground.rgb == paint_surface(gw, surface_color::material, 1024));
 }
 
 // A version 1 city (terrain.json, satellite.png) is a world to draw too: its terrain and chunks,

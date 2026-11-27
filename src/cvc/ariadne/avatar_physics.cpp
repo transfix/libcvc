@@ -276,6 +276,21 @@ void avatar_world::set_wind(const cvc::algo::wind_state &w, double base_z) {
     _wind_field = _world->add_field(f).value;
 }
 
+void avatar_world::set_water(const std::vector<ph::field> &water) {
+  if (!_own)
+    return; // a shared world's water is its owner's
+  if (water.size() == _water_fields.size()) {
+    for (std::size_t i = 0; i < water.size(); ++i)
+      _world->set_field(_water_fields[i], water[i]);
+    return;
+  }
+  for (const ph::field_id id : _water_fields)
+    _world->remove_field(id);
+  _water_fields.clear();
+  for (const ph::field &f : water)
+    _water_fields.push_back(_world->add_field(f));
+}
+
 void avatar_world::set_time(double t) {
   if (_own)
     _world->set_field_time(t);

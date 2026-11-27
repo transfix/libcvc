@@ -38,6 +38,7 @@
 #include <cvc/nav/nav_arms.h>
 #include <cvc/nav/sim_world.h>
 #include <cvc/nav/sim_world_trace.h>
+#include <cvc/ph/compose.h>
 #include <cvc/ph/se2_train.h>
 #include <cvc/physics/scrub_plant.h>
 #include <cvc/state/state.h>
@@ -2416,6 +2417,24 @@ TEST_F(CvcCliTest, PhMicrogridWritesANetworkAndStartsFromVoltages) {
   EXPECT_NE(0, bad.exit_code);
   auto lin = cvc("ph microgrid \"" + path("lin.json") + "\" --dgus 2 --dgu linear --dgu-c 1.5");
   ASSERT_EQ(0, lin.exit_code) << lin.output;
+}
+
+TEST_F(CvcCliTest, PhTrainDguFitsAndWritesALaw) {
+  const std::string law = path("dgu.json");
+  auto r = cvc(
+      "ph train-dgu \"" + law +
+      "\" --updates 60 --batch 32 --lr 3e-3 --train-runs 4 --transitions 40 --test-runs 2"
+      " --test-transitions 100 --v-hidden 8 --m-hidden 4 --d-hidden 4 --threads 2 --log-every 30");
+  ASSERT_EQ(0, r.exit_code) << r.output;
+  EXPECT_NE(std::string::npos, r.output.find("linear fit: C")) << r.output;
+  EXPECT_NE(std::string::npos, r.output.find("update 60:")) << r.output;
+  EXPECT_NE(std::string::npos, r.output.find("fitted linear:")) << r.output;
+  ASSERT_TRUE(fs::exists(law));
+  const cvc::ph::law_ptr l = cvc::ph::load_law(law);
+  EXPECT_EQ(l->kind(), "canonical");
+  EXPECT_EQ(l->state_dim(), 2);
+  auto bad = cvc("ph train-dgu \"" + path("x.json") + "\" --v-hidden nonsense");
+  EXPECT_NE(0, bad.exit_code);
 }
 
 // ===========================================================================

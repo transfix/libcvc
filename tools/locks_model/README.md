@@ -938,7 +938,9 @@ record is left).
 ingress, stepping a process, firing a timeout, applying a kill, or one step of its teardown; or
 a timed wait's deadline passing (after which the home skips its record and its group may fire the
 timeout). A post is an atomic append; a closed handle refuses it, and a home-bound poster
-re-resolves the home (with S2b.0a's order, waiting while the home is still that closed group).
+re-resolves the home. With the amended order (S2b.R3) nobody waits: until its teardown is done, a
+closed handle takes a post into its late queue, which the teardown forwards before it is done
+(H unregisters then), and a post to a done handle follows its forwarding address (G0).
 Every interleaving is explored breadth first, so each trace is a shortest one. A state is kept as
 its pickle with no memo (`encode`; equal states give equal bytes), about 300 bytes with its
 index.
@@ -965,7 +967,7 @@ are reported under their own names and do not stop the exploration: `gap-requeue
 
     python -I router.py --procs S:ss,R1:t,R2:t --opts kills=1      # S2b.0a's text
     python -I router.py --procs S:ss,R1:t --but rehome-order        # every amendment but one
-    python -I router.py --suite quick     # the CI checks, about 25 s
+    python -I router.py --suite quick     # the CI checks, about 20 s
     python -I router.py --suite deep      # quick, then the larger bounds (locks-deep.yml)
     python -I test_router.py              # unittest: the quick suite, and the explorer's checks
 
@@ -990,9 +992,18 @@ but one and must find its violation.
    queued at H, and a receiver's unsubscribe reached G0 before the subscribe H forwarded, which
    left a record for a wait that ended. S2b.0a: close the handle first, forward to homes resolved
    without closed groups, unregister last; a poster the closed handle refuses waits while the
-   home is still that group (the forward waits on nothing, so the wait is bounded). `adopt`
-   relies on it (`finding-rehome-order-adopt`: without the wait a late answer reaches G0 before
-   the adopt, is applied untracked, and the tracker waits for ever, 14 steps).
+   home is still that group. `adopt` relies on it (`finding-rehome-order-adopt`: without it a
+   late answer reaches G0 before the adopt, is applied untracked, and the tracker waits for ever,
+   14 steps). S2b.R3 (K-1) replaced the wait, which the code had dropped for a teardown's own
+   posts (a receiving group's teardown and kills went past the closed home at once: `duplicate`,
+   `stale-record`, `tracker-leak`, the `teardown-no-wait` mutation) and which, kept for every
+   poster, would deadlock two homes torn down at once, each holding an entry for the other. Now
+   nobody waits: until the teardown is done, the closed handle takes every router entry posted to
+   it into a late queue, with no cap; after the pending messages, records, trackers and queued
+   entries, the teardown forwards the late ones in arrival order, as queued ones go, until none is
+   left, and only then is done and unregisters; a post to a done handle goes to its forwarding
+   address (G0 here). R1's handle takes a deliver into its late queue the same way. The model has
+   one home, so it cannot show the two-home deadlock or a forwarding address other than G0.
 2. **`forward-pending-first`** (`fifo`, 9 steps; `duplicate`, 13). The text listed the queued
    entries, then the records, then the pending messages; forwarded in that order, entries H took
    after it applied its pending messages reached G0 first: a queued send overtook its sender's
@@ -1102,63 +1113,79 @@ stale deliver dropped: `lost`), `requeue-always` (a stale copy requeued although
 took the message: `duplicate`), `untracked` (k >= 2 copies untracked: `duplicate`),
 `no-unsubscribe` (`stale-record`), `subscribe-no-fifo` (a subscribe recorded beside pending
 messages: `stranded`), `deliver-no-seq` (a deliver patches a later wait of its process:
-`misaddressed`).
+`misaddressed`), `teardown-no-wait` (S2b.R2's code, the skeptic's K-1: a receiving group's
+teardown posts past its closed, still registered home to G0 instead of into its late queue: its
+requeue of a tracked broadcast's copy reaches G0 before the adopt, `duplicate` and
+`tracker-leak`, and its kill's unsubscribe before the forwarded record, `stale-record`; found on
+each of the skeptic's four configurations, quick's `mutation-teardown-no-wait` and the deep
+`deep-mutation-teardown-no-wait*`).
 
 ### Its state counts and times
 
-Measured on 2026-11-23 on the Windows builder (Python 3.11, one process, other work beside it),
-on S2b.0a's text: the states, the transitions and the seconds of each check, in `--suite
-deep`'s run (the quick checks keep their states as tuples, the deep ones encoded).
+Measured on 2026-11-26 on the Windows builder (Python 3.11, one process, other work beside it),
+on the text as S2b.R3 amends it (the late queue): the states, the transitions and the seconds of
+each check, in `--suite deep`'s run (the quick checks keep their states as tuples, the deep ones
+encoded).
 
 | Check | Configuration | States | Transitions | Seconds | Found |
 |---|---|---|---|---|---|
-| `amended` | `S:ss,R1:t,R2:t`, amend all | 65,441 | 158,369 | 2.9 | - |
-| `amended-kills` | `S:s,G0:t,R1:t`, kills=1, amend all | 32,694 | 73,123 | 1.4 | - |
-| `amended-receiver-teardown` | `S:s,H:r,R1:t,R2:r`, choice=1, rdie=1, throws=1, amend all | 44,167 | 108,123 | 2.1 | - |
-| `amended-caps` | `S:ss,R1:t,R2:r`, busy0=1, fcap=1, fcap0=1, icap=1, amend all | 20,156 | 47,819 | 0.7 | - |
-| `amended-islands` | `S:ss,R1:t,R2:r`, islands=1, kills=1, amend all | 62,219 | 144,763 | 3.0 | gap-island-rehomed |
-| `amended-island-teardown` | `R1:r,R1:s,R2:t`, islands=1, rdie=1, amend all | 9,921 | 24,193 | 0.2 | gap-island-rehomed |
-| `amended-host-posts` | `X:p,S:s,R1:t,R2:r`, icap=1, amend all | 25,716 | 58,442 | 0.9 | - |
-| `gap-island-rehomed` | `S:s,R1:r`, islands=1, amend all | 91 | 143 | 0.0 | gap-island-rehomed |
-| `gap-requeue-order` | `S:ss,R1:tr,R2:r`, teardown=0, amend all | 2,806 | 5,269 | 0.1 | gap-requeue-order |
-| `finding-rehome-order` | `S:ss,R1:t`, all but rehome-order | 2,881 | 6,100 | 0.1 | fifo, stale-record |
-| `finding-rehome-order-adopt` | `H:s,R1:t,R2:t`, all but rehome-order | 12,542 | 28,738 | 0.5 | duplicate, stale-record, tracker-leak |
-| `finding-pending-first` | `S:ss,R1:r,R2:r`, all but forward-pending-first | 3,111 | 6,600 | 0.1 | duplicate, fifo |
-| `finding-forward-uncapped` | `S:ss,R1:r`, busy0=1, icap=1, all but forward-uncapped | 630 | 1,235 | 0.0 | fifo, lost |
-| `finding-uncapped-past-cap` | `S:ss,R1:r`, fcap0=1, all but uncapped-past-cap | 370 | 680 | 0.0 | lost |
-| `finding-stale-rule-teardown` | `S:s,H:r,R1:r`, rdie=1, teardown=0, all but stale-rule | 130 | 224 | 0.0 | duplicate |
+| `amended` | `S:ss,R1:t,R2:t`, amend all | 112,653 | 287,302 | 1.8 | - |
+| `amended-kills` | `S:s,G0:t,R1:t`, kills=1, amend all | 54,897 | 130,310 | 0.8 | - |
+| `amended-receiver-teardown` | `S:s,H:r,R1:t,R2:r`, choice=1, rdie=1, throws=1, amend all | 83,204 | 215,353 | 1.6 | - |
+| `amended-two-teardowns` | `S:s,R1:r,R2:r`, rdie=1, amend all | 4,437 | 10,618 | 0.1 | - |
+| `amended-caps` | `S:ss,R1:t,R2:r`, busy0=1, fcap=1, fcap0=1, icap=1, amend all | 31,615 | 79,529 | 0.6 | - |
+| `amended-islands` | `S:ss,R1:t,R2:r`, islands=1, kills=1, amend all | 111,926 | 278,820 | 2.0 | gap-island-rehomed |
+| `amended-island-teardown` | `R1:r,R1:s,R2:t`, islands=1, rdie=1, amend all | 19,614 | 51,457 | 0.4 | gap-island-rehomed |
+| `amended-host-posts` | `X:p,S:s,R1:t,R2:r`, icap=1, amend all | 40,481 | 97,009 | 0.8 | - |
+| `gap-island-rehomed` | `S:s,R1:r`, islands=1, amend all | 103 | 170 | 0.0 | gap-island-rehomed |
+| `gap-requeue-order` | `S:ss,R1:tr,R2:r`, teardown=0, amend all | 2,806 | 5,269 | 0.0 | gap-requeue-order |
+| `finding-rehome-order` | `S:ss,R1:t`, all but rehome-order | 2,881 | 6,100 | 0.0 | fifo, stale-record |
+| `finding-rehome-order-adopt` | `H:s,R1:t,R2:t`, all but rehome-order | 12,542 | 28,738 | 0.2 | duplicate, stale-record, tracker-leak |
+| `finding-pending-first` | `S:ss,R1:r,R2:r`, all but forward-pending-first | 4,144 | 9,285 | 0.1 | duplicate, fifo |
+| `finding-forward-uncapped` | `S:ss,R1:r`, busy0=1, icap=1, all but forward-uncapped | 818 | 1,684 | 0.0 | fifo, lost |
+| `finding-uncapped-past-cap` | `S:ss,R1:r`, fcap0=1, all but uncapped-past-cap | 438 | 846 | 0.0 | lost |
+| `finding-stale-rule-teardown` | `S:s,H:r,R1:r`, rdie=1, teardown=0, all but stale-rule | 172 | 307 | 0.0 | duplicate |
 | `finding-stale-rule-throw` | `S:s,H:r,R1:r,R2:r`, teardown=0, throws=1, all but stale-rule | 378 | 661 | 0.0 | duplicate |
 | `finding-throw-resubscribe` | `S:s,R1:r`, teardown=0, throws=1, all but throw-resubscribe | 17 | 18 | 0.0 | orphan-wait, stranded |
-| `finding-refused-stale` | `S:s,R1:r`, rdie=1, teardown=0, all but refused-stale | 58 | 77 | 0.0 | lost |
-| `finding-queue-as-requeue` | `S:s,H:r,R1:t,R2:t`, teardown=0, all but queue-as-requeue | 2,292 | 5,496 | 0.1 | stranded |
-| `finding-unique-ids` | `S:ss,R1:rr,R2:r,R2:t`, all but unique-ids | 308,949 | 721,143 | 14.0 | gap-requeue-order, id-collision |
+| `finding-refused-stale` | `S:s,R1:r`, rdie=1, teardown=0, all but refused-stale | 75 | 105 | 0.0 | lost |
+| `finding-queue-as-requeue` | `S:s,H:r,R1:t,R2:t`, teardown=0, all but queue-as-requeue | 2,292 | 5,496 | 0.0 | stranded |
+| `finding-unique-ids` | `S:ss,R1:rr,R2:r,R2:t`, all but unique-ids | 569,072 | 1,439,938 | 12.2 | gap-requeue-order, id-collision |
 | `finding-next-waiter-order` | `S:s,H:r,R1:t,R2:r`, choice=1, teardown=0, all but next-waiter-order | 605 | 1,268 | 0.0 | nondeterministic |
-| `finding-island-rule` | `R1:r,R1:s,R2:t`, islands=1, all but island-rule | 2,484 | 5,281 | 0.1 | gap-island-rehomed, stranded |
-| `finding-adopt` | `H:s,R1:t,R2:t`, all but adopt | 4,979 | 11,394 | 0.2 | duplicate |
-| `finding-forward-host-posts` | `X:pp,R1:r`, all but forward-host-posts | 285 | 514 | 0.0 | fifo, lost |
+| `finding-island-rule` | `R1:r,R1:s,R2:t`, islands=1, all but island-rule | 3,415 | 7,632 | 0.1 | gap-island-rehomed, stranded |
+| `finding-adopt` | `H:s,R1:t,R2:t`, all but adopt | 7,401 | 17,807 | 0.1 | duplicate |
+| `finding-forward-host-posts` | `X:pp,R1:r`, all but forward-host-posts | 338 | 637 | 0.0 | fifo, lost |
 | `mutation-no-requeue` | `S:s,R1:t`, teardown=0, amend all, mutation no-requeue | 44 | 61 | 0.0 | lost |
 | `mutation-requeue-always` | `S:s,H:r,R1:t`, teardown=0, amend all, mutation requeue-always | 110 | 191 | 0.0 | duplicate |
 | `mutation-untracked` | `S:s,R1:t,R2:r`, teardown=0, amend all, mutation untracked | 233 | 404 | 0.0 | duplicate |
 | `mutation-no-unsubscribe` | `R1:t`, teardown=0, amend all, mutation no-unsubscribe | 7 | 8 | 0.0 | stale-record |
 | `mutation-subscribe-no-fifo` | `S:s,R1:r`, teardown=0, amend all, mutation subscribe-no-fifo | 12 | 13 | 0.0 | stranded |
 | `mutation-deliver-no-seq` | `S:s,R1:tr`, teardown=0, amend all, mutation deliver-no-seq | 91 | 133 | 0.0 | misaddressed |
-| `deep-frozen` | `S:ss,R1:t,R2:r,H:r`, busy0=1, fcap0=1, icap=1, rdie=1, throws=1, amend none | 759,298 | 2,001,279 | 49.9 | duplicate, fifo, gap-requeue-order, lost, orphan-wait, stale-record, stranded, tracker-leak |
-| `deep-frozen-choice-islands` | `S:s,H:r,R1:t,R2:r`, choice=1, islands=1, kills=1, amend none | 57,999 | 130,307 | 3.2 | duplicate, gap-island-rehomed, nondeterministic, stale-record, stranded |
-| `deep-amended` | `S:ss,R1:t,R2:t,H:t`, kills=1, amend all | 1,365,660 | 3,328,385 | 76.2 | gap-requeue-order |
-| `deep-amended-g0` | `S:ss,R1:t,R2:t,G0:t`, amend all | 3,990,975 | 9,748,755 | 229.4 | gap-requeue-order |
-| `deep-amended-receiver-teardown` | `S:ss,R1:t,R2:t`, rdie=1, throws=1, amend all | 817,849 | 2,195,387 | 56.3 | gap-requeue-order |
-| `deep-amended-choice` | `H:t,S:ss,R1:t,R2:t`, choice=1, amend all | 313,849 | 770,590 | 19.8 | gap-requeue-order |
-| `deep-amended-caps` | `S:ss,R1:tr,R2:t`, busy0=1, fcap=1, fcap0=1, icap=1, amend all | 322,622 | 785,129 | 19.0 | gap-requeue-order |
-| `deep-amended-two-senders` | `S:ss,R1:st,R2:t`, amend all | 247,353 | 624,086 | 14.9 | - |
-| `deep-amended-ids` | `S:ss,R1:rr,R2:r,R2:t`, kills=1, amend all | 3,021,495 | 7,096,132 | 188.8 | gap-requeue-order |
-| `deep-amended-islands` | `S:ss,R1:t,R2:t`, islands=1, kills=1, rdie=1, amend all | 691,889 | 1,884,503 | 44.1 | gap-island-rehomed |
-| `deep-amended-host-posts` | `X:pp,R1:t,R2:t`, icap=1, kills=1, amend all | 237,595 | 558,445 | 11.9 | - |
-| `deep-finding-unique-ids-lost` | `H:s,S:s,R1:tr,R2:tr`, all but unique-ids | 800,596 | 1,797,954 | 33.5 | id-collision, lost |
+| `mutation-teardown-no-wait` | `S:s,R1:r,R2:r`, rdie=1, amend all, mutation teardown-no-wait | 4,999 | 11,859 | 0.1 | duplicate, stale-record, tracker-leak |
+| `deep-frozen` | `S:ss,R1:t,R2:r,H:r`, busy0=1, fcap0=1, icap=1, rdie=1, throws=1, amend none | 759,298 | 2,001,279 | 24.5 | duplicate, fifo, gap-requeue-order, lost, orphan-wait, stale-record, stranded, tracker-leak |
+| `deep-frozen-choice-islands` | `S:s,H:r,R1:t,R2:r`, choice=1, islands=1, kills=1, amend none | 57,999 | 130,307 | 1.6 | duplicate, gap-island-rehomed, nondeterministic, stale-record, stranded |
+| `deep-amended` | `S:ss,R1:t,R2:t,H:t`, kills=1, amend all | 2,349,416 | 6,002,317 | 77.7 | gap-requeue-order |
+| `deep-amended-g0` | `S:ss,R1:t,R2:t,G0:t`, amend all | 9,522,813 | 25,388,968 | 414.5 | gap-requeue-order |
+| `deep-amended-receiver-teardown` | `S:ss,R1:t,R2:t`, rdie=1, throws=1, amend all | 1,887,040 | 5,468,631 | 83.2 | gap-requeue-order |
+| `deep-amended-two-teardowns-kills` | `S:s,R1:t,R2:r`, kills=1, rdie=1, amend all | 82,554 | 223,587 | 2.7 | - |
+| `deep-amended-two-teardowns` | `S:ss,R1:t,R2:t`, rdie=1, amend all | 570,895 | 1,638,679 | 22.1 | - |
+| `deep-amended-choice` | `H:t,S:ss,R1:t,R2:t`, choice=1, amend all | 523,869 | 1,342,117 | 18.2 | gap-requeue-order |
+| `deep-amended-caps` | `S:ss,R1:tr,R2:t`, busy0=1, fcap=1, fcap0=1, icap=1, amend all | 643,727 | 1,706,827 | 20.5 | gap-requeue-order |
+| `deep-amended-two-senders` | `S:ss,R1:st,R2:t`, amend all | 452,496 | 1,207,859 | 15.2 | - |
+| `deep-amended-ids` | `S:ss,R1:rr,R2:r,R2:t`, kills=1, amend all | 6,358,748 | 16,416,940 | 230.7 | gap-requeue-order |
+| `deep-amended-islands` | `S:ss,R1:t,R2:t`, islands=1, kills=1, rdie=1, amend all | 1,774,066 | 5,233,802 | 65.5 | gap-island-rehomed |
+| `deep-amended-host-posts` | `X:pp,R1:t,R2:t`, icap=1, kills=1, amend all | 443,183 | 1,108,266 | 14.3 | - |
+| `deep-finding-unique-ids-lost` | `H:s,S:s,R1:tr,R2:tr`, all but unique-ids | 1,696,091 | 4,302,154 | 56.7 | id-collision, lost |
+| `deep-mutation-teardown-no-wait-throw` | `S:s,H:r,R1:t,R2:r`, choice=1, rdie=1, throws=1, amend all, mutation teardown-no-wait | 94,104 | 240,002 | 3.1 | duplicate, stale-record, tracker-leak |
+| `deep-mutation-teardown-no-wait-kill` | `S:s,R1:t,R2:r`, kills=1, rdie=1, amend all, mutation teardown-no-wait | 90,973 | 244,832 | 3.2 | duplicate, stale-record, tracker-leak |
+| `deep-mutation-teardown-no-wait` | `S:ss,R1:t,R2:t`, rdie=1, amend all, mutation teardown-no-wait | 635,194 | 1,813,509 | 21.4 | duplicate, stale-record, tracker-leak |
 
-`--suite deep` runs the quick checks, then the deep ones: 42 checks in about 13 minutes here,
-the quick ones about 27 s; the process peaks at a working set of 1.5 GB (`deep-amended-g0`, 4.0
-million states, about 300 bytes a state). Processes and messages multiply the states; kills,
-deadlines (each adds a clock step) and a second message per sender most of all. Outside the
+`--suite deep` runs the quick checks, then the deep ones: 49 checks in about 18 minutes here,
+the quick ones about 21 s; the process peaks at a working set of 3.5 GB (`deep-amended-g0`, 9.5
+million states, about 370 bytes a state). The late queue more than doubled the amended checks'
+states (posters no longer wait while the home is closed, so their posts interleave with its
+forward): S2b.0a's 42 checks took about 8 minutes on the same box, side by side. Processes and
+messages multiply the states; kills, deadlines (each adds a clock step) and a second message per
+sender most of all. Outside the
 suites, on S2b.0's text, `--procs S:ss,R1:st,R2:tt --opts kills=1` and the frozen text with
 every option at once passed 4 million states and were stopped there, finding nothing new.
 

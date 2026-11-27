@@ -120,6 +120,10 @@
           "description": "What the document needs from its host (docs/ARIADNE.md §5.7)."
         },
         "init": {"$ref": "#/$defs/program", "description": "Runs once at load."},
+        "state": {
+          "$ref": "#/$defs/state_tree",
+          "description": "Literal values written under the document's prefix just before init: runs (docs/ARIADNE.md §5.3)."
+        },
         "on_tick": {"$ref": "#/$defs/program", "description": "Runs every frame."},
         "on_key": {"$ref": "#/$defs/program", "description": "Runs on each key event."},
         "on_pointer": {"$ref": "#/$defs/program", "description": "Runs on each pointer event."},
@@ -282,6 +286,19 @@
     },
     "string": {"type": "string"},
     "scalar": {"type": ["string", "number", "boolean"], "description": "A scalar the loader reads as text."},
+    "state_tree": {
+      "type": ["object", "null"],
+      "description": "A state: block's keys (docs/ARIADNE.md §5.3): each a path segment (dots allowed; a top-level one may start with / for the app root), its value written as spelled, a list of scalars joined by commas, nothing (or an empty block) as \"\", a map one level deeper. The names are the document's own, so the keys are open.",
+      "patternProperties": {
+        "^.*$": {
+          "anyOf": [
+            {"$ref": "#/$defs/scalar"},
+            {"type": "array", "items": {"$ref": "#/$defs/scalar"}},
+            {"$ref": "#/$defs/state_tree"}
+          ]
+        }
+      }
+    },
     "label": {
       "type": ["string", "number", "boolean", "null"],
       "description": "A widget's label: its type key's value (empty is no label)."

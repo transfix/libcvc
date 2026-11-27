@@ -176,7 +176,7 @@ public:
   // The water at `p` at field time `t`: the first fluid field, in id order, whose box holds `p`
   // in x and y and reaches below it. False if none does; `out` is then dry and still. With
   // `wake.on` its wake's waves too: their height in the top, their motion at p's depth below it
-  // in the velocity.
+  // in the velocity (one caller at a time then: it makes the wake's depths when they are due).
   bool water_at(const vec3 &p, double t, physics::water_sample &out,
                 const wake_read &wake = {}) const;
 

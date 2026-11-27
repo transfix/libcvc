@@ -2143,6 +2143,38 @@ void paintAprons(const generated_world &w, int T, std::vector<unsigned char> &im
   }
 }
 
+// street_verge's noise at (x, y), which depends on nothing but where: whether the ground there has
+// a verge (present, 0 to 1), and how far past the pavement its frayed edge lies (edge, in metres;
+// left 0 where present is 0). paintStreets makes it once for a texel that several roads reach.
+struct verge_noise {
+  double present = 0.0, edge = 0.0;
+};
+
+verge_noise verge_noise_at(double x, double y) {
+  verge_noise v;
+  // Where: a low-frequency field picks the stretches (a few hundred metres each) that have one.
+  const double where = gfbm2(x / 380.0 + 17.3, y / 380.0 + 4.1);
+  v.present = std::clamp((where - 0.47) / 0.08, 0.0, 1.0);
+  if (v.present <= 0.0)
+    return v;
+  // How wide: 1 to 3.5 m past the pavement, wandering along the road over tens of metres.
+  const double width = 1.0 + (street_verge_max_m - 1.0) * gfbm2(x / 24.0 + 5.7, y / 24.0 + 9.2);
+  // The edge frays into the grass: finer noise moves it by up to a metre either way.
+  v.edge = width + 1.0 * (2.0 * gnoise2(x * 0.7 + 1.9, y * 0.7 + 7.3) - 1.0);
+  return v;
+}
+
+// street_verge from its noise there: the texel's share of the band from the pavement's edge out to
+// the verge's, none under the pavement, so a road whose texel is wider than it still darkens it.
+double verge_cover(const verge_noise &v, double from_edge_m, double texel_m) {
+  if (v.present <= 0.0)
+    return 0.0;
+  const double soft = std::max(texel_m, 0.8);
+  const double out = std::clamp((v.edge - from_edge_m) / soft + 0.5, 0.0, 1.0);
+  const double in = std::clamp(-from_edge_m / soft + 0.5, 0.0, 1.0);
+  return 0.85 * v.present * std::max(0.0, out - in);
+}
+
 // The streets over the material texture, from their centrelines (generated_world::streets): each
 // road's asphalt a little narrower than its mesh, and along some stretches a verge of light dirt.
 // Both are coverages per texel, the largest of any road there, antialiased over a texel, so a road
@@ -2150,6 +2182,13 @@ void paintAprons(const generated_world &w, int T, std::vector<unsigned char> &im
 // a coarse terrain rung rises over the mesh. The verge eases the dark pavement into the grass. It
 // comes and goes along the roads with low-frequency noise (about half their length has one), its
 // width wanders, and its edge frays into the ground.
+//
+// A road reaches the texels in a box around it, and on a small world those are many (a texel is
+// 10 cm on a 200 m world) and shared: the roads meet, and a short road's box is mostly its ends'.
+// So the rows paint in parallel, each one the roads over it in their order, and the verge's noise,
+// which depends on nothing but where, is made once a texel. Every texel takes the same roads'
+// coverages in the same order as one road at a time would, so the bytes are the same on any thread
+// count.
 void paintStreets(const generated_world &w, int T, std::vector<unsigned char> &img) {
   const road_network &net = w.streets;
   if (net.segments.empty())
@@ -2163,38 +2202,91 @@ void paintStreets(const generated_world &w, int T, std::vector<unsigned char> &i
       asphalt[q] = reg[asphaltId].albedo[q];
   const double spanx = g.max_x - g.min_x, spany = g.max_y - g.min_y;
   const double tx_m = spanx / (T - 1), ty_m = spany / (T - 1), texel = std::max(tx_m, ty_m);
-  const std::size_t n = std::size_t(T) * T;
-  std::vector<float> road(n, 0.0f), verge(n, 0.0f);
+  // Each road: its centreline, its half width, its asphalt's, how far it reaches, and the box of
+  // texels that reach takes in.
+  struct road_reach {
+    double ax, ay, dx, dy, len2, hw, paintHw, reach;
+    int x0, x1, y0, y1;
+  };
+  std::vector<road_reach> roads;
+  roads.reserve(net.segments.size());
   for (const road_segment &s : net.segments) {
     if (s.a < 0 || s.b < 0 || s.a >= int(net.nodes.size()) || s.b >= int(net.nodes.size()))
       continue;
-    const double ax = net.nodes[s.a].x, ay = net.nodes[s.a].y;
+    road_reach r;
+    r.ax = net.nodes[s.a].x;
+    r.ay = net.nodes[s.a].y;
     const double bx = net.nodes[s.b].x, by = net.nodes[s.b].y;
-    const double hw = 0.5 * s.width;
+    r.hw = 0.5 * s.width;
     // Inset by up to half a texel, so the asphalt's filtered edge stays under the mesh.
-    const double paintHw = hw - std::min(0.5 * texel, 0.5 * hw);
-    const double reach = hw + street_verge_max_m + 1.0 + texel; // the verge's frayed edge too
-    const int x0 = std::max(0, int(std::floor((std::min(ax, bx) - reach - g.min_x) / tx_m)));
-    const int x1 = std::min(T - 1, int(std::ceil((std::max(ax, bx) + reach - g.min_x) / tx_m)));
-    const int y0 = std::max(0, int(std::floor((std::min(ay, by) - reach - g.min_y) / ty_m)));
-    const int y1 = std::min(T - 1, int(std::ceil((std::max(ay, by) + reach - g.min_y) / ty_m)));
-    const double dx = bx - ax, dy = by - ay, len2 = dx * dx + dy * dy;
-    for (int ty = y0; ty <= y1; ++ty)
-      for (int tx = x0; tx <= x1; ++tx) {
-        const double wx = g.min_x + tx * tx_m, wy = g.min_y + ty * ty_m;
-        const double t =
-            len2 > 1e-12 ? std::clamp(((wx - ax) * dx + (wy - ay) * dy) / len2, 0.0, 1.0) : 0.0;
-        const double d = std::hypot(wx - (ax + t * dx), wy - (ay + t * dy));
-        if (d > reach)
-          continue;
-        const std::size_t i = std::size_t(ty) * T + tx;
-        const double rc = std::clamp((paintHw - d) / texel + 0.5, 0.0, 1.0);
-        road[i] = std::max(road[i], float(rc));
-        const double vc = street_verge(wx, wy, d - hw, texel);
-        verge[i] = std::max(verge[i], float(vc));
+    r.paintHw = r.hw - std::min(0.5 * texel, 0.5 * r.hw);
+    r.reach = r.hw + street_verge_max_m + 1.0 + texel; // the verge's frayed edge too
+    r.x0 = std::max(0, int(std::floor((std::min(r.ax, bx) - r.reach - g.min_x) / tx_m)));
+    r.x1 = std::min(T - 1, int(std::ceil((std::max(r.ax, bx) + r.reach - g.min_x) / tx_m)));
+    r.y0 = std::max(0, int(std::floor((std::min(r.ay, by) - r.reach - g.min_y) / ty_m)));
+    r.y1 = std::min(T - 1, int(std::ceil((std::max(r.ay, by) + r.reach - g.min_y) / ty_m)));
+    r.dx = bx - r.ax;
+    r.dy = by - r.ay;
+    r.len2 = r.dx * r.dx + r.dy * r.dy;
+    if (r.x0 <= r.x1 && r.y0 <= r.y1)
+      roads.push_back(r);
+  }
+  // The roads over each row, in their order: row ty's are rowRoads from rowAt[ty] to rowAt[ty + 1].
+  std::vector<std::size_t> rowAt(std::size_t(T) + 1, 0);
+  for (const road_reach &r : roads)
+    for (int ty = r.y0; ty <= r.y1; ++ty)
+      ++rowAt[std::size_t(ty) + 1];
+  for (int ty = 0; ty < T; ++ty)
+    rowAt[std::size_t(ty) + 1] += rowAt[std::size_t(ty)];
+  std::vector<std::size_t> rowRoads(rowAt.back());
+  {
+    std::vector<std::size_t> next(rowAt.begin(), rowAt.end() - 1);
+    for (std::size_t k = 0; k < roads.size(); ++k)
+      for (int ty = roads[k].y0; ty <= roads[k].y1; ++ty)
+        rowRoads[next[std::size_t(ty)]++] = k;
+  }
+  const std::size_t n = std::size_t(T) * T;
+  std::vector<float> road(n, 0.0f), verge(n, 0.0f);
+#ifdef CVC_USING_OPENMP
+#pragma omp parallel
+#endif
+  {
+    // This thread's verge noise for the row it paints, by column, and the row each was made for.
+    std::vector<verge_noise> noise(static_cast<std::size_t>(T));
+    std::vector<int> noiseRow(static_cast<std::size_t>(T), -1);
+#ifdef CVC_USING_OPENMP
+#pragma omp for schedule(dynamic, 8)
+#endif
+    for (int ty = 0; ty < T; ++ty) {
+      const double wy = g.min_y + ty * ty_m;
+      for (std::size_t k = rowAt[std::size_t(ty)]; k < rowAt[std::size_t(ty) + 1]; ++k) {
+        const road_reach &r = roads[rowRoads[k]];
+        for (int tx = r.x0; tx <= r.x1; ++tx) {
+          const double wx = g.min_x + tx * tx_m;
+          const double t =
+              r.len2 > 1e-12
+                  ? std::clamp(((wx - r.ax) * r.dx + (wy - r.ay) * r.dy) / r.len2, 0.0, 1.0)
+                  : 0.0;
+          const double d = std::hypot(wx - (r.ax + t * r.dx), wy - (r.ay + t * r.dy));
+          if (d > r.reach)
+            continue;
+          const std::size_t i = std::size_t(ty) * T + tx;
+          const double rc = std::clamp((r.paintHw - d) / texel + 0.5, 0.0, 1.0);
+          road[i] = std::max(road[i], float(rc));
+          if (noiseRow[std::size_t(tx)] != ty) {
+            noise[std::size_t(tx)] = verge_noise_at(wx, wy);
+            noiseRow[std::size_t(tx)] = ty;
+          }
+          const double vc = verge_cover(noise[std::size_t(tx)], d - r.hw, texel);
+          verge[i] = std::max(verge[i], float(vc));
+        }
       }
+    }
   }
   const cvc::geometry::color_t light = {0.64, 0.57, 0.44}, dark = {0.50, 0.42, 0.30};
+#ifdef CVC_USING_OPENMP
+#pragma omp parallel for schedule(static)
+#endif
   for (int ty = 0; ty < T; ++ty)
     for (int tx = 0; tx < T; ++tx) {
       const std::size_t i = std::size_t(ty) * T + tx;
@@ -2202,8 +2294,9 @@ void paintStreets(const generated_world &w, int T, std::vector<unsigned char> &i
         continue;
       unsigned char *p = &img[i * 3];
       const double wx = g.min_x + tx * tx_m, wy = g.min_y + ty * ty_m;
-      // Dust mottled light and darker, so the verge is not one flat tone.
-      const double mott = gfbm2(wx * 0.35 + 41.0, wy * 0.35 + 3.0);
+      // Dust mottled light and darker, so the verge is not one flat tone. Under no verge the soil
+      // adds nothing (c moves by (soil - c) * 0), so its noise is not made.
+      const double mott = verge[i] > 0.0f ? gfbm2(wx * 0.35 + 41.0, wy * 0.35 + 3.0) : 0.0;
       for (int q = 0; q < 3; ++q) {
         const double soil = light[q] + (dark[q] - light[q]) * mott;
         double c = p[q] / 255.0;
@@ -2214,30 +2307,30 @@ void paintStreets(const generated_world &w, int T, std::vector<unsigned char> &i
     }
 }
 
+// The material mode's paved ground over its painted rows: the core lots' forecourts, then the
+// streets. The QA modes show the raw raster.
+void paintPaved(const generated_world &w, surface_color mode, int T,
+                std::vector<unsigned char> &img) {
+  if (mode == surface_color::material && !w.raster.klass.empty()) {
+    paintAprons(w, T, img);
+    paintStreets(w, T, img);
+  }
+}
+
 } // namespace
 
 double street_verge(double x, double y, double from_edge_m, double texel_m) {
-  // Where: a low-frequency field picks the stretches (a few hundred metres each) that have one.
-  const double where = gfbm2(x / 380.0 + 17.3, y / 380.0 + 4.1);
-  const double present = std::clamp((where - 0.47) / 0.08, 0.0, 1.0);
-  if (present <= 0.0)
-    return 0.0;
-  // How wide: 1 to 3.5 m past the pavement, wandering along the road over tens of metres.
-  const double width = 1.0 + (street_verge_max_m - 1.0) * gfbm2(x / 24.0 + 5.7, y / 24.0 + 9.2);
-  // The edge frays into the grass: finer noise moves it by up to a metre either way.
-  const double edge = width + 1.0 * (2.0 * gnoise2(x * 0.7 + 1.9, y * 0.7 + 7.3) - 1.0);
-  // The texel's share of the band from the pavement's edge out to there: none under the pavement,
-  // so a road whose texel is wider than it still darkens it.
-  const double soft = std::max(texel_m, 0.8);
-  const double out = std::clamp((edge - from_edge_m) / soft + 0.5, 0.0, 1.0);
-  const double in = std::clamp(-from_edge_m / soft + 0.5, 0.0, 1.0);
-  return 0.85 * present * std::max(0.0, out - in);
+  return verge_cover(verge_noise_at(x, y), from_edge_m, texel_m);
 }
 
 std::vector<unsigned char> paint_surface(const generated_world &w, surface_color mode, int size) {
-  surface_painter s(w, mode, size);
-  s.step(0);
-  return s.take();
+  // surface_painter's texture, all at once, without the water's (paint_water) beside it, which
+  // nothing here reads.
+  const int T = std::max(2, size);
+  std::vector<unsigned char> img(std::size_t(T) * T * 3, 0);
+  paintRows(w, mode, T, 0, T, img);
+  paintPaved(w, mode, T, img);
+  return img;
 }
 
 surface_painter::surface_painter(const generated_world &w, surface_color mode, int size)
@@ -2255,10 +2348,7 @@ bool surface_painter::step(std::size_t budget) {
       return false;
   }
   if (!finished_) {
-    if (mode_ == surface_color::material && !w_.raster.klass.empty()) { // QA modes: the raw raster
-      paintAprons(w_, size_, img_);
-      paintStreets(w_, size_, img_);
-    }
+    paintPaved(w_, mode_, size_, img_);
     finished_ = true;
   }
   return true;
