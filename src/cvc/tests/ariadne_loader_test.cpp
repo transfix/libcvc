@@ -3888,6 +3888,56 @@ TEST(AriadneLoader, NestingLimitCountsLoads) {
   EXPECT_EQ(r.error_column, 5 + 25 * 16);
 }
 
+// A scene of a use: of p0, prototypes p0..p<n-1> each a node whose child is a use: of the next, the
+// last a node around `inline_nodes` nodes written inline, around a node named deepest: each use:
+// and each node a level, so deepest is at 2n + inline_nodes + 1.
+std::string scene_nesting_doc(std::size_t n, std::size_t inline_nodes) {
+  std::string doc = "meta: { min_libcvc: \"0.0.0\" }\nprototypes:\n";
+  for (std::size_t i = 0; i + 1 < n; ++i)
+    doc += "  p" + std::to_string(i) + ": {node: n" + std::to_string(i) + ", children: [{use: p" +
+           std::to_string(i + 1) + "}]}\n";
+  std::string inner = "{node: deepest}";
+  for (std::size_t i = inline_nodes; i > 0; --i)
+    inner = "{node: c" + std::to_string(i - 1) + ", children: [" + inner + "]}";
+  doc += "  p" + std::to_string(n - 1) + ": {node: last, children: [" + inner + "]}\n";
+  return doc + "scene:\n  nodes: [{use: p0}]\n";
+}
+
+TEST(AriadneLoader, NestingLimitCountsSceneNodesAndUses) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = fresh_load(scene_nesting_doc(100, 55)); // deepest at 2 * 100 + 55 + 1 = 256
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_NE(find_scene_node(r.scene.nodes, "deepest"), nullptr);
+
+  // A node more: deepest is at 257, refused where it is written, in the last prototype.
+  const std::string doc = scene_nesting_doc(100, 56);
+  r = fresh_load(doc);
+  ASSERT_FALSE(r.ok);
+  EXPECT_TRUE(r.scene.nodes.empty());
+  EXPECT_NE(r.error.find("a scene node nested deeper than 256 levels"), std::string::npos)
+      << r.error;
+  EXPECT_NE(r.error.find("each scene node and use: a level"), std::string::npos) << r.error;
+  EXPECT_NE(r.error.find("with 100 use: on the way"), std::string::npos) << r.error;
+  const int line = line_of(doc, "  p99:");
+  const std::string row = doc.substr(doc.find("  p99:"));
+  EXPECT_EQ(r.error_source, "");
+  EXPECT_EQ(r.error_line, line);
+  EXPECT_EQ(r.error_column, 1 + static_cast<int>(row.find("{node: deepest}")));
+}
+
+// A scenes: entry's tree counts the same.
+TEST(AriadneLoader, NestingLimitCountsEveryScene) {
+  SKIP_WITHOUT_YAML();
+  std::string doc = scene_nesting_doc(120, 16); // deepest at 257
+  doc.replace(doc.find("scene:\n  nodes:"), 15, "scenes:\n  - scene: deep\n    nodes:");
+  const LoadResult r = fresh_load(doc);
+  ASSERT_FALSE(r.ok);
+  EXPECT_TRUE(r.scenes.empty());
+  EXPECT_NE(r.error.find("a scene node nested deeper than 256 levels"), std::string::npos)
+      << r.error;
+  EXPECT_EQ(r.error_line, line_of(doc, "  p119:"));
+}
+
 TEST(AriadneScene, ScalarScaleIsUniform) {
   SKIP_WITHOUT_YAML();
   LoadResult r = fresh_load(R"(

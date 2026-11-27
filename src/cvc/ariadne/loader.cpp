@@ -520,6 +520,57 @@ std::vector<raw_issue> run_schema(cvc::app &app, const njson &instance, bool wid
   return std::move(collector.found);
 }
 
+// A key as a JSON Pointer token: its '~' and '/' escaped (~0, ~1).
+std::string pointer_token(std::string t) {
+  for (std::size_t at = 0; (at = t.find_first_of("~/", at)) != std::string::npos; at += 2)
+    t.replace(at, 1, t[at] == '~' ? "~0" : "~1");
+  return t;
+}
+
+// §6.7 whether `root` goes more than `cap` levels deep (it is level 1, and each value in a map or a
+// list a level below it); when it does, `tokens` holds the keys and indices to its first value
+// past `cap`, in document order. A loop, so it takes no stack a level.
+bool deeper_than(const YAML::Node &root, std::size_t cap, std::vector<std::string> &tokens) {
+  struct Level {
+    YAML::Node node;
+    YAML::const_iterator at, end;
+    std::size_t index;
+  };
+  tokens.clear();
+  if (cap == 0)
+    return true;
+  std::vector<Level> path;
+  if (root.IsMap() || root.IsSequence())
+    path.push_back({root, root.begin(), root.end(), 0});
+  while (!path.empty()) {
+    Level &l = path.back();
+    if (l.at == l.end) {
+      path.pop_back();
+      if (!path.empty())
+        tokens.pop_back(); // the key or index of the map or list just left
+      continue;
+    }
+    // reset() binds `value`: assigning one YAML::Node to another would overwrite the document.
+    YAML::Node value;
+    if (l.node.IsMap()) {
+      tokens.push_back(l.at->first.IsScalar() ? l.at->first.Scalar() : std::string());
+      value.reset(l.at->second);
+    } else {
+      tokens.push_back(std::to_string(l.index));
+      value.reset(*l.at);
+    }
+    ++l.at;
+    ++l.index;
+    if (path.size() + 1 > cap) // `value` is a level below the map or list it is in
+      return true;
+    if (value.IsMap() || value.IsSequence())
+      path.push_back({value, value.begin(), value.end(), 0});
+    else
+      tokens.pop_back();
+  }
+  return false;
+}
+
 // A JSON Pointer's tokens ("/windows/0" -> windows, 0), unescaped.
 std::vector<std::string> pointer_tokens(const std::string &p) {
   std::vector<std::string> out;
@@ -611,6 +662,22 @@ std::string issue_message(const raw_issue &r) {
 std::vector<SchemaIssue> schema_issues(cvc::app &app, const YAML::Node &node, bool widget,
                                        const YAML::Node &positions,
                                        const std::set<std::string> &allowed, bool skip_tokens) {
+  // §6.7 the validator goes down the tree a level of YAML at a time on the native stack: a tree
+  // deeper than it goes is not checked, and the one issue says where it goes past.
+  if (std::vector<std::string> deep; deeper_than(node, kMaxSchemaDepth, deep)) {
+    SchemaIssue i;
+    for (const std::string &t : deep)
+      i.pointer += "/" + pointer_token(t);
+    i.message = "nested more than " + std::to_string(kMaxSchemaDepth) +
+                " levels of YAML deep, the most the schema check goes (docs/ARIADNE.md §6.7): "
+                "this " +
+                (widget ? "widget" : "document") + " is not checked";
+    if (const YAML::Mark mark = mark_at(positions, deep, false); !mark.is_null()) {
+      i.line = mark.line + 1;
+      i.column = mark.column + 1;
+    }
+    return {std::move(i)};
+  }
   // What the validator found, the noise taken out: a repeat's {i} (and with skip_tokens any
   // {name}) a value only a copy or an include site gives; a top-level block `allowed`.
   struct found {
@@ -641,10 +708,7 @@ std::vector<SchemaIssue> schema_issues(cvc::app &app, const YAML::Node &node, bo
     f.key = unknown_key_of(f.raw.message);
     if (!f.key.empty() && f.raw.pointer.empty() && allowed.count(f.key))
       continue;
-    std::string escaped = f.key;
-    for (std::size_t at = 0; (at = escaped.find_first_of("~/", at)) != std::string::npos; at += 2)
-      escaped.replace(at, 1, escaped[at] == '~' ? "~0" : "~1");
-    f.place = f.key.empty() ? f.raw.pointer : f.raw.pointer + "/" + escaped;
+    f.place = f.key.empty() ? f.raw.pointer : f.raw.pointer + "/" + pointer_token(f.key);
     all.push_back(std::move(f));
   }
   // Alternatives (anyOf) none of which fit: the validator reports each one's failure beside the
@@ -2283,27 +2347,35 @@ bool tokens_to(const YAML::Node &from, const YAML::Node &to, std::vector<std::st
   return false;
 }
 
-// Where the widget at `path[i]` is written: its own position, in its Ctx's file; or, in an
-// include:'s expansion (a copy, whose positions are all line 1, column 1), the same place in the
-// unit, in the unit's file (the unit's top where the include fills slots, which moves the unit's
-// items). It is in an expansion when an include: entry is above it in the same document: a load:
-// entry between starts a document of its own, read from its file.
+// Where the widget or scene node at `path[i]` is written: its own position, in its Ctx's file; or,
+// in an include:'s expansion (a copy, whose positions are all line 1, column 1), the same place in
+// the unit, in the unit's file (the unit's top where the include fills slots, which moves the
+// unit's items); a scene node in a use:'s expansion, the same place in the prototype. It is in an
+// expansion when an include: (or use:) entry is above it in the same document: a load: entry
+// between starts a document of its own, read from its file.
 Place place_of(const std::vector<Nesting::Level> &path, std::size_t i) {
   const Nesting::Level &at = path[i];
   for (std::size_t top = i; top > 0; --top) {
     const Nesting::Level &site = path[top - 1];
     if (site.ctx != at.ctx)
       break; // the load: entry of the fragment `at` is in
-    if (!site.node->IsMap() || !has(*site.node, "include"))
+    if (!site.node->IsMap())
       continue;
-    const std::string name = str(*site.node, "include");
-    const auto unit = site.ctx->units.find(name);
-    if (unit == site.ctx->units.end()) // (it expanded, so it is there)
+    // A scene node's use: names one of the document's prototypes (only scene nodes are parsed
+    // once they are collected, so a widget's path never finds one).
+    const bool use = has(*site.node, "use") && site.ctx->prototypes.count(str(*site.node, "use"));
+    if (!use && !has(*site.node, "include"))
+      continue;
+    const std::string name = str(*site.node, use ? "use" : "include");
+    const std::map<std::string, YAML::Node> &templates =
+        use ? site.ctx->prototypes : site.ctx->units;
+    const auto unit = templates.find(name);
+    if (unit == templates.end()) // (it expanded, so it is there)
       return {site.ctx->source, YAML::Mark::null_mark()};
-    const auto file = site.ctx->unit_sources.find(name);
+    const auto file = use ? site.ctx->unit_sources.end() : site.ctx->unit_sources.find(name);
     Place p{file != site.ctx->unit_sources.end() ? file->second : site.ctx->source,
             unit->second.Mark()};
-    if (has(*site.node, "slots"))
+    if (!use && has(*site.node, "slots"))
       return p;
     std::vector<std::string> tokens;
     for (std::size_t k = top; k < i; ++k)
@@ -2324,16 +2396,19 @@ std::string place_text(const Place &p) {
   return p.source.empty() ? "line " + at : p.source + ":" + at;
 }
 
-// §6.7 refuse `n`, the first widget past the nesting limit: the parse stops, and the load fails
-// with an error at `n`, which counts the include:s and load:s on the way down and names each that
-// goes into another file.
-CVC_ARI_NOINLINE void refuse_nesting(Ctx &ctx, const YAML::Node &n) {
+// §6.7 refuse `n`, the first widget (or with `scene`, scene node) past the nesting limit: the parse
+// stops, and the load fails with an error at `n`, which counts the include:s and load:s (a scene
+// node's use:s) on the way down and names each that goes into another file.
+CVC_ARI_NOINLINE void refuse_nesting(Ctx &ctx, const YAML::Node &n, bool scene = false) {
   Nesting &nest = *ctx.nesting;
   nest.path.push_back({&n, &ctx});
   const Place deepest = place_of(nest.path, nest.path.size() - 1);
-  std::size_t includes = 0, loads = 0;
+  std::size_t includes = 0, loads = 0, uses = 0;
   std::string way;
-  for (std::size_t k = 0; k + 1 < nest.path.size(); ++k) {
+  for (std::size_t k = 0; scene && k + 1 < nest.path.size(); ++k)
+    if (nest.path[k].node->IsMap() && has(*nest.path[k].node, "use"))
+      ++uses;
+  for (std::size_t k = 0; !scene && k + 1 < nest.path.size(); ++k) {
     const YAML::Node &e = *nest.path[k].node;
     const bool include = e.IsMap() && has(e, "include"), load = e.IsMap() && has(e, "load");
     if (!include && !load)
@@ -2353,12 +2428,19 @@ CVC_ARI_NOINLINE void refuse_nesting(Ctx &ctx, const YAML::Node &n) {
   }
   nest.path.pop_back();
   const std::string at = place_text(deepest);
-  nest.error = "ari: " + (at.empty() ? "" : at + ": ") + "a widget nested deeper than " +
-               std::to_string(nest.limit) +
-               " levels, the most a document may (each widget, include: and load: a level; "
-               "docs/ARIADNE.md §6.7), with " +
-               std::to_string(includes) + " include: and " + std::to_string(loads) +
-               " load: on the way" + (way.empty() ? "" : ", by way of " + way);
+  if (scene)
+    nest.error = "ari: " + (at.empty() ? "" : at + ": ") + "a scene node nested deeper than " +
+                 std::to_string(nest.limit) +
+                 " levels, the most a document may (each scene node and use: a level; "
+                 "docs/ARIADNE.md §6.7), with " +
+                 std::to_string(uses) + " use: on the way";
+  else
+    nest.error = "ari: " + (at.empty() ? "" : at + ": ") + "a widget nested deeper than " +
+                 std::to_string(nest.limit) +
+                 " levels, the most a document may (each widget, include: and load: a level; "
+                 "docs/ARIADNE.md §6.7), with " +
+                 std::to_string(includes) + " include: and " + std::to_string(loads) +
+                 " load: on the way" + (way.empty() ? "" : ", by way of " + way);
   nest.source = deepest.source;
   nest.line = deepest.mark.is_null() ? 0 : deepest.mark.line + 1;
   nest.column = deepest.mark.is_null() ? 0 : deepest.mark.column + 1;
@@ -3895,8 +3977,9 @@ void share_proto_meshes(Ctx &ctx, const YAML::Node &part, YAML::Node inst, const
 // node has replaces the prototype's, but for material:, which merges key by key, and children:,
 // which come after the prototype's. False, with a warning, for a name no prototype has or one
 // already being expanded (a cycle); `name` is left on the expansion stack for the caller to take
-// off after it has parsed `out`.
-bool expand_use(Ctx &ctx, const YAML::Node &n, YAML::Node &out, std::string &name) {
+// off after it has parsed `out`. Not inlined into parse_scene_node, which goes down the tree.
+CVC_ARI_NOINLINE bool expand_use(Ctx &ctx, const YAML::Node &n, YAML::Node &out,
+                                 std::string &name) {
   name = str(n, "use");
   const std::string at =
       "ari: scene node '" + str(n, "node", str(n, "id")) + "': use: '" + name + "'";
@@ -3999,17 +4082,10 @@ void unit_rgb(Ctx &ctx, const YAML::Node &v, float out[3], const std::string &wh
     ctx.warn("ari: " + what + " has a channel outside 0..1 — clamped");
 }
 
-SceneNode parse_scene_node(Ctx &ctx, const YAML::Node &n) {
-  if (n.IsMap() && n["use"]) { // a prototype's instance: parsed as the node it stands for
-    YAML::Node inst;
-    std::string name;
-    if (expand_use(ctx, n, inst, name)) {
-      SceneNode sn = parse_scene_node(ctx, inst);
-      ctx.using_protos.erase(name);
-      return sn;
-    }
-  }
-  SceneNode sn;
+// A scene node's own keys, into `sn`: all but its children: and repeat: (parse_scene_node). Never
+// on the way down a scene tree, so its locals, most of a scene level's, are not on the stack a
+// level (§6.7).
+CVC_ARI_NOINLINE void scene_node_keys(Ctx &ctx, const YAML::Node &n, SceneNode &sn) {
   sn.id = str(n, "node", str(n, "id"));
   sn.type = str(n, "type", "geometry");
   sn.world = str(n, "world");
@@ -4361,10 +4437,10 @@ SceneNode parse_scene_node(Ctx &ctx, const YAML::Node &n) {
       if (!known_scene_node_key(key) || (own_source && key == "source"))
         sn.props.entries.emplace_back(key, to_value(kv.second));
     }
-  const YAML::Node kids = n["children"];
-  if (kids && kids.IsSequence())
-    for (const YAML::Node &c : kids)
-      sn.children.push_back(parse_scene_node(ctx, c));
+}
+
+// A scene node's repeat:, once its children are parsed (check_scene_repeat reads them).
+CVC_ARI_NOINLINE void scene_node_repeat(Ctx &ctx, const YAML::Node &n, SceneNode &sn) {
   if (const YAML::Node rep = n["repeat"]) {
     if (rep.IsScalar())
       sn.repeat = rep.Scalar(); // §5.4: a count, a state key or an expression
@@ -4374,6 +4450,52 @@ SceneNode parse_scene_node(Ctx &ctx, const YAML::Node &n) {
   }
   if (!sn.repeat.empty())
     check_scene_repeat(ctx, sn);
+}
+
+// One scene node, built in `sn`: its keys, then its children, each a level below it. A level of
+// the document (§6.7), and so is a use: (the prototype's node goes on a level below it): past the
+// limit it is refused, and the parse stops. Its frame holds only what it needs on the way down.
+void parse_scene_node(Ctx &ctx, const YAML::Node &n, SceneNode &sn) {
+  if (!ctx.nesting)
+    ctx.nesting = std::make_shared<Nesting>();
+  Nesting &nest = *ctx.nesting;
+  if (nest.refused)
+    return;
+  if (nest.path.size() >= nest.limit) {
+    refuse_nesting(ctx, n, /*scene=*/true);
+    return;
+  }
+  nest.path.push_back({&n, &ctx});
+  struct Leave {
+    std::vector<Nesting::Level> &path;
+    ~Leave() { path.pop_back(); }
+  } leave{nest.path};
+  if (n.IsMap() && n["use"]) { // a prototype's instance: parsed as the node it stands for
+    YAML::Node inst;
+    std::string name;
+    if (expand_use(ctx, n, inst, name)) {
+      parse_scene_node(ctx, inst, sn);
+      ctx.using_protos.erase(name);
+      return;
+    }
+  }
+  scene_node_keys(ctx, n, sn);
+  const YAML::Node kids = n["children"];
+  if (kids && kids.IsSequence()) {
+    sn.children.reserve(kids.size());
+    for (const YAML::Node &c : kids) {
+      sn.children.emplace_back();
+      parse_scene_node(ctx, c, sn.children.back());
+    }
+  }
+  if (nest.refused)
+    return;
+  scene_node_repeat(ctx, n, sn);
+}
+
+SceneNode parse_scene_node(Ctx &ctx, const YAML::Node &n) {
+  SceneNode sn;
+  parse_scene_node(ctx, n, sn);
   return sn;
 }
 
@@ -5282,6 +5404,22 @@ std::vector<DataSpec> parse_data(Ctx &ctx, const YAML::Node &n) {
   return out;
 }
 
+// §6.7 a load whose parse went past the nesting limit (a widget's or a scene node's) fails: no
+// tree, no scenes, and the error where it went past. Not inlined: load_node's frame is under the
+// whole parse, and this one's temporaries need not be.
+CVC_ARI_NOINLINE void fail_nesting(Ctx &ctx, LoadResult &r) {
+  r.root = Widget{};
+  r.scene = Scene{};
+  r.scenes.clear();
+  r.error = ctx.nesting->error;
+  r.error_source = ctx.nesting->source;
+  r.error_line = ctx.nesting->line;
+  r.error_column = ctx.nesting->column;
+  r.warnings = std::move(ctx.warnings);
+  if (ctx.schema_issues)
+    r.schema_issues = *ctx.schema_issues;
+}
+
 // Parse an already-loaded YAML node into a LoadResult, applying the meta gate. `base_dir` is
 // the document's directory (relative `import:`s resolve against it; empty = cwd for a string);
 // `self_path` is its canonical identity, seeded into the import cycle-guard so a library that
@@ -5387,14 +5525,7 @@ LoadResult load_node(cvc::app &app, const YAML::Node &doc,
   // §6.7 a document nested deeper than the loader goes fails: its parse stopped at the first
   // widget past the limit.
   if (ctx.nesting->refused) {
-    r.root = Widget{};
-    r.error = ctx.nesting->error;
-    r.error_source = ctx.nesting->source;
-    r.error_line = ctx.nesting->line;
-    r.error_column = ctx.nesting->column;
-    r.warnings = std::move(ctx.warnings);
-    if (ctx.schema_issues)
-      r.schema_issues = *ctx.schema_issues;
+    fail_nesting(ctx, r);
     return r;
   }
   // Its own name, as a mount's is its loaded document's (§5.25): the Runtime mirrors it to
@@ -5478,6 +5609,11 @@ LoadResult load_node(cvc::app &app, const YAML::Node &doc,
       r.scene.assets.push_back(a);
       for (Scene &sc : r.scenes)
         sc.assets.push_back(a);
+    }
+    // §6.7 a scene nested deeper than the loader goes fails the load too, as a widget tree does.
+    if (ctx.nesting->refused) {
+      fail_nesting(ctx, r);
+      return r;
     }
     // init: a state_exec script the host runs once at load (cvc::ariadne::run_init).
     // The loader only captures the text — it has no app and never runs the DSL.
