@@ -1,6 +1,6 @@
 # Run arisrv as a ctest checks it (src/arisrv/CMakeLists.txt): `cmake -DARISRV=<binary>
 # -DARGS=<a@@b@@...> -DSTATUS=<n> [-DEXPECT1=<regex> ...] [-DREJECT=<regex>] -P run_arisrv.cmake`.
-# The run must end with exit status STATUS, and its output (stdout, then stderr) match each EXPECTn
+# The run must end with exit status STATUS, and its output (stdout, then stderr) match each EXPECTn (n to 9)
 # and not REJECT. The output is printed either way, so the test's SKIP_REGULAR_EXPRESSION sees it.
 # ARGS separates arguments with "@@", since a ";" would split the -D value.
 string(REPLACE "@@" ";" _args "${ARGS}")
@@ -11,7 +11,7 @@ message("${_all}")
 if(NOT "${_status}" STREQUAL "${STATUS}")
   message(FATAL_ERROR "arisrv exited with '${_status}', expected ${STATUS}")
 endif()
-foreach(_n RANGE 1 3)
+foreach(_n RANGE 1 9)
   if(DEFINED EXPECT${_n} AND NOT _all MATCHES "${EXPECT${_n}}")
     message(FATAL_ERROR "arisrv's output does not match: ${EXPECT${_n}}")
   endif()

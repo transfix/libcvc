@@ -3685,9 +3685,10 @@ windows:
 // A document nested 40 levels deep, each level a unit included with args (a feed's window, view,
 // profile, card list, card, media grid, tile, ... and more), loads, and a terminal draws its
 // innermost widget. Loading recurses once a level (drawing no longer does:
-// ariadne_deep_nesting_test): at Windows' default 1 MB main-thread stack about 15 levels overflowed
-// it (0xC00000FD), so the hosts and these tests link with 8 MB there, as Linux has
-// (CMake/CvcHostStack.cmake).
+// ariadne_deep_nesting_test). It took about 100 KB of stack a level, and at Windows' default 1 MB
+// main-thread stack about 15 levels overflowed it (0xC00000FD), so the hosts and these tests link
+// with 8 MB there, as Linux has (CMake/CvcHostStack.cmake); it takes about 1 KB now, and a document
+// nests at most kMaxNesting levels (§6.7: this one is 82).
 TEST(AriadneLoader, ADocumentNested40DeepThroughIncludesLoadsAndDraws) {
   SKIP_WITHOUT_YAML();
   constexpr int kDepth = 40;
@@ -3737,6 +3738,154 @@ TEST(AriadneLoader, ADocumentNested40DeepThroughIncludesLoadsAndDraws) {
   rt.set_root(std::move(r.root));
   const std::string screen = b.render_to_string(rt, 60, 0);
   EXPECT_NE(screen.find("deepest " + std::to_string(kDepth - 1)), std::string::npos) << screen;
+}
+
+// ---- §6.7 how deep a document nests ------------------------------------------------------------
+//
+// Each widget is a level, and so is each include: and load: entry: the unit's or the fragment's
+// widgets go on a level below it. A document whose deepest widget is at kMaxNesting loads; one a
+// level deeper fails, its error at the first widget past the limit.
+
+// The 1-based number of the first line of `doc` that holds `needle` (0 when none does).
+int line_of(const std::string &doc, const std::string &needle) {
+  const std::size_t at = doc.find(needle);
+  return at == std::string::npos
+             ? 0
+             : 1 + static_cast<int>(std::count(doc.begin(), doc.begin() + at, '\n'));
+}
+
+// `inner` inside `n` groups written out inline, in flow style (each a level).
+std::string inline_groups(std::size_t n, const std::string &inner) {
+  std::string s;
+  for (std::size_t i = 0; i < n; ++i)
+    s += "{type: group, children: [";
+  s += inner;
+  for (std::size_t i = 0; i < n; ++i)
+    s += "]}";
+  return s;
+}
+
+// Units u0..u<units>: each but the last a group around an include: of the next, the last a group
+// around `groups` groups written inline around a text. The window's include: of u0 is level 1, so
+// the text is at level 2 * units + 3 + groups.
+std::string plain_nesting_doc(std::size_t units, std::size_t groups) {
+  std::string doc = "meta: { min_libcvc: \"0.0.0\" }\nwindows:\n  - include: u0\nunits:\n";
+  for (std::size_t i = 0; i < units; ++i)
+    doc += "  u" + std::to_string(i) + ": {type: group, children: [{include: u" +
+           std::to_string(i + 1) + "}]}\n";
+  doc += "  u" + std::to_string(units) + ": {type: group, children: [" +
+         inline_groups(groups, "{text: deepest}") + "]}\n";
+  return doc;
+}
+
+TEST(AriadneLoader, NestingLimitCountsPlainChildren) {
+  SKIP_WITHOUT_YAML();
+  // 30 units, then 193 groups inline: the text at 2 * 30 + 3 + 193 = 256. (One document's widgets
+  // alone cannot nest 256 deep: yaml-cpp parses at most about 500 levels of YAML, two a widget.)
+  ASSERT_EQ(kMaxNesting, 256u);
+  LoadResult r = fresh_load(plain_nesting_doc(30, 193));
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_NE(find(r.root, Kind::Text, "deepest"), nullptr);
+
+  // A group more: the text is at 257, refused where it is written in the unit.
+  const std::string doc = plain_nesting_doc(30, 194);
+  r = fresh_load(doc);
+  ASSERT_FALSE(r.ok);
+  EXPECT_TRUE(r.root.children.empty());
+  EXPECT_NE(r.error.find("a widget nested deeper than 256 levels"), std::string::npos) << r.error;
+  EXPECT_NE(r.error.find("with 31 include: and 0 load: on the way"), std::string::npos) << r.error;
+  EXPECT_EQ(r.error.find("by way of"), std::string::npos) << r.error; // all in the one document
+  const int line = line_of(doc, "  u30:");
+  const std::string row = doc.substr(doc.find("  u30:"));
+  const int column = 1 + static_cast<int>(row.find("{text: deepest}"));
+  EXPECT_EQ(r.error_source, "");
+  EXPECT_EQ(r.error_line, line);
+  EXPECT_EQ(r.error_column, column);
+  EXPECT_EQ(
+      r.error.rfind("ari: line " + std::to_string(line) + ":" + std::to_string(column) + ": ", 0),
+      0u)
+      << r.error;
+}
+
+// AriadneDeepNesting's include chain: units level0..level<n-1>, each a group around an include: of
+// the next, the last a group around a text, in a window: the text is at 2 * n + 2.
+std::string include_nesting_doc(std::size_t n) {
+  std::string doc = "meta: { min_libcvc: \"0.0.0\" }\nunits:\n";
+  for (std::size_t i = 0; i < n; ++i) {
+    doc += "  level" + std::to_string(i) + ":\n    type: group\n    children:\n";
+    if (i + 1 < n)
+      doc += "      - include: level" + std::to_string(i + 1) + "\n";
+    else
+      doc += "      - text: deepest\n";
+  }
+  return doc + "windows:\n  - window: Deep\n    children:\n      - include: level0\n";
+}
+
+TEST(AriadneLoader, NestingLimitCountsIncludes) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = fresh_load(include_nesting_doc(127)); // the text at 256
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_NE(find(r.root, Kind::Text, "deepest"), nullptr);
+
+  // 128 units: level127's group is at 257, refused at the unit's top in its template.
+  const std::string doc = include_nesting_doc(128);
+  r = fresh_load(doc);
+  ASSERT_FALSE(r.ok);
+  EXPECT_NE(r.error.find("a widget nested deeper than 256 levels"), std::string::npos) << r.error;
+  EXPECT_NE(r.error.find("with 128 include: and 0 load: on the way"), std::string::npos) << r.error;
+  EXPECT_EQ(r.error_line, line_of(doc, "  level127:") + 1); // its `type: group`
+  EXPECT_EQ(r.error_column, 5);
+}
+
+// Fragments level0.ari (the document) .. level<loads>.ari in a directory of their own: each holds
+// 15 groups written inline, around a load: of the next (the 16th level), and the last `last`
+// groups around a text. So the text is at 16 * loads + last + 1.
+struct LoadChain {
+  std::filesystem::path dir;
+  LoadChain(int loads, int last) {
+    dir = std::filesystem::temp_directory_path() /
+          ("ari_nesting_loads_" +
+           std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::filesystem::create_directories(dir);
+    for (int i = 0; i <= loads; ++i) {
+      std::ofstream out(dir / ("level" + std::to_string(i) + ".ari"));
+      out << "meta: { min_libcvc: \"0.0.0\" }\nchildren:\n  - ";
+      out << (i < loads ? inline_groups(15, "{load: level" + std::to_string(i + 1) + ".ari}")
+                        : inline_groups(last, "{text: deepest}"))
+          << "\n";
+    }
+  }
+  ~LoadChain() {
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+  }
+  std::string document() const { return (dir / "level0.ari").string(); }
+};
+
+TEST(AriadneLoader, NestingLimitCountsLoads) {
+  SKIP_WITHOUT_YAML();
+  {
+    const LoadChain chain(15, 15); // the text at 16 * 15 + 15 + 1 = 256
+    const LoadResult r = fresh_load_file(chain.document());
+    ASSERT_TRUE(r.ok) << r.error;
+    EXPECT_NE(find(r.root, Kind::Text, "deepest"), nullptr);
+  }
+  const LoadChain chain(15, 16); // at 257
+  const LoadResult r = fresh_load_file(chain.document());
+  ASSERT_FALSE(r.ok);
+  EXPECT_NE(r.error.find("a widget nested deeper than 256 levels"), std::string::npos) << r.error;
+  EXPECT_NE(r.error.find("with 0 include: and 15 load: on the way, by way of "), std::string::npos)
+      << r.error;
+  // Each load: goes into another file, so each is named, where it is written.
+  for (int i = 0; i < 15; ++i)
+    EXPECT_NE(r.error.find("level" + std::to_string(i) + ".ari:3:" + std::to_string(5 + 25 * 15) +
+                           " load: level" + std::to_string(i + 1) + ".ari"),
+              std::string::npos)
+        << r.error;
+  // The text, in the last fragment.
+  EXPECT_EQ(std::filesystem::path(r.error_source).filename().string(), "level15.ari");
+  EXPECT_EQ(r.error_line, 3);
+  EXPECT_EQ(r.error_column, 5 + 25 * 16);
 }
 
 TEST(AriadneScene, ScalarScaleIsUniform) {
@@ -8210,4 +8359,27 @@ windows:
   const MountResult scene = load_mount(app, rq);
   EXPECT_TRUE(scene.ok) << scene.error;
   EXPECT_TRUE(scene.has_scene) << "the host decides (gl.scene)";
+}
+
+// A mounts: entry's document nests at most kMaxNesting levels, counted as a document of its own's
+// are (§6.7): one a level past it is not mounted, with the nesting error, rather than mounted cut
+// short where its parse stopped.
+TEST(AriadneLoader, LoadMountRefusesADocumentNestedPastTheLimit) {
+  SKIP_WITHOUT_YAML();
+  ASSERT_EQ(kMaxNesting, 256u);
+  cvc::app app;
+  MountRequest rq;
+  rq.as = "deep";
+  rq.uri = write_temp_ari("mount_at_limit.ari", plain_nesting_doc(30, 193)); // its text at 256
+  rq.base_dir = std::filesystem::path(rq.uri).parent_path().string();
+  const MountResult at = load_mount(app, rq);
+  ASSERT_TRUE(at.ok) << at.error;
+  EXPECT_NE(find(at.wrapper, Kind::Text, "deepest"), nullptr);
+
+  rq.uri = write_temp_ari("mount_past_limit.ari", plain_nesting_doc(30, 194)); // at 257
+  const MountResult past = load_mount(app, rq);
+  EXPECT_FALSE(past.ok);
+  EXPECT_NE(past.error.find("a widget nested deeper than 256 levels"), std::string::npos)
+      << past.error;
+  EXPECT_EQ(find(past.wrapper, Kind::Text, "deepest"), nullptr);
 }

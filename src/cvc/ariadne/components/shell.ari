@@ -13,7 +13,7 @@
 # menu of this one (with Restart, Quit and Close), its tray icons join this tray, and what it posts
 # goes to this bell. Close frees it; its state stays, so opening it again resumes it.
 #
-# Every application has a budget of steps, time and memory a frame (ARIADNE.md §6.7): the
+# Every application has a budget of steps, time and memory a frame (ARIADNE.md §6.8): the
 # catalog's run as the `local` principal, any other document as `file:` or `remote:`, with a
 # tighter one. One held at its limit for a few seconds posts a notice whose click offers Allow
 # more, Quit and Restart. The Processes window lists every program by application, and each

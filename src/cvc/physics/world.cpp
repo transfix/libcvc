@@ -637,6 +637,8 @@ body_id world::impl::add_body(const body_desc &d) {
     throw cvc::physics_error("add_body: mass must be >= 0 and density > 0");
   if (!(d.linear_damping >= 0.0) || !(d.angular_damping >= 0.0))
     throw cvc::physics_error("add_body: damping must be >= 0");
+  if (!(d.displacement >= 0.0) || !std::isfinite(d.displacement))
+    throw cvc::physics_error("add_body: displacement must be finite and >= 0");
   if (d.hull && d.motion != motion_type::dynamic)
     throw cvc::physics_error("add_body: only a dynamic body has a hull");
   if (d.material >= materials.size())
@@ -759,6 +761,25 @@ void world::set_body(body_id id, const body_settings &s) {
   if (b.motion == motion_type::static_ && s.material != b.settings.material)
     ++_impl->static_version;
   b.settings = s;
+}
+
+void world::set_displacement(body_id id, double share) {
+  if (!(share >= 0.0) || !std::isfinite(share))
+    throw cvc::physics_error("set_displacement: the share must be finite and >= 0");
+  std::lock_guard<std::mutex> lock(_impl->mutex);
+  const auto it = _impl->bodies.find(id.value);
+  if (it == _impl->bodies.end())
+    throw cvc::physics_error("set_displacement: unknown or removed body id " +
+                             std::to_string(id.value));
+  if (_impl->vehicles.is_chassis(id))
+    throw cvc::physics_error("set_displacement: body " + std::to_string(id.value) +
+                             " is a vehicle's chassis; its wading sets its displacement");
+  if (it->second.motion != motion_type::dynamic)
+    return;
+  guarded([&] {
+    _impl->fields.set_displacement(id, share);
+    _impl->be->wake(id); // it may be asleep, floating where its old share held it
+  });
 }
 
 void world::add_force(body_id id, const vec3 &f) {

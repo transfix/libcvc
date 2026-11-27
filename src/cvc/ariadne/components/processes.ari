@@ -25,7 +25,7 @@
 # (processes-kill ROWS I) kills row I's process, as its Kill button does, and polls again at the
 # next step. A killed resident (an on_tick:) is started again by the Runtime, with a new pid.
 #
-# Each application with a budget (a mounts: entry's, ARIADNE.md §6.7) gets a row of its share too,
+# Each application with a budget (a mounts: entry's, ARIADNE.md §6.8) gets a row of its share too,
 # from its mirror's ariadne.apps.<key>.budget.*:
 #   ROWS.apps.count, ROWS.apps.<i>.{name, principal, steps, time, memory, held}
 # steps "used / allowed" in the last frame, time in ms the same way, memory in MB, held "yes" while
@@ -197,7 +197,7 @@ units:
       - text: ""
         bind: "{rows}.more"
         visible_when: (not (= (state-get "{rows}.more") ""))
-      # Each application's share of its budget (ARIADNE.md §6.7), while any has one.
+      # Each application's share of its budget (ARIADNE.md §6.8), while any has one.
       - type: group
         id: "{id}_apps"
         visible_when: (> (if (is-null (state-get "{rows}.apps.count")) 0 (int (state-get "{rows}.apps.count"))) 0)

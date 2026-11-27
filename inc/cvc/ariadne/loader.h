@@ -118,6 +118,12 @@ struct SchemaIssue {
   std::string text() const;
 };
 
+// §6.7 the deepest a document's widgets nest: a level for each widget, and one for each include:
+// and load: entry, across every unit and mount. A load that goes deeper fails, and says where
+// (LoadResult::error, error_source, error_line). The loader parses a level at a time on the
+// native stack, so this keeps a load inside the smallest stack a host loads on (wasm's 2 MiB).
+constexpr std::size_t kMaxNesting = 256;
+
 // What validate_string / validate_file found.
 struct ValidationResult {
   // False when nothing was checked: this build has no validator (have_jsonschema()), or the
@@ -187,6 +193,11 @@ struct LoadResult {
   std::vector<std::pair<std::string, Value>> extras;
   std::vector<std::string> warnings; // non-fatal issues (unknown types, empty binds, …)
   std::string error;                 // human-readable message when !ok
+  // Where `error` is, when the load can say (a document nested deeper than kMaxNesting: its
+  // deepest widget): the file ("" for a document given as a string), and the 1-based line and
+  // column (0 when unknown). `ari validate` reports the error there.
+  std::string error_source;
+  int error_line = 0, error_column = 0;
   // Where the document, its import:ed libraries, its load: fragments and its include:
   // expansions break the .ari schema (each also in `warnings`, as "ari: schema: " + text()).
   // Empty when this build has no validator.
@@ -223,7 +234,7 @@ struct MountRequest {
 };
 struct MountResult {
   bool ok = false;
-  std::string error; // why it was not mounted (unresolved, a parse error, a guard, min_libcvc)
+  std::string error; // why not mounted (unresolved, a parse error, a guard, min_libcvc, too deep)
   // The mount: a Group with scope `includes.<as>`, the fragment its child, carrying its init:,
   // on_tick:, functions, requires: and application name, as expand_load builds a load:'s.
   Widget wrapper;

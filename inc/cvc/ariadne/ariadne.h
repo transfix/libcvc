@@ -483,7 +483,7 @@ public:
   // and the first drain().
   cvc::state_exec::document_scope &document_scope();
 
-  // ---- on-demand mounts (docs/roadmap/ARIADNE_SHELL.md 4.2, docs/ARIADNE.md §6.7) ----
+  // ---- on-demand mounts (docs/roadmap/ARIADNE_SHELL.md 4.2, docs/ARIADNE.md §6.8) ----
   // A `mounts: <key>` widget holds one isolated mount per child of <key>. When a child with a
   // `uri` appears, the Runtime asks `loader` for its document (load_mount: the loader resolves and
   // parses it as a static load: with as: <child> would be) and mounts it at includes.<child> under

@@ -1607,7 +1607,7 @@
     },
     "mounts_site": {
       "type": "object",
-      "description": "mounts: <state key> holds one isolated mount per child of the key: <key>.<as>.uri, .args, .view, .background, .budget (docs/roadmap/ARIADNE_SHELL.md 4.2, docs/ARIADNE.md §6.7).",
+      "description": "mounts: <state key> holds one isolated mount per child of the key: <key>.<as>.uri, .args, .view, .background, .budget (docs/roadmap/ARIADNE_SHELL.md 4.2, docs/ARIADNE.md §6.8).",
       "allOf": [{"$ref": "#/$defs/widget_common"}],
       "properties": {
         "mounts": {"$ref": "#/$defs/string"},

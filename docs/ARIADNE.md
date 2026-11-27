@@ -20,7 +20,7 @@ unfamiliar; every binding, computed field, and handler in an `.ari` document is 
 3. [The per-frame (deferred-intent) contract](#3-the-per-frame-deferred-intent-contract)
 4. [Backends](#4-backends)
 5. [Documents and the `.ari` schema](#5-documents-and-the-ari-schema)
-6. [Composition: include / import / load](#6-composition-include--import--load) (§6.7 `mounts:`)
+6. [Composition: include / import / load](#6-composition-include--import--load) (§6.8 `mounts:`)
 7. [State prefix and mount scoping](#7-state-prefix-and-mount-scoping)
 8. [Channel scoping](#8-channel-scoping)
 9. [Running a document](#9-running-a-document)
@@ -1051,7 +1051,7 @@ wrote, without the program:
   value is used.
 - **When.** Like `init:`, it is written on every load and reload. A `load:`ed module's `state:` is
   written at its mount's sub-prefix just before the module's `init:` (§12), and again when the
-  module is restarted (§5.25). A `mounts:` entry's is written the same way, as it opens (§6.7).
+  module is restarted (§5.25). A `mounts:` entry's is written the same way, as it opens (§6.8).
 
 `init`, `on_tick`, `on_key`, `on_pointer`, and `on_signal` are scalar `state_exec` strings
 the loader only *captures*. The host wires them:
@@ -2090,8 +2090,11 @@ scene:
   `fps`, `driving`, `policy`, `city`, `ready`, `status` (a line saying all of it), `vehicle_length`,
   `span`, `wall_height`, `bounds` as a camera `frame` request, `center.*`), `targets.count` and each
   target's `color`, and `follow_pose.*`. `bench` 1 prints the frame rate on stderr every 120 frames.
-- **The layers** (`layer:`): `agents` (a vehicle model, `look: humvee` or a mesh file, else arrows;
-  with `lod:` on, four quadric-decimated rungs of it picked per vehicle by its size on screen: a rung
+- **The layers** (`layer:`): `agents` (a vehicle model, `look: humvee`, a model's name or a mesh
+  file, else arrows: the look a world vehicle would have, `vehicle_look_named` and
+  `vehicle_look_mesh_of`, so `humvee` is the Humvee in parts, its wheels at rest in a tyre's dark,
+  where vehicle-humvee has them, else `Humvee.glb`; with `lod:` on, four quadric-decimated rungs of
+  it, each colour role decimated on its own, picked per vehicle by its size on screen: a rung
   takes vehicles at least `lod_px: [24, 8, 3]` pixels in radius, the finest at most `near_cap` (10),
   and off-screen vehicles are culled), `flags`, `goals` (a beacon over each goal, sunk once it is
   reached), `trails` (`segments`, `every` frames, `width`), `path` (the followed vehicle's trail),
@@ -2393,19 +2396,26 @@ scene:
     `entity_spec::plant`), as a gym's agents do. A kinematic box meets no building in the
     physics world, so its obstacle contacts are its footprint on the grid's blocked cells, and
     two kinematic boxes touch when they overlap.
-  - **Looks.** With no `look:`, a humvee is the real Humvee, the vehicle-humvee package's
-    `Humvee.glb`, when it is installed (`find_vehicle_model`: beside `$CVC_NAV_BUNDLE`, else in
+  - **Looks.** With no `look:`, a humvee is the real Humvee from the vehicle-humvee package, with
+    its texture, when it is installed (`find_vehicle_model`: beside `$CVC_NAV_BUNDLE`, else in
     `share/cvc-scenes/shared` or `share/cvc-scenes/*/` under `$CVC_PREFIX`, `$CVCPKG_PREFIX`,
-    `$CONDA_PREFIX` or the program's prefix), with its texture. It is oriented and scaled to the
-    chassis as the nav demos do it, and stands on the ground under it. Anything else, or a humvee
-    without the package, is its chassis box in the entity's two colours, with a cabin and wheels.
-    `look: { model: humvee }` names a model, `file:` a mesh beside the document and `asset:` a
-    document asset; `fit: true` orients and scales a file as a model is; `scale:`, `yaw:` and
-    `z:` place it. `look: { data: NAME, file: FILE }` takes FILE out of the package of the
+    `$CONDA_PREFIX` or the program's prefix). It is the Humvee in parts, its wheels rolling and
+    its front pair steering (a parted look, below: the package's `humvee/chassis.glb`,
+    `humvee/wheel.glb` and `humvee/rig.json`, from 1.0.0+cvc.5), when the three are installed
+    together; else the one-piece `Humvee.glb`, oriented and scaled to the chassis as the nav demos
+    do it, its wheels still. Either stands on the ground under the chassis. Anything else, or a
+    humvee without the package, is its chassis box in the entity's two colours, with a cabin and
+    wheels. `look: { model: humvee }` names a model, `file:` a mesh beside the document and
+    `asset:` a document asset; `fit: true` orients and scales a file as a model is; `scale:`,
+    `yaw:` and `z:` place it. `model: humvee` is the Humvee in parts too, unless it has `scale:`,
+    `yaw:` or `z:`, which only the one-piece model takes; `file: Humvee.glb` is the
+    one piece always. `look: { data: NAME, file: FILE }` takes FILE out of the package of the
     document's `data:` entry NAME (§5.17), so a model comes from cvcpkg rather than with the
     document, e.g. `data: { humvee: { uri: cvcpkg://cy-pca/vehicle-humvee, path:
-    share/cvc-scenes/shared, load: lazy } }` with `look: { data: humvee, file: Humvee.glb }`. It is
-    fitted unless `fit: false`. The resolved look carries the entry's source and path (`uri`,
+    share/cvc-scenes/shared, load: lazy } }` with `look: { data: humvee, file: Humvee.glb }` (the
+    one piece) or `look: { data: humvee, chassis: humvee/chassis.glb, wheel: humvee/wheel.glb,
+    rig: humvee/rig.json }` (in parts, as `world_lab.ari` draws it). It is fitted unless
+    `fit: false`. The resolved look carries the entry's source and path (`uri`,
     `subpath`), so it is whole without the document: a client fetches the same package. The view
     asks the app's data store for the package (`vehicle_model_state`, `vehicle_view.h`) and draws
     the box while it loads, then the model. When the package cannot load (the host's network is
@@ -2440,9 +2450,18 @@ scene:
       for glTF's own: +y up, +z forward, +x left). The wheel mesh is the left wheel, its axle along
       y and its outside toward +y; it is taken about its middle (its bounds' centre), wherever its
       file has it. Files sit beside the document, else where the vehicle models are installed
-      (`find_vehicle_model`: `rover/chassis.glb` under `share/cvc-scenes/*/`), so a package such as
-      vehicle-humvee can ship them; with `data:`, they are files in that entry's package, loaded as
-      a one-piece data look is (the box until it loads).
+      (`find_vehicle_model`: `rover/chassis.glb` under `share/cvc-scenes/*/`), so a package can
+      ship them; with `data:`, they are files in that entry's package, loaded as a one-piece data
+      look is (the box until it loads).
+    - **The Humvee in parts.** vehicle-humvee (1.0.0+cvc.5 on) ships its Humvee so beside
+      `Humvee.glb`: `share/cvc-scenes/shared/humvee/chassis.glb` (the chassis without its wheels),
+      `humvee/wheel.glb` (the front left wheel about its hub) and `humvee/rig.json` (its four hubs
+      and radius; it steers the front pair, `mirror: turn`), all in the rig's frame, z up, made by
+      graphics-assets' `tools/split_wheels.py`. A humvee with no `look:`, or `look: { model:
+      humvee }`, is drawn so when the three are installed in one directory (`resolve_vehicle_looks`;
+      an older package has no `humvee/`, so it is the one piece). Its resolved look keeps the
+      one-piece model's file as well (`vehicle_look::path`): a relay passes an entity's look on as
+      its kind and file alone (`room_entities.h`), so a room's clients draw the one piece.
     - **The rig** (`cvc::ariadne::vehicle_rig`), inline or a file of a map, YAML or JSON:
       `radius:` (or `wheel: { radius: }`), `hubs:` (a list of `[x, y, z]`, or a map whose `xyz:`
       lists them and whose `order:` names them, so `steer:` may name them), `steer:` (by index or
@@ -3715,7 +3734,10 @@ How each backend does it:
   line's width, so a side panel with many tabs stays beside its views. So a phone's window, a
   little over 400 px wide, has no horizontal scroll bar for a document laid out for 600.
 - **The terminal backends** lay a window with no size out at its content's size every frame,
-  and cascade new windows instead of flowing them. A window that would run off the screen stops at
+  and cascade new windows instead of flowing them. That size is the content's natural one: content
+  that stretches to the line's end (a clickable group's card, a message field) takes the window's
+  width but doesn't widen it to the screen's edge, as under ImGui (FTXUI: libcvc 4.0.10; before
+  it, such content widened the window to the edge). A window that would run off the screen stops at
   the screen's edge, and a window whose content is larger than it is (or than its `size:`) gets a
   scroll bar. Its body scrolls to keep the focused widget in view. The mouse wheel over it scrolls
   it too, 3 rows a notch, from where it shows, and stops with its last row at the bottom (a feed in
@@ -3767,10 +3789,14 @@ that use of the unit.
   the one persisted (§11.4). `resizable: false` keeps it at its `size:` (or a persisted size):
   - ImGui: no edge or corner drags it; a drag there moves the window, as a drag in its body does.
   - tvision: its frame has no resize corner, and Ctrl-F5 only moves it.
-  - FTXUI draws no resize handle on any window, so the key changes nothing there.
+  - FTXUI (libcvc 4.0.10): a press on a window's left, right or bottom edge, or a bottom corner,
+    and a drag resize it; the title bar moves it. The other edges stay put, and the window keeps
+    to its `min:` and `max:` and to the screen. A press there without a drag changes nothing.
+    `resizable: false`: a drag on its edge does nothing. FTXUI draws no handle: the frame is it.
+    `ariadne_ftxui_test`'s `AWindowResizesByAnEdgeOrACorner` drags each.
 - A window with no `size:` fits its content (§5.8). Under ImGui that is every frame, so the user
-  can't resize it either way. On the tvision desktop the user may resize one, and from then on it
-  keeps that size; `resizable: false` stops that as well.
+  can't resize it either way. On the tvision desktop and under FTXUI the user may resize one, and
+  from then on it keeps that size; `resizable: false` stops that as well.
 - A maximize still fills a window that isn't resizable, and a restore puts it back at its size.
 
 **Maximizing.**
@@ -3783,8 +3809,8 @@ that use of the unit.
   again:
   - Dragged by its title bar, the window comes back to the size it had, under the pointer, held
     where along the title bar it was grabbed.
-  - Resized by an edge or a corner (ImGui), it keeps the size it was given. That size is now the
-    window's own, so a later maximize goes back to it.
+  - Resized by an edge or a corner (ImGui, FTXUI), it keeps the size it was given, where it was
+    drawn. That size is now the window's own, so a later maximize goes back to it.
 - **The state** is `tree.<id>.maximized`, `1` or `0`. A document may write it to maximize a window
   or put it back.
 - **How it starts:** a window's `maximized:` is the maximize it has while that key holds nothing:
@@ -4516,7 +4542,7 @@ scene:
 The uri may come from the command line: `uri: { arg: <name> }` takes the document's argument
 `<name>` (§5.6) once it is parsed, a relative path relative to the working directory. Not given
 and with no default, the dataset is not loaded, with a warning. The shell's catalog is one
-(`data: { catalog: { uri: { arg: catalog }, as: json } }`, §6.7).
+(`data: { catalog: { uri: { arg: catalog }, as: json } }`, §6.8).
 
 `https` and `cvcpkg` need the host's network: `--net-allow https://cvcpkg.org` (or
 `AriRuntime.enable_net_allow([...])` in Python). A document that loads from the network lists
@@ -6165,7 +6191,9 @@ fetch:
 token substitution from the `include:`'s `args:`. Units are collected before the body,
 so instantiation is order-free. A name-keyed expansion-stack guard (in `expand_include`,
 [`loader.cpp`](../src/cvc/ariadne/loader.cpp)) refuses recursion and fan-out; an
-unknown unit warns and renders empty. `include:` is the static counterpart of `repeat:`.
+unknown unit warns and renders empty. The `include:` entry is a level of the document's nesting,
+and the unit's widget goes on a level below it (§6.7). `include:` is the static counterpart of
+`repeat:`.
 
 A unit may declare its parameters with defaults in an `args:` map beside its widget keys; the
 include site's `args:` override them, and a `{token}` with neither stays literal. That is how a
@@ -6245,7 +6273,8 @@ fragment as an **isolated module** in a fresh sub-context (its `units:` are its 
 based at its own directory. Guards: a resolved-URI cycle set, a per-chain depth cap
 `kMaxMountDepth = 32`, and a document-wide aggregate cap `kMaxMounts = 256` (checked in
 `expand_load`, [`loader.cpp`](../src/cvc/ariadne/loader.cpp)) that catches the `K^depth` fan-out
-a depth cap alone would miss. The mount id is the explicit `as:`, else it is derived from
+a depth cap alone would miss. The `load:` entry is a level of the document's nesting, and the
+fragment's widgets go on below it (§6.7). The mount id is the explicit `as:`, else it is derived from
 the URI basename, sanitized to a single state segment, with sibling duplicates
 disambiguated `_2` / `_3`. A mounted module is sandboxed to its own state sub-prefix
 (§7) and reaches the parent only through explicitly granted `link:` holes, and calls only the
@@ -6271,7 +6300,7 @@ bar, with Restart and Quit, and its tray icons join the outer tray (§5.25). The
 by the fragment's `meta.name` (`Widget::app_name`), else by the mount id.
 
 To mount documents while the document runs, picked by the user or a program, use a `mounts:`
-slot (§6.7).
+slot (§6.8).
 
 ### 6.4 The URI resolver
 
@@ -6330,8 +6359,8 @@ copy (a libcvc checkout's `src/cvc/ariadne`). Each binds state keys a C++ object
 | `volume_grid` (+ `volume_grid_views`, `volume_grid_tools`) | a `volume_grid` node (§5.4; args `node`, `title`, `id`, `view_size`, `layout`): VolumeGridRover's slice views under an XY / XZ / ZY switch beside a 3D view (`layout: switch`, the default) or all four in a 2 x 2 grid (`layout: quad`), the tool, and the Probe, Point classes, Contours, Transfer function and Segmentation tabs. `volume_grid_tools`' tabs end in `slot: tabs`; `volume_grid_contours_tab` is the Contours tab alone (objects, the curve being drawn, edits, Tile with its progress and Stop, Save and Load through the app) |
 | `volume_grid_segmentation` (+ `volume_grid_segmentation_tab`) | the Segmentation tab in a window of its own (args `node`, `title`, `id`; the `_tab` unit is the controls alone, a group): thresholds, gamma, automatic seeds, Segment and Stop with a progress bar, the result's classes, how labels and surfaces draw, Save classes and Save labels |
 | `chat`, `chat_panel` | a room's chat and direct messages through the chat verbs (args `id`, `title`, `room`); its functions come with the import: call `(chat-ui-step ID ROOM)` from `on_tick` (§5.16) |
-| `shell` | not a unit but a document of its own: the Ariadne shell, which runs a catalog of documents as applications on demand (§6.7). `ari run cvc://components/shell.ari --catalog shell_apps.json [--open SLUG,...]` |
-| `processes` | the document's running DSL programs, a row each ([ARIADNE_SHELL.md](roadmap/ARIADNE_SHELL.md) 4.10): the application each belongs to (its `(ps)` scope looked up in `ariadne.apps`, §5.25; the document's own rows by its `meta.name`), pid, name, status, steps, what it waits on, memory, and a Kill button (args `id`, `title`, `rows`). Call `(processes-step ROWS)` from `on_tick`: it polls `(ps)` and `(inspect)` twice a second (`ROWS.every`), at most `ROWS.max` rows (50), the rest counted in `ROWS.more`, and each `mounts:` application's share of its budget (§6.7) in `ROWS.apps`. It lists only its own Runtime's processes (the document's and the documents it loads), in execution group 0 too, where it once listed every document's: a program with an owner sees only its owner's processes (§2.5) |
+| `shell` | not a unit but a document of its own: the Ariadne shell, which runs a catalog of documents as applications on demand (§6.8). `ari run cvc://components/shell.ari --catalog shell_apps.json [--open SLUG,...]` |
+| `processes` | the document's running DSL programs, a row each ([ARIADNE_SHELL.md](roadmap/ARIADNE_SHELL.md) 4.10): the application each belongs to (its `(ps)` scope looked up in `ariadne.apps`, §5.25; the document's own rows by its `meta.name`), pid, name, status, steps, what it waits on, memory, and a Kill button (args `id`, `title`, `rows`). Call `(processes-step ROWS)` from `on_tick`: it polls `(ps)` and `(inspect)` twice a second (`ROWS.every`), at most `ROWS.max` rows (50), the rest counted in `ROWS.more`, and each `mounts:` application's share of its budget (§6.8) in `ROWS.apps`. It lists only its own Runtime's processes (the document's and the documents it loads), in execution group 0 too, where it once listed every document's: a program with an owner sees only its owner's processes (§2.5) |
 | `room_users`, `room_users_compact` | everyone in a room from `room-roster` (bridged users in rows of their own, with no media), with local cam / mic / volume and a message button (args `id`, `title`, `rows`, `chat`, `self`); call `(room-users-step ROWS ROOM CHAT)` from `on_tick` |
 | `conference`, `conference_avatar`, `conference_peers` | the conference app's windows (`conference.ari`, which imports `room_users` and `chat`): My Camera (your name, camera, mic and their pickers), Avatar (Colour, Wear, the Body where the world offers more than one, the energy budget and ledger), and a camera window per other participant (arg `rows`). Call `(conference-step)` from `on_tick` for the whole app, or its pieces for some of it: `conference-join`, `conference-media-open`, `conference-name-step`, `conference-devices-step`, `conference-avatar-step`. The baseline conference app (`examples/ariadne/documents/conference_roster.ari`) is these placed in a document with its menus; another app adds its own windows beside them |
 | `http_cache` | the app's HTTP cache (§10.3): what it holds of its budget, its hits, misses, revalidations and evictions, the budget and the largest entry in MiB, how long a reply that says nothing stays fresh, on / off, and Clear (the bare action `http_cache.clear`). It binds app-root keys (`/sys.net.http_cache.*`), so it shows the same cache in any document; arigl puts it in every one (*Settings > Network cache...*) |
@@ -6471,7 +6500,44 @@ root:
 `LoadResult::functions` lists the document's functions, and `LoadResult::root.functions` holds the
 same as a `FunctionScope`. A mount's are on its wrapper widget.
 
-### 6.7 `mounts:` — documents mounted on demand
+### 6.7 How deep a document nests
+
+A document's widgets nest at most `kMaxNesting` levels deep, 256
+([`loader.h`](../inc/cvc/ariadne/loader.h)). Each widget is a level, and so is each `include:`
+and `load:` entry: the unit's widget, or the fragment's widgets, go on a level below the entry.
+A context menu's items and a tab bar's tabs are a level below their widget, as children are. The
+count runs through the whole document, across every unit and every mounted fragment.
+
+A load that would go deeper fails (`LoadResult::ok` is false) and builds no tree. The error is at
+the first widget past the limit, where it is written: for a widget in an `include:` expansion,
+the same place in the unit, in the unit's own file. It counts the `include:` and `load:` entries
+on the way down, and names each one that goes into another file:
+
+```
+ari: lib.ari:510:9: a widget nested deeper than 256 levels, the most a document may (each widget,
+include: and load: a level; docs/ARIADNE.md §6.7), with 127 include: and 1 load: on the way, by
+way of main.ari:5:9 load: frag.ari, frag.ari:4:5 include: level0 (in lib.ari)
+```
+
+`LoadResult::error_source`, `error_line` and `error_column` hold that place, and `ari validate`
+reports the error there (§14.3). A JSON schema cannot count across files, so the loader does it.
+
+The loader parses a document a level at a time on the native stack, and the limit keeps a load
+inside the smallest stack a host loads on: wasm's 2 MiB (`-sSTACK_SIZE` for ari's browser build,
+arigl web, arigl-web, cyprty and the examples). In MSVC Release the parse takes about 0.9 KB of
+stack a level through `include:`s, 1.1 KB a level written inline and about 2 KB for each `load:`,
+so a document at the limit loads, and draws, on 2 MiB (`ariadne_deep_nesting_test` checks that),
+where the parse alone would go about 2,300 levels deep. The shipped documents nest at most 11
+levels. Drawing has no limit of its own: the per-frame walk keeps its place on the heap.
+
+Two parts of a load go down a level of YAML at a time rather than a widget, and yaml-cpp bounds
+them: it parses at most about 500 levels of YAML, which is about 246 widgets written inline (two
+levels of YAML each). They are yaml-cpp's own parse, about 0.9 KB a level, and the schema check
+(§14.2), about 2.8 KB a level. Checking a document that deep takes 1.25 to 1.5 MiB in MSVC
+Release, and checking a fragment that deep, loaded at the bottom of a 254-level chain, 1.5 to
+1.75 MiB.
+
+### 6.8 `mounts:` — documents mounted on demand
 
 A `load:` is fixed when its document is parsed: its fragment loads at start and stays. A `mounts:`
 slot mounts documents while the document runs, one per child of a state key, loaded when the child
@@ -6503,7 +6569,9 @@ with a digit). `view`, `background`, `grants` and `argv` are SH3, SH6 and SH7's.
   document. The loader resolves and parses it as `load: <uri>` with `as: <id>` and its `args:`
   would be (`load_mount`, [`loader.h`](../inc/cvc/ariadne/loader.h): the same resolver,
   component paths and guards, and the `min_libcvc` gate), and keeps nothing: the Runtime keeps
-  what it mounts. `AppRuntime` gives its Runtime that loader (`Runtime::set_mount_loader`). The
+  what it mounts. Its widgets nest at most 256 levels, counted from its own top as a document's
+  are (§6.7); one that nests deeper is refused with that error. `AppRuntime` gives its Runtime
+  that loader (`Runtime::set_mount_loader`). The
   mount is at `includes.<id>` under the slot's scope, exactly as a static `load:` would be: its
   `state:` is written (§5.3) and its `init:` runs as it opens, its `on_tick:` starts, whether or
   not its windows show. Each mount is
@@ -7204,8 +7272,9 @@ and runs headless too. [CARS.md](CARS.md) describes it.
 `nav.py` finds Austin with `pycvc_gl.scenes.find_scene()` (`$CVC_NAV_BUNDLE`, else
 `<prefix>/share/cvc-scenes/austin_south`: `cvcpkg install scene-austin-south-small
 vehicle-humvee`) and the Humvee with `find_vehicle_model()`. `pycvc_gl.vehicle.VehicleModel`
-makes a glTF vehicle +X forward, +Z up and true to scale (as the C++ demos'
-`load_vehicle_template` does), and `seat_transform` / `body_transform` place it from a heading or
+makes a glTF vehicle +X forward, +Z up and true to scale with cvcGL's own fit
+(`pycvc_gl.fit_vehicle_geometry`, as a world vehicle's model look is fitted), and
+`seat_transform` / `body_transform` place it from a heading or
 a physics body's pose. Its planning grid is `pycvc.nav_world_rasterize(city.world(), rows, cols,
 ...)`, cvc::nav's rasterizer (no VTK), which also gives the terrain's height at each sample
 (`pycvc.nav_world_grid(world, cell)` is the same grid walled at its edge, with its signed distance
@@ -7820,7 +7889,7 @@ on_tick: |
   world:
     avatars:
       archetypes:                  # every avatar has the first, for now
-        person: { body: { mass: 70, width: 0.5, height: 1.7 }, controllers: [walker@1] }
+        person: { body: { mass: 70, width: 0.5, height: 1.7, density: 985 }, controllers: [walker@1] }
       policy:
         max_speed: 4.0             # the veto: the fastest an intent may ask for (m/s)
         allow_vertical: false
@@ -9560,6 +9629,17 @@ doc.ari: warning: ari: slider_int 'Speed' has no bind: — it will not read or w
 - `--strict`: a loader warning fails the document too.
 - `--json`: the findings as JSON, an entry a document with its schema issues (source, line,
   column, context, pointer, message), its load error and its warnings.
+
+A load error the loader can place is reported there, as the schema's are. A document nested
+deeper than the loader goes (§6.7) is one, at its first widget past the limit, which may be in a
+library or a fragment:
+
+```
+deep.ari:514:9: error: a widget nested deeper than 256 levels, the most a document may (each
+widget, include: and load: a level; docs/ARIADNE.md §6.7), with 128 include: and 0 load: on the way
+```
+
+In `--json` its place is `load_error_source`, `load_error_line` and `load_error_column`.
 
 The load is the host's: `ari validate` checks against `ari`'s own registrations (its blocks,
 the `cvc://` component library, `--component-path`). A document for arigl may name widget types

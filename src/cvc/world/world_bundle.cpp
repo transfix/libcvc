@@ -1026,6 +1026,17 @@ cvc::geometry placed_mesh(const geometry_item &it) {
 
 } // namespace
 
+int world_ground_size_for(const generated_world &w) {
+  const double span = std::max(w.grid.max_x - w.grid.min_x, w.grid.max_y - w.grid.min_y);
+  if (!(span > 0.0) || !std::isfinite(span))
+    return world_ground_size;
+  int size = 256;
+  // paint_surface's texel: the extent over size - 1 steps
+  while (size < world_ground_size && span / (size - 1) > world_ground_texel_m)
+    size *= 2;
+  return size;
+}
+
 city_bundle_files generated_world_bundle(app &ctx, const generated_world &w,
                                          const std::string &generator_version,
                                          const world_ground *ground) {
@@ -1053,8 +1064,8 @@ city_bundle_files generated_world_bundle(app &ctx, const generated_world &w,
   info.extra["streets.json"] = bytes_of(streets_json(w));
   world_ground painted;
   if ((!ground || ground->empty()) && !w.raster.klass.empty()) {
-    painted.width = painted.height = world_ground_size;
-    painted.rgb = paint_surface(w, surface_color::material, world_ground_size);
+    painted.width = painted.height = world_ground_size_for(w);
+    painted.rgb = paint_surface(w, surface_color::material, painted.width);
     ground = &painted;
   }
   if (ground && !ground->empty())

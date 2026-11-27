@@ -27,14 +27,19 @@
 //      while it loads, then ready;
 //   4. the pixels, offscreen: from the side, a front wheel (a paddle, so its spin shows) stands
 //      upright after a quarter turn; from above, it turns with the steer while the rear one keeps
-//      still.
-// The dynamics need Jolt and YAML; the pixels skip (rc 0) where nothing rasterises, unless
-// CVC_REQUIRE_RENDER=1. Synthetic meshes only.
+//      still;
+//   5. the default Humvee: a `vehicle: humvee` archetype with no look: is drawn as its chassis and
+//      four wheels where vehicle-humvee's humvee/ parts are installed (a prefix of the fixture's
+//      meshes as .glb files), the vehicle_preview too; as the one-piece Humvee.glb where only that
+//      is; as its box where neither is.
+// The dynamics need Jolt and YAML (5: and a .glb writer and reader); the pixels skip (rc 0) where
+// nothing rasterises, unless CVC_REQUIRE_RENDER=1. Synthetic meshes only.
 #include "streaming_test_util.h"
 
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cvc/ariadne/data.h>
 #include <cvc/ariadne/loader.h>
 #include <cvc/ariadne/scene_world.h>
@@ -594,6 +599,188 @@ void test_pixels(const fixture &f) {
   check(r0.w() == r1.w() && r0.h() == r1.h() && r0.w() > 0, "the rear one does not steer");
 }
 
+// 5. The default Humvee, in parts where they are installed.
+
+// An environment variable set for a scope, and put back after (unset when it was).
+struct env_for {
+  std::string name, old;
+  bool had = false;
+  env_for(const char *n, const std::string &value) : name(n) {
+    if (const char *v = std::getenv(n)) {
+      had = true;
+      old = v;
+    }
+    set(value);
+  }
+  ~env_for() { set(had ? old : std::string()); }
+  env_for(const env_for &) = delete;
+  env_for &operator=(const env_for &) = delete;
+  void set(const std::string &v) {
+#ifdef _WIN32
+    _putenv_s(name.c_str(), v.c_str());
+#else
+    if (v.empty())
+      unsetenv(name.c_str());
+    else
+      setenv(name.c_str(), v.c_str(), 1);
+#endif
+  }
+};
+
+// A model file (the fixture's OBJ) written again as a .glb at `to`; false, and why, when it will
+// not.
+bool write_glb(cvc::app &app, const std::string &from, const fs::path &to) {
+  try {
+    const cvc::model m = cvc::read_model(app, from);
+    std::ofstream(to, std::ios::binary) << cvc::write_model_to_memory(app, m, ".glb");
+    return fs::file_size(to) > 0;
+  } catch (const std::exception &e) {
+    std::printf("  %s as %s: %s\n", from.c_str(), to.string().c_str(), e.what());
+    return false;
+  }
+}
+
+// What a `vehicle: humvee` archetype with no look: is drawn as, spawned once as a `pose` entity.
+struct drawn_humvee {
+  cvc::ariadne::vehicle_look look;                  // as WorldVehicles resolved it
+  bool chassis = false, mesh = false, body = false; // vehicle_1_chassis, _mesh (one piece), _body
+  std::size_t wheels = 0;                           // a parted look's drawn wheels
+  bool preview_chassis = false;                     // the vehicle_preview's parted chassis
+};
+
+drawn_humvee draw_default_humvee() {
+  const std::string doc = R"(
+meta: { min_libcvc: "0.0.0" }
+world:
+  vehicles:
+    archetypes:
+      humvee: { vehicle: humvee, controllers: [pose] }
+scene:
+  physics: {}
+  world: { source: square, cell: 2 }
+  nodes:
+    - node: square
+      world: square
+      source: { box: { size: [120, 120, 1] } }
+      transform: { position: [0, 0, -0.5] }
+      body: static
+    - node: shown
+      type: vehicle_preview
+      spin: 0
+      transform: { position: [0, 40, 0] }
+)";
+  drawn_humvee d;
+  cvc::app app;
+  cvc::ariadne::register_world_block(app);
+  ari::register_vehicle_preview_node(app);
+  cvc::ariadne::LoadResult r = cvc::ariadne::load_string(app, doc);
+  check(r.ok, "the document loads", r.error);
+  if (!r.ok)
+    return d;
+  cvc::ariadne::world_rules rules = cvc::ariadne::default_world_rules();
+  const std::string e = cvc::ariadne::parse_world_block(*cvc::ariadne::find_world_block(r), rules);
+  check(e.empty(), "its world: block parses", e);
+  check(rules.vehicles.size() == 1 && rules.vehicles[0].look.kind.empty(), "a humvee, no look:");
+  r.scene.vehicles = rules.vehicles; // as the loader leaves it: WorldVehicles resolves the look
+  cvc::gl::SceneGraph sg(app);
+  std::vector<std::string> warnings;
+  ari::RealizedScene out = ari::realize_scene(sg, r.scene, "", &warnings);
+  check(out.world && out.world->vehicles(), "the scene has a world with vehicles");
+  if (!out.world || !out.world->vehicles())
+    return d;
+  cvc::ariadne::WorldVehicles &v = *out.world->vehicles();
+  if (!v.archetypes().empty())
+    d.look = v.archetypes().front().look;
+  cvc::state &st = cvc::state::instance(app);
+  st("vehicles.spawn.controller").value("pose");
+  st("vehicles.spawn.request").value("1");
+  for (int i = 0; i < 6; ++i) {
+    if (i >= 1) {
+      st("entities.1.pose.x").value(std::to_string(-20.0 + i / 10.0));
+      st("entities.1.pose.y").value("0");
+    }
+    ari::tick_scene(out, nullptr, 1.0 / 60.0);
+  }
+  for (const std::string &w : warnings)
+    std::printf("  warning: %s\n", w.c_str());
+  check(v.size() == 1, "one entity");
+  if (const std::shared_ptr<cvc::gl::GraphicsNode> node = sg.getGraphics("vehicle_1")) {
+    d.chassis = node->findChildByName("vehicle_1_chassis") != nullptr;
+    d.mesh = node->findChildByName("vehicle_1_mesh") != nullptr;
+    d.body = node->findChildByName("vehicle_1_body") != nullptr;
+  }
+  if (const auto w = out.vehicle_wheels.find("vehicle_1"); w != out.vehicle_wheels.end())
+    d.wheels = w->second.size();
+  if (const std::shared_ptr<cvc::gl::GraphicsNode> shown = sg.getGraphics("shown__vehicle"))
+    d.preview_chassis = shown->findChildByName("shown__vehicle_chassis") != nullptr;
+  return d;
+}
+
+void test_default_humvee(const fixture &f) {
+  std::printf("test_default_humvee\n");
+  if (!cvc::ariadne::have_yaml() || !cvc::physics::backend_available(cvc::physics::backend::jolt)) {
+    std::printf("  skipped: no YAML or no Jolt in this build\n");
+    return;
+  }
+  if (!cvc::can_write_model_to_memory(".glb") || !cvc::can_read_model_from_memory(".glb")) {
+    std::printf("  skipped: no .glb writer or reader in this build\n");
+    return;
+  }
+  // A prefix laid out as vehicle-humvee 1.0.0+cvc.5 installs it: Humvee.glb, and beside it
+  // humvee/chassis.glb, humvee/wheel.glb and humvee/rig.json (the fixture's meshes and rig).
+  std::error_code ec;
+  const fs::path prefix = f.dir / "humvee_prefix";
+  const fs::path shared = prefix / "share" / "cvc-scenes" / "shared";
+  fs::create_directories(shared / "humvee", ec);
+  cvc::app app;
+  const bool glb = write_glb(app, f.chassis, shared / "Humvee.glb") &&
+                   write_glb(app, f.chassis, shared / "humvee" / "chassis.glb") &&
+                   write_glb(app, f.wheel, shared / "humvee" / "wheel.glb");
+  check(glb, "the fixture's meshes written as .glb files");
+  fs::copy_file(f.rig, shared / "humvee" / "rig.json", fs::copy_options::overwrite_existing, ec);
+  if (!glb)
+    return;
+  const env_for bundle("CVC_NAV_BUNDLE", ""), at("CVC_PREFIX", prefix.string()),
+      cvcpkg("CVCPKG_PREFIX", ""), conda("CONDA_PREFIX", "");
+
+  // The parts installed: its chassis and four wheels, which turn; the one piece kept beside.
+  const drawn_humvee parts = draw_default_humvee();
+  check(parts.look.parted() && parts.look.kind == "file" &&
+            fs::path(parts.look.chassis) == shared / "humvee" / "chassis.glb" &&
+            fs::path(parts.look.wheel) == shared / "humvee" / "wheel.glb" &&
+            fs::path(parts.look.rig_file) == shared / "humvee" / "rig.json",
+        "with the parts installed, the look is the Humvee in parts", parts.look.chassis);
+  check(fs::path(parts.look.path) == shared / "Humvee.glb", "the one piece kept in its path",
+        parts.look.path);
+  check(parts.chassis, "drawn as vehicle_1_chassis");
+  check(parts.wheels == 4, "and four wheels", std::to_string(parts.wheels));
+  check(!parts.mesh && !parts.body, "not the one piece, not the box");
+  check(parts.preview_chassis, "the vehicle_preview draws the parts too");
+
+  // Only the one piece (an older package, no humvee/): Humvee.glb, its wheels in it.
+  fs::remove_all(shared / "humvee", ec);
+  if (!cvc::ariadne::find_vehicle_model("humvee/chassis.glb").empty()) {
+    std::printf("  one piece: skipped (this program's own prefix has the parts)\n");
+    return;
+  }
+  const drawn_humvee one = draw_default_humvee();
+  check(!one.look.parted() && one.look.kind == "file" &&
+            fs::path(one.look.path) == shared / "Humvee.glb",
+        "without the parts, the look is the one-piece Humvee.glb", one.look.path);
+  check(one.mesh, "drawn as vehicle_1_mesh");
+  check(!one.chassis && one.wheels == 0 && !one.body, "no parts, no box");
+
+  // Neither: the box.
+  fs::remove(shared / "Humvee.glb", ec);
+  if (!cvc::ariadne::find_vehicle_model("humvee").empty()) {
+    std::printf("  box: skipped (this program's own prefix has Humvee.glb)\n");
+    return;
+  }
+  const drawn_humvee box = draw_default_humvee();
+  check(box.look.kind == "box", "with neither, the box look", box.look.kind);
+  check(box.body && !box.mesh && !box.chassis, "drawn as its box");
+}
+
 } // namespace
 
 int main() {
@@ -604,6 +791,7 @@ int main() {
   test_poses_from_a_plant();
   test_parts_from_a_package(f);
   test_pixels(f);
+  test_default_humvee(f);
   fs::remove_all(f.dir, ec);
   return cvcgl_test::finish("cvcgl_ariadne_wheeled_look");
 }

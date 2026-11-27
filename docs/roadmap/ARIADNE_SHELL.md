@@ -170,7 +170,7 @@ shell.apps.<as>.budget.*     its budget, when the user changed the default (4.11
   removes it. `(app-view AS window|main)` moves its scene; `main` writes the `front:` key. They
   act on the document that calls them: a mounted application cannot open others unless the shell
   grants it the functions.
-- **As built in SH1** (ARIADNE.md §6.7). `Kind::Mounts` reads `mounts:`, `allow:` and a third
+- **As built in SH1** (ARIADNE.md §6.8). `Kind::Mounts` reads `mounts:`, `allow:` and a third
   key, `catalog:` (a list, or `{ bind: <key> }`), which names the documents that run as `local`:
   the runtime takes the principal from where the bytes came (4.12), and the slot is where it
   learns which local files are the shell's catalog. `load_mount` (loader.h) runs `expand_load`
@@ -628,7 +628,7 @@ stall the shell, local or not:
 A mount in an execution group of its own comes later; it needs processes that can move between
 groups (threaded execution Stage 3).
 
-**As built in SH1** (ARIADNE.md §6.7). The scheduler holds a mount to its budget:
+**As built in SH1** (ARIADNE.md §6.8). The scheduler holds a mount to its budget:
 `cvc::state_exec::frame_account` (process.h) is a share of each frame that the processes given it
 draw on together (`execute_options::account`; `spawn` and `fork` keep the parent's). The async
 scheduler charges each step's steps and seconds to it, ends a run at its limit, and parks a

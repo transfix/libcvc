@@ -6,7 +6,7 @@
 # `--open counter,json_feed`, the component library at COMPONENTS.
 #   1. The shell's own Apps menu is in the bar, and so are the two applications it opened at start:
 #      Counter's own menu bar folded into one menu named Counter, and JSON feed, which has no bar,
-#      as a menu of its own (ARIADNE.md §6.7, §5.25). Tray demo, in the catalog but not opened,
+#      as a menu of its own (ARIADNE.md §6.8, §5.25). Tray demo, in the catalog but not opened,
 #      has none.
 #   2. The JSON feed's window draws its title (the windows overlap, so the Counter's may be under
 #      it).

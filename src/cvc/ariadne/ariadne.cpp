@@ -2679,7 +2679,7 @@ struct Runtime::Impl {
   std::string mirrored_name;
   void mirror_apps();
 
-  // ---- on-demand mounts (docs/roadmap/ARIADNE_SHELL.md 4.2, 4.11; docs/ARIADNE.md §6.7) ----
+  // ---- on-demand mounts (docs/roadmap/ARIADNE_SHELL.md 4.2, 4.11; docs/ARIADNE.md §6.8) ----
   // The host's loader (AppRuntime's, which keeps the loader itself free of state): a mounts:
   // entry's document, parsed as a load: of it would be, its requires: checked against this host.
   Runtime::MountLoader mount_loader_;
@@ -6331,7 +6331,7 @@ void Runtime::Impl::restart_app(const std::string &scope) {
   quit_apps.erase(scope);
 }
 
-// ---- on-demand mounts (docs/roadmap/ARIADNE_SHELL.md 4.2, 4.11; docs/ARIADNE.md §6.7) ----------
+// ---- on-demand mounts (docs/roadmap/ARIADNE_SHELL.md 4.2, 4.11; docs/ARIADNE.md §6.8) ----------
 
 namespace {
 // A mount id as a mounts: entry may give it: one clean state-path segment, [A-Za-z0-9_], not
@@ -6397,7 +6397,7 @@ double read_number_or(cvc::app &app, const std::string &path, double def) {
 } // namespace
 
 Runtime::MountBudget Runtime::default_mount_budget(const std::string &principal) {
-  // Settled against the shipped examples (docs/ARIADNE.md §6.7): measured mounted in the shell, the
+  // Settled against the shipped examples (docs/ARIADNE.md §6.8): measured mounted in the shell, the
   // busiest one's frame stays far under the local default. A document from a file or the network
   // gets a fifth of the steps and the time, and a quarter of the memory.
   MountBudget b;

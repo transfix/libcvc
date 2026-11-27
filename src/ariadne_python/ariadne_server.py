@@ -147,6 +147,23 @@ callbacks run on ``host.loop``; ``pycvc.ariadne.net`` holds the same names as py
 
     host.net.broadcast("all", line)    # one call, any group size; every call only queues
 
+TLS (N3) is a listener's ``tls``: a certificate and key file. With ``detect_tls`` (ms) one port
+takes both TLS and plain clients; ``on_accept`` runs once the layer is decided, so a greeting goes
+out on it, and ``info.tls_version``, ``tls_cipher``, ``tls_sni`` and ``tls_peer_sha256`` say what
+was negotiated. ``hubs.keyprint`` is the certificate's [ADC-EXT] KEYP, to publish beside an
+``nmdcs://`` address; ``reload_tls()`` (or the files' ``watch``) serves new files to new
+connections and keeps the open ones::
+
+    from pycvc.ariadne.net import framing, tls_options
+
+    hubs = host.net.listen(address="0.0.0.0", port=411, frames=framing.delimited(b"|"),
+                           name="nmdc", detect_tls=500,
+                           tls=tls_options(certificate_file="hub.pem", key_file="hub.key",
+                                           watch=60000))
+
+    @hubs.on_tls_reload
+    def renewed(keyprint): ...        # publish the new KEYP
+
 In arisrvx the engine is the relay's (``--net-threads``, 2 by default) and outlives the program;
 under plain ``python`` the Host starts one (``Host(net_threads=2)``) and stops it at shutdown.
 
@@ -2111,7 +2128,7 @@ def _net_waker(engine):
 # What pycvc.ariadne.net is: pycvc's own cvc::net names (bindings/pycvc/pycvc_net.i).
 _NET_NAMES = ("net_engine", "engine_options", "listener_options", "framing", "inbound_limits",
               "conn_info", "net_event", "net_batch", "net_counters", "net_stats", "listener_stats",
-              "thread_stats", "net_listener", "close_reason_name")
+              "thread_stats", "net_listener", "close_reason_name", "tls_options")
 
 
 def _install_net():
@@ -2127,7 +2144,7 @@ def _install_net():
     net.__all__ = list(_NET_NAMES)
 
     def __getattr__(name):
-        if name in _NET_NAMES or name.startswith("close_reason_"):
+        if name in _NET_NAMES or name.startswith(("close_reason_", "tls_protocol_")):
             try:
                 import pycvc
                 return getattr(pycvc, name)

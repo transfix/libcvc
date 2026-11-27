@@ -14482,7 +14482,7 @@ on_tick: |
 // The budget defaults (Runtime::default_mount_budget) settled against the shipped examples
 // (docs/roadmap/ARIADNE_SHELL.md 4.11): every example document, mounted in a shell as a catalog
 // application (the local principal), runs 60 frames, and none is held to its budget. Its busiest
-// frame's steps and seconds are printed: the numbers ARIADNE.md §6.7 cites. A stub scene adapter
+// frame's steps and seconds are printed: the numbers ARIADNE.md §6.8 cites. A stub scene adapter
 // lets the documents with a scene mount (their scene is not drawn in a mount yet; their programs
 // run). A document this host refuses (it needs the network, a player, a relay) is listed, and
 // counts as not held.
