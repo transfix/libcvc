@@ -14056,6 +14056,67 @@ TEST(AriadneMounts, OpenCloseAndReopenKeepItsState) {
   fs::remove_all(dir);
 }
 
+// docs/ARIADNE.md §5.3: a mounts: entry's state: is written at its sub-prefix as it opens, just
+// before its init: (which reads it), as a load: module's is. Reopened, it resumes with its state as
+// it was; Restart drops that state and writes the seeds again.
+TEST(AriadneMounts, AMountsStateBlockIsWrittenAsItOpens) {
+  const fs::path dir = fs::temp_directory_path() / "ariadne_mounts_state";
+  fs::remove_all(dir);
+  const fs::path seeded =
+      write_doc(dir, "seeded.ari", R"(meta: { name: Seeded, min_libcvc: "0.0.0" }
+state:
+  count: 5
+  pos: [1, 2]
+  view: { zoom: 2 }
+init: (state-set "seen" (state-get "count"))
+)");
+  const fs::path shell = write_doc(dir, "shell.ari", R"(meta: { name: Shell, min_libcvc: "0.0.0" }
+menubar:
+  - menu: File
+    children:
+      - menu_item: New
+root:
+  - mounts: apps
+)");
+  cvc::app app;
+  AppRuntime art(app, "ui.shell");
+  TrayBackend be;
+  art.set_backend(be);
+  art.load(shell.string());
+  Runtime &rt = art.runtime();
+  cvc::state &tree = cvc::state::instance(app);
+  tree("ui.shell.apps.s.uri").value(seeded.generic_string());
+  ASSERT_TRUE(pump_until(rt, [&] { return peek(app, "ui.shell.includes.s.seen") == "5"; }))
+      << "status " << sval(app, "ui.shell.apps.s.status") << ": "
+      << sval(app, "ui.shell.apps.s.error") << "; count '" << peek(app, "ui.shell.includes.s.count")
+      << "'";
+  EXPECT_EQ(peek(app, "ui.shell.includes.s.count"), "5");
+  EXPECT_EQ(peek(app, "ui.shell.includes.s.pos"), "1,2");
+  EXPECT_EQ(peek(app, "ui.shell.includes.s.view.zoom"), "2");
+
+  // Closed and opened again: it resumes, its state: not written again.
+  tree("ui.shell.includes.s.count").value("9");
+  tree("ui.shell.apps").removeChild("s");
+  ASSERT_TRUE(pump_until(rt, [&] { return rt.mounts().empty(); }));
+  tree("ui.shell.apps.s.uri").value(seeded.generic_string());
+  ASSERT_TRUE(pump_until(rt, [&] { return sval(app, "ui.shell.apps.s.status") == "open"; }));
+  for (int i = 0; i < 3; ++i) {
+    rt.render();
+    rt.drain();
+  }
+  EXPECT_EQ(peek(app, "ui.shell.includes.s.count"), "9");
+
+  // Restart: its state is dropped, and its state: written again before its init: runs.
+  be.pick = "Restart Seeded";
+  rt.render();
+  rt.drain();
+  be.pick.clear();
+  ASSERT_TRUE(pump_until(rt, [&] { return peek(app, "ui.shell.includes.s.count") == "5"; }))
+      << be.dump();
+  EXPECT_EQ(peek(app, "ui.shell.includes.s.seen"), "5");
+  fs::remove_all(dir);
+}
+
 // (app-open URI [AS [ARGS]]) writes the calling document's entry and returns its id; picking one
 // already open returns it; (app-close AS) removes it. A mounted document's programs may not.
 TEST(AriadneMounts, AppOpenAndAppCloseActOnTheCallingDocument) {

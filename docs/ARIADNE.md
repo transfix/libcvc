@@ -1051,7 +1051,7 @@ wrote, without the program:
   value is used.
 - **When.** Like `init:`, it is written on every load and reload. A `load:`ed module's `state:` is
   written at its mount's sub-prefix just before the module's `init:` (§12), and again when the
-  module is restarted (§5.25).
+  module is restarted (§5.25). A `mounts:` entry's is written the same way, as it opens (§6.7).
 
 `init`, `on_tick`, `on_key`, `on_pointer`, and `on_signal` are scalar `state_exec` strings
 the loader only *captures*. The host wires them:
@@ -6505,15 +6505,17 @@ with a digit). `view`, `background`, `grants` and `argv` are SH3, SH6 and SH7's.
   component paths and guards, and the `min_libcvc` gate), and keeps nothing: the Runtime keeps
   what it mounts. `AppRuntime` gives its Runtime that loader (`Runtime::set_mount_loader`). The
   mount is at `includes.<id>` under the slot's scope, exactly as a static `load:` would be: its
-  `init:` runs as it opens, its `on_tick:` starts, whether or not its windows show. Each mount is
+  `state:` is written (§5.3) and its `init:` runs as it opens, its `on_tick:` starts, whether or
+  not its windows show. Each mount is
   an application (§5.25): its menu bar becomes one menu of the outer bar, and one without a bar
   gets a menu with its commands alone. Both end in Restart, Quit and Close. It is mirrored in
   `ariadne.apps.<id>` with its `principal`.
 - **Closing.** When the entry goes (or Close in its menu removes it), the mount is quit: its
   `on_tick:`, its actions and every process under its scope are stopped, its widgets and its
   budget are freed, and it is no longer an application. Its state stays under `includes.<id>`, so
-  the same entry opened again resumes it, its `init:` not run again. An entry whose `uri` or
-  `args` change is closed and the new document opened, its `init:` run.
+  the same entry opened again resumes it, its `state:` not written and its `init:` not run again.
+  An entry whose `uri` or `args` change is closed and the new document opened, its `state:`
+  written and its `init:` run.
 - **Caching and hot reload.** A mount is parsed when it opens and again only when its `uri`, its
   `args` or one of its files changes: `AppRuntime::reload_if_changed` watches the mounts' files
   (`Runtime::mount_sources`) beside the document's. A mount parsed again keeps its `on_tick:`

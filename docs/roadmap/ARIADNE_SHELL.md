@@ -179,7 +179,8 @@ shell.apps.<as>.budget.*     its budget, when the user changed the default (4.11
   a slot by sub-prefix, reconciles the slots at the top of each frame (open, close, parse again)
   and plans the Windows menu over them, so a mount's menu bar, windows and tray icons are an
   application's (4.9: one without a bar gets a menu of Restart, Quit and Close). A mount's
-  `init:` runs and its `on_tick:` starts as it opens, not when first drawn. Closing quits it,
+  `state:` is written, its `init:` runs and its `on_tick:` starts as it opens, not when first
+  drawn. Closing quits it,
   kills every process under its scope (forks and spawns too) and frees the slot; `ran_inits`
   keeps it, so reopening resumes. The `requires:` check refuses what the static scan would fail
   or warn on: a required entry, a function a program calls, `gl.scene` for a `scene:` on a host

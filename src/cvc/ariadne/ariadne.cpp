@@ -6608,14 +6608,20 @@ void Runtime::Impl::open_mount(MountSlot &slot, const Widget &w) {
   slot.account = std::make_shared<cvc::state_exec::frame_account>();
   apply_mount_budget(slot);
   publish_mount_status(slot);
-  // As an application runs whether its windows show or not, its init: runs and its on_tick:
-  // starts as it opens, not as it is first drawn. A reopened one resumes: its init: ran already.
+  // As an application runs whether its windows show or not, its state: is written (§5.3), its
+  // init: runs and its on_tick: starts as it opens, not as it is first drawn, as a load: module's
+  // would. A reopened one resumes: its state: and init: ran already.
   mount_names[sub] = slot.name;
   const std::string fns = slot.wrapper->functions ? slot.wrapper->functions->prelude : "";
   if (!fns.empty())
     mount_functions[sub] = fns;
-  if (!slot.wrapper->init_script.empty() && ran_inits.insert(sub).second)
-    run_mount_init(sub, fns + slot.wrapper->init_script);
+  const Widget &wrapper = *slot.wrapper;
+  if ((!wrapper.state_seeds.empty() || !wrapper.init_script.empty()) &&
+      ran_inits.insert(sub).second) {
+    seed_state(app, sub, wrapper.state_seeds); // just before init:, which may override them
+    if (!wrapper.init_script.empty())
+      run_mount_init(sub, fns + wrapper.init_script);
+  }
   if (!slot.wrapper->tick_script.empty())
     ensure_mount_tick(sub, *slot.wrapper);
 }
