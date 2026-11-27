@@ -6472,8 +6472,8 @@ std::string Runtime::Impl::mount_principal(const Widget &w, const std::string &s
     return "local";
   if (u.scheme == "http" || u.scheme == "https")
     return "remote:" + u.scheme + "://" + u.path.substr(0, u.path.find('/'));
-  static const MountsSpec kNoSpec;
-  const MountsSpec &spec = w.mounts ? *w.mounts : kNoSpec;
+  const MountsSpec none{}; // a slot without a spec (a local, so no static state)
+  const MountsSpec &spec = w.mounts ? *w.mounts : none;
   const std::string mine = mount_norm(uri, spec.base);
   for (const std::string &c : mount_list(spec.catalog, spec.catalog_bind, scope)) {
     const std::string entry = mount_norm(c, spec.base);
@@ -6553,8 +6553,8 @@ void Runtime::Impl::refuse_mount(MountSlot &slot, const std::string &why) {
 void Runtime::Impl::open_mount(MountSlot &slot, const Widget &w) {
   slot.name = slot.as;
   // allow: (4.2) — by default any file or link; a list narrows it to its prefixes.
-  static const MountsSpec kNoSpec;
-  const MountsSpec &spec = w.mounts ? *w.mounts : kNoSpec;
+  const MountsSpec none{}; // a slot without a spec (a local, so no static state)
+  const MountsSpec &spec = w.mounts ? *w.mounts : none;
   const std::vector<std::string> allow = mount_list(spec.allow, spec.allow_bind, slot.parent_scope);
   if (!allow.empty()) {
     const std::string mine = mount_norm(slot.uri, spec.base);
