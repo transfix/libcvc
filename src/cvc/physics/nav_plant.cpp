@@ -781,6 +781,14 @@ void nav_plant::set_tip_margin(double share) {
   _o.tip_margin = share;
 }
 
+void nav_plant::set_right_after(double s) {
+  if (!(std::isfinite(s) && s >= 0.0))
+    throw cvc::physics_error("nav_plant: right_after must be finite and >= 0");
+  _o.right_after = s;
+  for (agent &a : _agents)
+    a.down = 0.0;
+}
+
 void nav_plant::set_drift_nsub(int n) {
   if (n < 0)
     throw cvc::physics_error("nav_plant: drift_nsub must be >= 0");

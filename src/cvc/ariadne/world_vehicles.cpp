@@ -1028,6 +1028,10 @@ struct WorldVehicles::impl {
     std::string sense, belief, seen_sense, seen_belief;
     bool collide = false; // its vehicles kept apart (collide:; the key switches it)
     std::string seen_collide;
+    // How long its Jolt vehicles lie on a side or the roof before they are set back on their
+    // wheels (righting:, s; 0 never; the key switches it).
+    double righting = vehicle_start::kRighting;
+    std::string seen_righting;
     // Its policy: what is asked (trained, builtin, data:<entry> or a uri; the key switches it),
     // what drives (`model`, null: the built-in net) and that, said (`drives`). `loading` is the
     // data store's node of weights still on their way, `file` the .cvcnav in it.
@@ -1423,8 +1427,9 @@ struct WorldVehicles::impl {
     o.ground_height = [g, t](double x, double y) { return ground_at(g.get(), t.get(), x, y); };
     const std::vector<ph::vehicle_desc> first{ph::vehicle_desc::humvee()};
     if (plant == "jolt") {
-      // A vehicle that rolled onto its side or roof is set back on its wheels after 2 s there.
-      o.right_after = kRightAfter;
+      // A vehicle that rolled onto its side or roof is set back on its wheels after its fleet's
+      // righting: (2 s by default; never with righting: false), an unnamed one's after 2 s.
+      o.right_after = group >= 0 ? groups[static_cast<std::size_t>(group)].righting : kRightAfter;
       f->jolt = std::make_unique<ph::nav_plant>(*world, first, std::move(o));
       f->sim->set_plant(f->jolt.get());
     } else if (plant == "dynamic") {
@@ -2501,6 +2506,12 @@ struct WorldVehicles::impl {
             status = "entity " + std::to_string(e.id) + ": " + why;
     ++rev;
   }
+  // Fleet `gi`'s Jolt vehicles righted after its righting now (0: never), its navigators kept.
+  void apply_righting(std::size_t gi) {
+    for (const auto &[k, nav] : fleets)
+      if (nav && nav->group == static_cast<int>(gi) && nav->jolt)
+        nav->jolt->set_right_after(groups[gi].righting);
+  }
   // Fleet `gi`'s vehicles kept apart, or not, now (collide), its navigators kept.
   void apply_collide(std::size_t gi) {
     const float gap = groups[gi].collide ? kCollideGap * cfg.veh.rr : 0.0f;
@@ -2702,6 +2713,26 @@ struct WorldVehicles::impl {
         if ((c == "1" || c == "0" || c == "true" || c == "false") && want != g.collide) {
           g.collide = want;
           apply_collide(gi);
+        }
+      }
+      if (const std::string c = get(at + "righting"); c != g.seen_righting) {
+        g.seen_righting = c; // seconds, or true (the default's) / false (never)
+        double want = -1.0;
+        if (c == "true" || c == "on")
+          want = vehicle_start::kRighting;
+        else if (c == "false" || c == "off")
+          want = 0.0;
+        else
+          try {
+            std::size_t used = 0;
+            want = std::stod(c, &used);
+            if (used != c.size() || !std::isfinite(want))
+              want = -1.0;
+          } catch (const std::exception &) {
+          }
+        if (want >= 0.0 && want != g.righting) {
+          g.righting = want;
+          apply_righting(gi);
         }
       }
       const std::string s = get(at + "sense"), b = get(at + "belief");
@@ -3809,6 +3840,7 @@ std::size_t WorldVehicles::spawn_starts(const std::vector<vehicle_start> &starts
       g.sense = st.sense;
       g.belief = st.belief.empty() ? "shared" : st.belief;
       g.collide = st.collide;
+      g.righting = st.righting;
       g.policy = !st.policy_data.empty() ? "data:" + st.policy_data
                  : st.policy.empty()     ? "trained"
                                          : st.policy;
@@ -3825,6 +3857,7 @@ std::size_t WorldVehicles::spawn_starts(const std::vector<vehicle_start> &starts
         d.put(at + "metric", g.metric);
         d.put(at + "plant", g.plants.empty() ? g.base_plant : g.plants.text());
         d.put(at + "collide", g.collide ? "1" : "0");
+        d.put(at + "righting", num(g.righting));
         d.put(at + "size", std::to_string(st.count));
       }
       g.seen_sense = d.get("fleets." + st.fleet + ".sense");
@@ -3833,6 +3866,7 @@ std::size_t WorldVehicles::spawn_starts(const std::vector<vehicle_start> &starts
       g.seen_metric = d.get("fleets." + st.fleet + ".metric");
       g.seen_plant = d.get("fleets." + st.fleet + ".plant");
       g.seen_collide = d.get("fleets." + st.fleet + ".collide");
+      g.seen_righting = d.get("fleets." + st.fleet + ".righting");
       g.seen_size = d.get("fleets." + st.fleet + ".size");
       d.hold_placing = true;
       int got = 0;

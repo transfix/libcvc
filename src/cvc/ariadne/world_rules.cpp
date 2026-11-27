@@ -382,6 +382,19 @@ std::string parse_vehicle_starts(const Value &v, std::vector<vehicle_start> &out
       } else if (k == "collide") {
         if (!boolean(x, at + " collide:", s.collide, why))
           return why;
+      } else if (k == "righting") {
+        // Seconds, or a word: true (the default's) or false (never); 1 is a second, not true.
+        constexpr std::string_view words[] = {"true", "yes", "on", "false", "no", "off"};
+        if (x.is_scalar() &&
+            std::find(std::begin(words), std::end(words), x.scalar) != std::end(words)) {
+          bool on = true;
+          if (!boolean(x, at + " righting:", on, why))
+            return why;
+          s.righting = on ? vehicle_start::kRighting : 0.0;
+        } else if (!number(x, at + " righting:", s.righting, why) || !(s.righting >= 0.0) ||
+                   !std::isfinite(s.righting)) {
+          return at + " righting: expects seconds (0 or more), true or false";
+        }
       } else if (k == "count" || k == "team" || k == "seed") {
         double n = 0.0;
         if (!number(x, at + " " + k + ":", n, why))
@@ -440,7 +453,7 @@ std::string parse_vehicle_starts(const Value &v, std::vector<vehicle_start> &out
                std::to_string(kMaxVehicleStartCount) + " (name a fleet: for more)";
       for (const auto &[k, x] : item.entries)
         if (k == "spawn" || k == "seed" || k == "rally" || k == "colors" || k == "keys" ||
-            k == "sense" || k == "belief" || k == "metric" || k == "collide" ||
+            k == "sense" || k == "belief" || k == "metric" || k == "collide" || k == "righting" ||
             (k == "policy" && x.is_map()))
           warn(warnings, at + " " + k + ": is a fleet's (fleet: names one), ignored");
         else if (k == "plant" && (x.is_seq() || x.is_map()))
@@ -459,6 +472,7 @@ std::string parse_vehicle_starts(const Value &v, std::vector<vehicle_start> &out
       s.keys = plain.keys;
       s.sense = plain.sense;
       s.belief = plain.belief;
+      s.righting = plain.righting;
       if (!s.policy_path.empty() || !s.policy_sha256.empty() || !s.policy_data.empty()) {
         s.policy = plain.policy;
         s.policy_path = plain.policy_path;

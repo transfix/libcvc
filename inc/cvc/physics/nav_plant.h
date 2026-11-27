@@ -269,6 +269,7 @@ public:
   void set_accel_margin(double share); // (0, 1]
   void set_lateral_g(double g);        // (0, 2]
   void set_tip_margin(double share);   // (0, 1]
+  void set_right_after(double s); // >= 0 (0: never); a vehicle lying down starts its count again
   // Onsets >= 0, gains >= 0.
   void set_modulation(const cvc::nav::plant_modulation &m);
 
