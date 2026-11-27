@@ -599,6 +599,25 @@ if(CVC_BUILD_TESTS AND NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
       set_tests_properties(arisrvx_rcon_admin_role PROPERTIES
                            SKIP_REGULAR_EXPRESSION "No module named '(fastapi|uvicorn|starlette)';built without yaml-cpp;needs pycvc beside arisrvx;no pycvc to convert"
                            TIMEOUT 120)
+      # A program's connections in the client list (ID5b, ID4c): tests/clients_program_service.py
+      # opens them through host.clients as an NMDC hub would, the admin lists them, and
+      # server.kick and server.ban reach them through the program's closer.
+      set(_id_clients_relay --relay-arg=--python
+                            "--relay-arg=${_srv_tests}/clients_program_service.py"
+                            --relay-arg=--rcon-password-file
+                            "--relay-arg=${_srv_tests}/rcon_password.txt")
+      foreach(_a IN LISTS CVC_ARIADNE_PYTHON_TEST_PATH)
+        list(APPEND _id_clients_relay "--relay-arg=${_a}")
+      endforeach()
+      add_test(NAME arisrvx_clients_program
+               COMMAND ${_id_pair} --relay $<TARGET_FILE:arisrvx> --client $<TARGET_FILE:ari>
+                       --scheme grpc ${_id_relay} ${_id_clients_relay} --client-only
+                       --client-arg=--relay-room --client-arg=ctest
+                       "--client-arg=${_srv_tests}/clients_program.ari")
+      cvc_ariadne_python_test_properties(arisrvx_clients_program)
+      set_tests_properties(arisrvx_clients_program PROPERTIES
+                           SKIP_REGULAR_EXPRESSION "No module named '(fastapi|uvicorn|starlette)';built without yaml-cpp;needs pycvc beside arisrvx;no pycvc to convert"
+                           TIMEOUT 120)
     endif()
   endif()
 endif()

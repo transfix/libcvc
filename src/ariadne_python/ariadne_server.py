@@ -150,6 +150,30 @@ callbacks run on ``host.loop``; ``pycvc.ariadne.net`` holds the same names as py
 In arisrvx the engine is the relay's (``--net-threads``, 2 by default) and outlives the program;
 under plain ``python`` the Host starts one (``Host(net_threads=2)``) and stops it at shutdown.
 
+``host.clients`` puts the connections the program serves (an NMDC hub's users) in the relay's
+client list (ARISRV_IDENTITY.md 2.8), beside its own clients: ``server.clients`` lists them, and an
+admin's ``server.kick`` and ``server.ban`` reach them through the program's closer::
+
+    @hub.on_accept
+    async def accepted(conn, info):    # runs as a task: the registry answers on a later step
+        try:
+            cid = await host.clients.open_engine(f"nmdc:{conn}", transport="nmdc",
+                                                 address=info.peer_address, kind="nmdc")
+        except ClientRefused:          # "forbidden": a banned client
+            host.net.close(conn)
+
+    await host.clients.name_engine(f"nmdc:{conn}", nick)      # at $ValidateNick; refused if taken
+    await host.clients.update_engine(key, kind="nmdc", version=tag, capabilities=caps)
+    await host.clients.close_engine(key)                      # from on_close, as any close
+
+    @host.clients.set_closer
+    async def close(key, reason, kind):   # kind: "kick" or "ban"; then close it, as on_close does
+        ...
+
+Each call is applied on the relay's next step and raises ``ClientRefused(code, message)`` for
+what the registry refuses. Under plain ``python`` there is no registry: ``open_engine`` returns
+None and the rest do nothing.
+
 ``serve_asgi(app, host=, port=, **config)`` serves an ASGI app with uvicorn on ``host.loop``; several
 are allowed. Their startup (an app's lifespan startup, the bind) runs before the relay accepts
 clients, and one that fails stops arisrvx, non-zero, before it listens. ``arisrvx --python main.py
@@ -535,6 +559,150 @@ class _Served:
         self.asked_to_stop = False
 
 
+class ClientRefused(Exception):
+    """What the relay's client registry refused (``host.clients``): its ``code`` (``"invalid"``,
+    ``"forbidden"`` for a banned client, ``"unavailable"`` for a connection it doesn't have open)
+    and ``message``."""
+
+    def __init__(self, code: str, message: str = ""):
+        super().__init__(f"{code}: {message}" if message else code)
+        self.code = code
+        self.message = message
+
+
+def _strs(values, what) -> list[str]:
+    if isinstance(values, (str, bytes)) or not all(isinstance(v, str) for v in values):
+        raise TypeError(f"host.clients: {what} must be a list of str")
+    return list(values)
+
+
+class _Clients:
+    """``host.clients``: the connections the program serves, in the relay's client registry
+    (ARISRV_IDENTITY.md 2.8). Every call is the loop's: from the program's hooks and tasks."""
+
+    def __init__(self, host: "Host"):
+        self._host = host
+        self._ids = itertools.count(1)
+        self._pending: dict[int, asyncio.Future] = {}  # the registry's answers, by op id
+        self._closer = None
+
+    async def _ask(self, send, *args) -> list[str]:
+        ident = next(self._ids)
+        future = self._host.loop.create_future()
+        self._pending[ident] = future
+        try:
+            send(ident, *args)
+            return await future
+        finally:
+            self._pending.pop(ident, None)
+
+    def _answer(self, ident: int, value) -> None:
+        future = self._pending.get(ident)
+        if future is not None and not future.done():
+            future.set_result(list(value or ()))
+
+    @staticmethod
+    def _check(answer: list[str]) -> list[str]:
+        if not answer or answer[0] != "ok":
+            code = answer[1] if len(answer) > 1 else "internal"
+            raise ClientRefused(code, answer[2] if len(answer) > 2 else "")
+        return answer
+
+    async def open_engine(self, key: str, *, transport: str, address: str, local: str = "",
+                          kind: str = "unknown", version: str = "", capabilities=(),
+                          geo: Mapping | None = None) -> str | None:
+        """Open the program's connection ``key`` (1-128 bytes of ``[A-Za-z0-9._:-]``, such as
+        ``"nmdc:41"``, not reused while it is open), accepted on its listener ``transport``
+        (``"nmdc"``) from ``address`` (its peer, ``"198.51.100.9:41234"``), in the record of that
+        address's client. ``kind``, ``version`` and ``capabilities`` are what it says it is (2.7);
+        ``geo`` where the address is, when the program looked it up: ``{"country", "region",
+        "city", "asn"}``, any of them missing. Returns the client id. Raises ClientRefused
+        ``forbidden`` for a banned client (refuse it at accept) and ``invalid`` for a bad key or
+        transport, or one already open."""
+        caps = _strs(capabilities, "capabilities")
+        where = {k: str((geo or {}).get(k) or "") for k in ("country", "region", "city", "asn")}
+        unknown = set(geo or {}) - set(where)
+        if unknown:
+            raise ValueError(f"host.clients.open_engine: geo takes country, region, city and asn, "
+                             f"not {', '.join(sorted(unknown))}")
+        link = self._host._link
+        if link is None:
+            return None
+        answer = self._check(await self._ask(
+            link.client_open, str(key), str(transport), str(address), str(local), str(kind),
+            str(version), caps, where["country"], where["region"], where["city"], where["asn"]))
+        return answer[1] if len(answer) > 1 else ""
+
+    async def name_engine(self, key: str, nick: str) -> None:
+        """Connection ``key``'s nick from its protocol (an NMDC ``$ValidateNick``), as its client's
+        username: up to 64 bytes, unique among the active clients, never suffixed. Raises
+        ClientRefused ``invalid`` for a taken or bad nick (refuse the login) and ``unavailable``
+        for a key that isn't open."""
+        link = self._host._link
+        if link is not None:
+            self._check(await self._ask(link.client_name, str(key), str(nick)))
+
+    async def update_engine(self, key: str, *, kind: str = "unknown", version: str = "",
+                            capabilities=()) -> None:
+        """What connection ``key`` says it is now (an NMDC ``$MyINFO``, a share that went to 0).
+        Raises ClientRefused ``unavailable`` for a key that isn't open."""
+        caps = _strs(capabilities, "capabilities")
+        link = self._host._link
+        if link is not None:
+            self._check(await self._ask(link.client_update, str(key), str(kind), str(version),
+                                        caps))
+
+    async def close_engine(self, key: str) -> bool:
+        """Connection ``key`` closed: call it from the listener's ``on_close``, whatever closed it.
+        False when it wasn't open (closed already)."""
+        link = self._host._link
+        if link is None:
+            return False
+        try:
+            self._check(await self._ask(link.client_close, str(key)))
+        except ClientRefused as e:
+            if e.code == "unavailable":
+                return False
+            raise
+        return True
+
+    def set_closer(self, fn):
+        """Decorator: ``fn(key, reason, kind)`` (sync or async) closes the program's connection
+        ``key`` for an admin's ``server.kick`` (``kind`` ``"kick"``) or ``server.ban``
+        (``"ban"``), after sending it ``reason`` (``""`` when the admin gave none) as its protocol
+        does; its close then reaches ``close_engine`` as any close does. Without one, kicks and
+        bans don't reach the program's connections (a ban still refuses the client at its next
+        ``open_engine``). ``None`` removes it."""
+        if fn is not None and not callable(fn):
+            raise TypeError(f"host.clients.set_closer: {fn!r} is not callable")
+        self._closer = fn
+        if self._host._link is not None:
+            self._host._link.set_client_closer(fn is not None)
+        return fn
+
+    def _close(self, value) -> None:
+        parts = list(value or ())
+        if len(parts) != 3 or self._closer is None:
+            return
+        key, reason, kind = parts
+        try:
+            result = self._closer(key, reason, kind)
+        except Exception:  # noqa: BLE001 - logged, not raised into the loop
+            log.exception("host.clients closer: closing %s raised", key)
+            return
+        if inspect.isawaitable(result):
+            task = self._host.loop.create_task(self._closing(key, result))
+            self._host._chat_tasks.add(task)
+            task.add_done_callback(self._host._chat_tasks.discard)
+
+    @staticmethod
+    async def _closing(key, awaitable) -> None:
+        try:
+            await awaitable
+        except Exception:  # noqa: BLE001
+            log.exception("host.clients closer: closing %s raised", key)
+
+
 class Host:
     """The relay's tree and the script thread's loop, for a service's Python. See the module
     docstring."""
@@ -582,6 +750,7 @@ class Host:
         self._chat_hooks: dict[str, list] = {}
         self._dm_hooks: dict[str, list] = {}
         self._chat_tasks: set = set()  # async hooks running
+        self.clients = _Clients(self)  # the program's connections in the relay's client list
         self._stop_code = None  # stop()'s, once asked
         self._stop_event = None  # made on the loop by main()
         self._exit_code = 0
@@ -1414,6 +1583,13 @@ class _Program:
                 self.check_done.set()
             if _current is not None:
                 _current.stop(0)
+            return
+        if kind in ("clients_answer", "client_close"):  # lists of str: no pycvc needed
+            if _current is not None:
+                if kind == "clients_answer":
+                    _current.clients._answer(ident, value)
+                else:
+                    _current.clients._close(value)
             return
         if kind == "room_chat":  # JSON, not a DSL value: no pycvc needed
             if _current is not None:

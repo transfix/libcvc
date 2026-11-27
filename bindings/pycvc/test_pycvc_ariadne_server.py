@@ -4,6 +4,7 @@ code runs and is tested without arisrvx:
   * pycvc imports it as pycvc.ariadne, and current_host() is None until a Host is made;
   * set / set_tree / set_series / set_plot / get_tree on Host's own tree, set_tree as
     (state-set-tree) writes;
+  * host.clients with no registry: open_engine returns None, its arguments checked, the closer;
   * serve_asgi + run(): a FastAPI app served on host.loop, a request (with a full garbage
     collection while it is in flight), and stop() from the loop, with the app's shutdown run;
     skipped where fastapi or uvicorn is not installed.
@@ -79,6 +80,36 @@ host.disconnect("x")
 check("bearer=<set>" in repr(pycvc.ariadne.Credential("secret", "grpc", "p")) and
       "secret" not in repr(pycvc.ariadne.Credential("secret", "grpc", "p")),
       "a credential's repr never shows its token")
+
+# host.clients (ARISRV_IDENTITY.md 2.8): under plain python there is no client registry, so
+# open_engine returns None and the rest do nothing; what it is given is checked all the same. The
+# closer is kept, and a "client_close" event (arisrvx's) calls it.
+clients = host.clients
+check(host.loop.run_until_complete(clients.open_engine("nmdc:1", transport="nmdc",
+                                                       address="198.51.100.9:4000")) is None,
+      "open_engine: no registry under plain python")
+check(host.loop.run_until_complete(clients.close_engine("nmdc:1")) is False, "close: none open")
+for bad, err in ((dict(capabilities="chat"), TypeError), (dict(capabilities=[1]), TypeError),
+                 (dict(geo={"planet": "earth"}), ValueError)):
+    try:
+        host.loop.run_until_complete(clients.open_engine("nmdc:2", transport="nmdc",
+                                                         address="x", **bad))
+        check(False, f"open_engine refuses {bad}")
+    except err:
+        check(True, f"open_engine refuses {bad}")
+told = []
+check(clients.set_closer(lambda *a: told.append(list(a))) is not None, "set_closer keeps it")
+clients._close(["nmdc:1", "spam", "kick"])
+check(told == [["nmdc:1", "spam", "kick"]], f"the closer is told key, reason, kind: {told}")
+try:
+    clients.set_closer(42)
+    check(False, "set_closer wants a callable")
+except TypeError:
+    check(True, "set_closer wants a callable")
+clients.set_closer(None)
+check(issubclass(pycvc.ariadne.ClientRefused, Exception) and
+      pycvc.ariadne.ClientRefused("forbidden", "banned").code == "forbidden",
+      "ClientRefused carries its code")
 
 # The per-principal call limits: calls in flight (--call-concurrency) and a second (--call-rate).
 prog = pycvc.ariadne._Program.__new__(pycvc.ariadne._Program)

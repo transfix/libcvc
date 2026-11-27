@@ -166,6 +166,28 @@ public:
   bool hears_room() const { return hears_room_.load(); }
   bool hears_dms() const { return hears_dms_.load(); }
 
+  // ── the program's connections in the client registry (ARISRV_IDENTITY.md 2.8, ID4c) ─────────
+  // What host.clients asks of the relay's registry for a connection the program serves (an NMDC
+  // client), under the program's key for it: queued on the script thread, taken by the relay on
+  // its next step, in order, each answered by a "clients_answer" event with the op's id.
+  struct ClientOp {
+    enum class Kind { open, name, update, close } kind = Kind::open;
+    std::uint64_t id = 0; // the program's, for its answer
+    std::string key;
+    std::string transport, address, local;        // open
+    std::string nick;                             // name
+    std::string client_kind = "unknown", version; // open, update
+    std::vector<std::string> capabilities;        // open, update
+    std::string country, region, city, asn;       // open: where the address is, when known
+  };
+  void client_op(ClientOp op);
+  // The oldest `max` of them (0: all); the rest wait for the next step, in order.
+  std::vector<ClientOp> take_client_ops(std::size_t max = 0);
+  // The program has a closer (host.clients.set_closer): server.kick and server.ban close its
+  // connections by posting it a "client_close" event, [key, reason, kick|ban].
+  void set_closes(bool on) { closes_.store(on); }
+  bool closes() const { return closes_.load(); }
+
   // Whether Python can convert DSL values (pycvc is beside the host): the program says so as it
   // starts. Without it the relay answers clients' calls `unavailable` itself, and a server
   // document's python: block fails its load.
@@ -228,6 +250,10 @@ private:
   std::string room_;
   std::vector<BridgeOp> bridge_ops_;
   std::atomic<bool> hears_room_{false}, hears_dms_{false};
+
+  mutable std::mutex client_ops_mu_;
+  std::vector<ClientOp> client_ops_;
+  std::atomic<bool> closes_{false};
 
   std::atomic<bool> read_scopes_{false};
   mutable std::mutex scopes_mu_;

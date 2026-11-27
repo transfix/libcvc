@@ -1682,12 +1682,28 @@ int main(int argc, char **argv) {
     return present;
   };
   // Close one of a client's connections (server.kick, a banned client's), on its own transport.
-  const auto kick_link = [&](const client_registry::link_ref &l) {
-    if (l.transport == "grpc")
+  // A program's connection (an NMDC client the relay's Python program serves; ARISRV_IDENTITY.md
+  // 2.8) goes to the program's closer as a "client_close" event, [key, reason, "kick" | "ban"], so
+  // it can send its reason line first; false when the program has no closer.
+  const auto kick_link = [&](const client_registry::link_ref &l, const std::string &reason = {},
+                             const char *how = "kick") {
+    if (l.key.empty() && l.transport == "grpc")
       return state_tp.disconnect_connection(l.connection);
 #if CVC_ENABLE_WS
-    if (l.transport == "ws")
+    if (l.key.empty() && l.transport == "ws")
       return ws_tp.disconnect_connection(l.connection);
+#endif
+#ifdef CVC_ARIADNE_PYTHON
+    if (!l.key.empty() && scriptThread.joinable() && scriptLink.closes()) {
+      namespace se = cvc::state_exec;
+      scriptLink.post(cvc::ariadne::python::ServerLink::Event{
+          "client_close", 0,
+          se::make_list({se::value_t(l.key), se::value_t(reason), se::value_t(std::string(how))})});
+      return true;
+    }
+#else
+    (void)reason;
+    (void)how;
 #endif
     return false;
   };
@@ -1866,7 +1882,7 @@ int main(int argc, char **argv) {
     // old holder's connection was (its rcon) carries over to it.
     clients.update(client_links(), clients_now(), clients_wall());
     for (const client_registry::link_ref &l : clients.take_banned_links())
-      kick_link(l);
+      kick_link(l, "banned", "ban");
     // The call's positional argument I as a string ("" when it is not one).
     const auto arg_str = [&r](std::size_t i) -> std::string {
       const se::list_ptr *l = std::get_if<se::list_ptr>(&r.args.v);
@@ -2107,10 +2123,10 @@ int main(int argc, char **argv) {
       calls->result(r.pid, r.id, clients.record_value(target));
       return;
     }
-    if (r.fn == "server.kick") {
+    if (r.fn == "server.kick") { // server.kick ID [REASON]: the reason a program's closer sends
       std::int64_t n = 0;
       for (const client_registry::link_ref &l : clients.links_of(target))
-        n += kick_link(l) ? 1 : 0;
+        n += kick_link(l, arg_str(1), "kick") ? 1 : 0;
       std::printf("[arisrv] rcon: client %s kicked %s (%lld connection(s))\n",
                   clients.identity_key(r.pid).c_str(), target.c_str(), static_cast<long long>(n));
       std::fflush(stdout);
@@ -2122,7 +2138,7 @@ int main(int argc, char **argv) {
       clients.ban(target, on);
       if (on)
         for (const client_registry::link_ref &l : clients.links_of(target))
-          kick_link(l);
+          kick_link(l, arg_str(1), "ban");
       std::printf("[arisrv] rcon: client %s %s %s\n", clients.identity_key(r.pid).c_str(),
                   on ? "banned" : "unbanned", target.c_str());
       std::fflush(stdout);
@@ -2295,6 +2311,68 @@ int main(int argc, char **argv) {
       disconnect_principal(principal);
     for (const std::string &principal : scriptLink.take_scope_refreshes())
       refresh_scope(principal);
+    // The program's connections in the client registry (host.clients; ARISRV_IDENTITY.md 2.8),
+    // each answered with a "clients_answer" event: ["ok", client id] for an open, ["ok"] for the
+    // rest, or ["error", code, message].
+    {
+      namespace se = cvc::state_exec;
+      using ClientOp = cvc::ariadne::python::ServerLink::ClientOp;
+      const auto answer = [&](std::uint64_t id, std::vector<std::string> parts) {
+        std::vector<se::value_t> elems;
+        for (std::string &part : parts)
+          elems.emplace_back(std::move(part));
+        scriptLink.post(cvc::ariadne::python::ServerLink::Event{"clients_answer", id,
+                                                                se::make_list(std::move(elems))});
+      };
+      for (const ClientOp &op : scriptLink.take_client_ops(256)) {
+        client_registry::refusal why;
+        client_registry::client_info said;
+        said.kind = op.client_kind;
+        said.version = op.version;
+        said.capabilities = op.capabilities;
+        switch (op.kind) {
+        case ClientOp::Kind::open: {
+          client_registry::geo_info geo;
+          geo.country = op.country;
+          geo.region = op.region;
+          geo.city = op.city;
+          geo.asn = op.asn;
+          const std::string id = clients.open_engine(op.key, op.transport, op.address, op.local,
+                                                     said, geo, clients_now(), clients_wall(), why);
+          if (id.empty()) {
+            answer(op.id, {"error", why.code, why.message});
+            break;
+          }
+          std::printf("[arisrv] client %s: the program's connection %s (%s) opened\n", id.c_str(),
+                      op.key.c_str(), op.transport.c_str());
+          std::fflush(stdout);
+          answer(op.id, {"ok", id});
+          break;
+        }
+        case ClientOp::Kind::name:
+          if (clients.name_engine(op.key, op.nick, why))
+            answer(op.id, {"ok"});
+          else
+            answer(op.id, {"error", why.code, why.message});
+          break;
+        case ClientOp::Kind::update:
+          if (clients.update_engine(op.key, said))
+            answer(op.id, {"ok"});
+          else
+            answer(op.id, {"error", "unavailable", "no open connection " + op.key});
+          break;
+        case ClientOp::Kind::close:
+          if (clients.close_engine(op.key, clients_wall())) {
+            std::printf("[arisrv] the program's connection %s closed\n", op.key.c_str());
+            std::fflush(stdout);
+            answer(op.id, {"ok"});
+          } else {
+            answer(op.id, {"error", "unavailable", "no open connection " + op.key});
+          }
+          break;
+        }
+      }
+    }
     using Reply = cvc::ariadne::python::ServerLink::Reply;
     for (const Reply &rep : scriptLink.take_replies()) {
       if (rep.kind == Reply::Kind::progress)
@@ -2496,7 +2574,7 @@ int main(int argc, char **argv) {
       // server.set), and each present participant's username (ID1).
       clients.update(links, now_s, clients_wall());
       for (const client_registry::link_ref &l : clients.take_banned_links())
-        kick_link(l);
+        kick_link(l, "banned", "ban");
       // Without bound writes the names stay the clients' own, as before: no gate keeps them out.
       clients.write(app, bindGate ? present : std::set<std::string>());
       // Each viewer's video rung for its link, to the shaper and to the room (its net.relay.video,

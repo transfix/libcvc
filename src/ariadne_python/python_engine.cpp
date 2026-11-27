@@ -572,7 +572,9 @@ PyObject *arihost_ready(PyObject *self, PyObject *args) {
 
 // next_event(): the relay's next event for the loop, waited for without the GIL, as (kind, id,
 // value): the value a capsule for pycvc.value_from_capsule, or None when the event has none (a
-// "shutdown", which so needs no pycvc). None once the link is closed. The waker thread's only call.
+// "shutdown", which so needs no pycvc). A "room_chat" event's is a str, and the registry's
+// ("clients_answer", "client_close") a list of str, so they need no pycvc either. None once the
+// link is closed. The waker thread's only call.
 PyObject *arihost_next_event(PyObject *self, PyObject *) {
   ServerLink *link = server_link(self);
   if (!link)
@@ -593,6 +595,22 @@ PyObject *arihost_next_event(PyObject *self, PyObject *) {
     if (!(value =
               PyUnicode_DecodeUTF8(text->data(), static_cast<Py_ssize_t>(text->size()), "replace")))
       return nullptr;
+  } else if (const se::list_ptr *strings = std::get_if<se::list_ptr>(&event.value.v);
+             strings && *strings &&
+             (event.kind == "clients_answer" || event.kind == "client_close")) {
+    if (!(value = PyList_New(0)))
+      return nullptr;
+    for (const se::value_t &e : **strings) {
+      const std::string *str = std::get_if<std::string>(&e.v);
+      PyObject *item = PyUnicode_DecodeUTF8(
+          str ? str->data() : "", str ? static_cast<Py_ssize_t>(str->size()) : 0, "replace");
+      if (!item || PyList_Append(value, item) < 0) {
+        Py_XDECREF(item);
+        Py_DECREF(value);
+        return nullptr;
+      }
+      Py_DECREF(item);
+    }
   } else if (!(value = value_capsule(std::move(event.value)))) {
     return nullptr;
   }
@@ -676,6 +694,136 @@ PyObject *arihost_listen_chat(PyObject *self, PyObject *args) {
   if (!link)
     return nullptr;
   link->listen_chat(room != 0, dms != 0);
+  Py_RETURN_NONE;
+}
+
+// The program's connections in the relay's client registry (host.clients; ARISRV_IDENTITY.md 2.8),
+// applied by the relay on its next step, in order, each answered by a "clients_answer" event with
+// ID: ["ok", client id] (open), ["ok"], or ["error", code, message].
+//   client_open(id, key, transport, address, local, kind, version, capabilities,
+//               country, region, city, asn)
+//   client_name(id, key, nick)
+//   client_update(id, key, kind, version, capabilities)
+//   client_close(id, key)
+// capabilities: a list of str.
+namespace {
+bool str_list_arg(PyObject *list, std::vector<std::string> &out) {
+  PyObject *seq = PySequence_Fast(list, "capabilities must be a list of str");
+  if (!seq)
+    return false;
+  const Py_ssize_t n = PySequence_Fast_GET_SIZE(seq);
+  for (Py_ssize_t i = 0; i < n; ++i) {
+    PyObject *item = PySequence_Fast_GET_ITEM(seq, i);
+    Py_ssize_t len = 0;
+    const char *text = PyUnicode_Check(item) ? PyUnicode_AsUTF8AndSize(item, &len) : nullptr;
+    if (!text) {
+      Py_DECREF(seq);
+      if (!PyErr_Occurred())
+        PyErr_SetString(PyExc_TypeError, "capabilities must be a list of str");
+      return false;
+    }
+    out.emplace_back(text, static_cast<std::size_t>(len));
+  }
+  Py_DECREF(seq);
+  return true;
+}
+} // namespace
+
+PyObject *arihost_client_open(PyObject *self, PyObject *args) {
+  unsigned long long id = 0;
+  const char *key = nullptr, *transport = nullptr, *address = nullptr, *local = nullptr,
+             *kind = nullptr, *version = nullptr, *country = nullptr, *region = nullptr,
+             *city = nullptr, *asn = nullptr;
+  PyObject *caps = nullptr;
+  if (!PyArg_ParseTuple(args, "KssssssOssss", &id, &key, &transport, &address, &local, &kind,
+                        &version, &caps, &country, &region, &city, &asn))
+    return nullptr;
+  ServerLink *link = server_link(self);
+  if (!link)
+    return nullptr;
+  ServerLink::ClientOp op;
+  op.kind = ServerLink::ClientOp::Kind::open;
+  op.id = id;
+  op.key = key;
+  op.transport = transport;
+  op.address = address;
+  op.local = local;
+  op.client_kind = kind;
+  op.version = version;
+  if (!str_list_arg(caps, op.capabilities))
+    return nullptr;
+  op.country = country;
+  op.region = region;
+  op.city = city;
+  op.asn = asn;
+  link->client_op(std::move(op));
+  Py_RETURN_NONE;
+}
+
+PyObject *arihost_client_name(PyObject *self, PyObject *args) {
+  unsigned long long id = 0;
+  const char *key = nullptr, *nick = nullptr;
+  if (!PyArg_ParseTuple(args, "Kss", &id, &key, &nick))
+    return nullptr;
+  ServerLink *link = server_link(self);
+  if (!link)
+    return nullptr;
+  ServerLink::ClientOp op;
+  op.kind = ServerLink::ClientOp::Kind::name;
+  op.id = id;
+  op.key = key;
+  op.nick = nick;
+  link->client_op(std::move(op));
+  Py_RETURN_NONE;
+}
+
+PyObject *arihost_client_update(PyObject *self, PyObject *args) {
+  unsigned long long id = 0;
+  const char *key = nullptr, *kind = nullptr, *version = nullptr;
+  PyObject *caps = nullptr;
+  if (!PyArg_ParseTuple(args, "KsssO", &id, &key, &kind, &version, &caps))
+    return nullptr;
+  ServerLink *link = server_link(self);
+  if (!link)
+    return nullptr;
+  ServerLink::ClientOp op;
+  op.kind = ServerLink::ClientOp::Kind::update;
+  op.id = id;
+  op.key = key;
+  op.client_kind = kind;
+  op.version = version;
+  if (!str_list_arg(caps, op.capabilities))
+    return nullptr;
+  link->client_op(std::move(op));
+  Py_RETURN_NONE;
+}
+
+PyObject *arihost_client_close(PyObject *self, PyObject *args) {
+  unsigned long long id = 0;
+  const char *key = nullptr;
+  if (!PyArg_ParseTuple(args, "Ks", &id, &key))
+    return nullptr;
+  ServerLink *link = server_link(self);
+  if (!link)
+    return nullptr;
+  ServerLink::ClientOp op;
+  op.kind = ServerLink::ClientOp::Kind::close;
+  op.id = id;
+  op.key = key;
+  link->client_op(std::move(op));
+  Py_RETURN_NONE;
+}
+
+// set_client_closer(ok): the program has a closer, which server.kick and server.ban reach with a
+// "client_close" event, [key, reason, "kick" | "ban"].
+PyObject *arihost_set_client_closer(PyObject *self, PyObject *args) {
+  int ok = 0;
+  if (!PyArg_ParseTuple(args, "p", &ok))
+    return nullptr;
+  ServerLink *link = server_link(self);
+  if (!link)
+    return nullptr;
+  link->set_closes(ok != 0);
   Py_RETURN_NONE;
 }
 
@@ -896,6 +1044,16 @@ const PyMethodDef kArihostMethods[] = {
      "bridge_post(via, uid, name, text, to): post as a bridged user."},
     {"listen_chat", arihost_listen_chat, METH_VARARGS,
      "listen_chat(room, dms): which of the room's posts reach the program."},
+    {"client_open", arihost_client_open, METH_VARARGS,
+     "client_open(id, key, transport, address, local, kind, version, capabilities, country, "
+     "region, city, asn): the program's connection, in the client registry."},
+    {"client_name", arihost_client_name, METH_VARARGS,
+     "client_name(id, key, nick): its protocol's nick, as its username."},
+    {"client_update", arihost_client_update, METH_VARARGS,
+     "client_update(id, key, kind, version, capabilities): what it says it is now."},
+    {"client_close", arihost_client_close, METH_VARARGS, "client_close(id, key): it closed."},
+    {"set_client_closer", arihost_set_client_closer, METH_VARARGS,
+     "set_client_closer(ok): server.kick and server.ban reach the program's connections."},
     {"set_converts", arihost_set_converts, METH_VARARGS,
      "set_converts(ok): pycvc is here to convert DSL values, so calls may be posted."},
     {"set_authenticates", arihost_set_authenticates, METH_VARARGS,
