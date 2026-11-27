@@ -124,6 +124,12 @@ struct SchemaIssue {
 // native stack, so this keeps a load inside the smallest stack a host loads on (wasm's 2 MiB).
 constexpr std::size_t kMaxNesting = 256;
 
+// §6.7 the deepest the schema check (§14.2) goes: levels of YAML, the document (or include:
+// expansion) itself one. The check goes down a level of YAML at a time on the native stack, so a
+// tree deeper than this is not checked: it gets one SchemaIssue, at its first value past the
+// limit, that says so. The deepest shipped document is 13 levels of YAML.
+constexpr std::size_t kMaxSchemaDepth = 128;
+
 // What validate_string / validate_file found.
 struct ValidationResult {
   // False when nothing was checked: this build has no validator (have_jsonschema()), or the

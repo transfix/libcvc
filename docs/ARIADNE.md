@@ -5147,7 +5147,8 @@ scene:
   and its parts under it), its own transform, material and tags, so a script moves or recolours
   one instance and not the others.
 - **Nesting.** A prototype's nodes may `use:` other prototypes. A prototype within itself, at any
-  depth, is not expanded, with a warning, and so is a name no prototype has.
+  depth, is not expanded, with a warning, and so is a name no prototype has. Each `use:` is a
+  level of the document's nesting, and so is each node (§6.7): a scene nests at most 256 levels.
 - **The schema** (§14) checks a using node as it is written, its `use:` and `args:` with its other
   keys, and a prototype only for its `args:`: its values may hold tokens its instances fill in.
 
@@ -6544,15 +6545,28 @@ and `load:` entry: the unit's widget, or the fragment's widgets, go on a level b
 A context menu's items and a tab bar's tabs are a level below their widget, as children are. The
 count runs through the whole document, across every unit and every mounted fragment.
 
-A load that would go deeper fails (`LoadResult::ok` is false) and builds no tree. The error is at
-the first widget past the limit, where it is written: for a widget in an `include:` expansion,
-the same place in the unit, in the unit's own file. It counts the `include:` and `load:` entries
-on the way down, and names each one that goes into another file:
+A scene counts the same way: each scene node is a level, and so is each `use:` of a prototype
+(§5.18), whose node goes on a level below it. Scenes are parsed after the widgets, so a scene has
+all 256 levels to itself. Written out, a scene's YAML stops it at about 247 nodes (see below);
+through `use:`s of prototypes that `use:` others, the limit is all that stops it.
+
+A load that would go deeper fails (`LoadResult::ok` is false) and builds no tree and no scenes.
+The error is at the first widget past the limit, where it is written: for a widget in an
+`include:` expansion, the same place in the unit, in the unit's own file. It counts the
+`include:` and `load:` entries on the way down, and names each one that goes into another file:
 
 ```
 ari: lib.ari:510:9: a widget nested deeper than 256 levels, the most a document may (each widget,
 include: and load: a level; docs/ARIADNE.md §6.7), with 127 include: and 1 load: on the way, by
 way of main.ari:5:9 load: frag.ari, frag.ari:4:5 include: level0 (in lib.ari)
+```
+
+A scene that goes deeper fails the same way, at its first node past the limit; for a node in a
+prototype's instance, that is where the node is written in the prototype:
+
+```
+ari: scene.ari:102:1310: a scene node nested deeper than 256 levels, the most a document may (each
+scene node and use: a level; docs/ARIADNE.md §6.7), with 100 use: on the way
 ```
 
 `LoadResult::error_source`, `error_line` and `error_column` hold that place, and `ari validate`
@@ -6563,15 +6577,29 @@ inside the smallest stack a host loads on: wasm's 2 MiB (`-sSTACK_SIZE` for ari'
 arigl web, arigl-web, cyprty and the examples). In MSVC Release the parse takes about 0.9 KB of
 stack a level through `include:`s, 1.1 KB a level written inline and about 2 KB for each `load:`,
 so a document at the limit loads, and draws, on 2 MiB (`ariadne_deep_nesting_test` checks that),
-where the parse alone would go about 2,300 levels deep. The shipped documents nest at most 11
-levels. Drawing has no limit of its own: the per-frame walk keeps its place on the heap.
+where the parse alone would go about 2,300 levels deep. A scene level takes about 0.6 KB (0.2 KB
+in wasm), so a scene at the limit loads on less than 192 KiB. The shipped documents nest at most
+11 levels, and their scenes 2. Drawing has no limit of its own: the per-frame walk keeps its place
+on the heap.
 
-Two parts of a load go down a level of YAML at a time rather than a widget, and yaml-cpp bounds
-them: it parses at most about 500 levels of YAML, which is about 246 widgets written inline (two
-levels of YAML each). They are yaml-cpp's own parse, about 0.9 KB a level, and the schema check
-(§14.2), about 2.8 KB a level. Checking a document that deep takes 1.25 to 1.5 MiB in MSVC
-Release, and checking a fragment that deep, loaded at the bottom of a 254-level chain, 1.5 to
-1.75 MiB.
+Two parts of a load go down a level of YAML at a time rather than a widget or a scene node:
+
+- **yaml-cpp's own parse**, about 0.9 KB a level. It stops at about 500 levels of YAML, which is
+  about 246 widgets written inline (two levels of YAML each): reading a document that deep takes
+  384 to 448 KiB in MSVC Release.
+- **The schema check** (§14.2), about 2.8 KB a level, inside json-schema-validator. It goes at
+  most `kMaxSchemaDepth` levels of YAML deep, 128 (the document, or the `include:` expansion,
+  is level 1). That is ten times the deepest shipped document's 13. A document, library, fragment
+  or `include:` expansion whose YAML goes deeper is not checked. Instead it gets one schema
+  issue, at its first value past the limit: `nested more than 128 levels of YAML deep, the most
+  the schema check goes (docs/ARIADNE.md §6.7): this document is not checked`. The load goes on,
+  as it does for any schema issue, and `ari validate` fails the document. The deepest check that
+  runs takes 320 to 384 KiB.
+
+So the most stack a load takes is for a fragment as deep as yaml-cpp reads, `load:`ed at the
+bottom of a 254-level chain: 640 to 704 KiB in MSVC Release, about a third of 2 MiB. Checking
+every level of it took 1.5 to 1.6 MiB. `ariadne_deep_nesting_test` loads each worst case on
+1 MiB: that fragment, a document and a scene as deep as yaml-cpp reads, and a scene at the limit.
 
 ## 7. State prefix and mount scoping
 
@@ -9495,6 +9523,9 @@ A build with the validator (json-schema-validator over nlohmann-json; `have_json
 - each `include:` expansion, as a widget, after its args are substituted and its slots filled.
   A problem there is reported in the unit's own file and line, with the context
   `include <unit>`.
+
+Each of these is checked down to `kMaxSchemaDepth` levels of YAML, 128 (§6.7). One that goes
+deeper is not checked, and its one issue, at its first value past that depth, says so.
 
 Each problem is a warning, `ari: schema: <file>:<line>:<column>: <context>: <pointer>:
 <message>`, and a `SchemaIssue` in `LoadResult::schema_issues`. The load goes on: the loader is
