@@ -73,15 +73,15 @@ const char *status_name(Status s); // "loading" | "ready" | "failed"
 struct ImageRequest {
   std::string uri;
   std::string auth; // a credential NAME (never a token); "" = none
+  int w = 256;      // the box, px
+  int h = 0;        // <= 0: the image's own aspect at width w
+  Fit fit = Fit::Contain;
+  Shape shape = Shape::Rect;
   // The scope of the widget that shows it (the Runtime's prefix there): an http(s) picture is
   // fetched as that scope's principal (net_host_access(app, scope); docs/roadmap/ARIADNE_SHELL.md
   // 4.12), on its allowlist and with its credential, and is not shared with another principal's
   // widget. "" = the launcher's.
   std::string scope;
-  int w = 256;      // the box, px
-  int h = 0;        // <= 0: the image's own aspect at width w
-  Fit fit = Fit::Contain;
-  Shape shape = Shape::Rect;
 };
 
 // An animated picture's frames, fitted to the widget's box like ImageView::image (its first).

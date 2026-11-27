@@ -26,12 +26,12 @@ namespace ariadne {
 struct MediaSave {
   std::string url;    // its source, as the widget names it (http(s), file, cvc, state)
   std::string auth;   // the credential NAME the widget fetches it with (never a token); "" none
-  // The scope of the widget or program it is saved for: an http(s) one is fetched as its principal
-  // (media.h ImageRequest::scope; docs/roadmap/ARIADNE_SHELL.md 4.12). "" the launcher's.
-  std::string scope;
   std::string name;   // the file name to give it; "" = from the URL
   std::string mime;   // its MIME type; "" = what the bytes are
   bool video = false; // a video's ("Save video..."), not a picture's
+  // The scope of the widget or program it is saved for: an http(s) one is fetched as its principal
+  // (media.h ImageRequest::scope; docs/roadmap/ARIADNE_SHELL.md 4.12). "" the launcher's.
+  std::string scope;
 };
 
 // The name a browser page stages a save's bytes under (browser_save_stage): its URL and credential
