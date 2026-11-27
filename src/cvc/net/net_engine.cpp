@@ -1,5 +1,5 @@
 // cvc::net — the native connection engine (inc/cvc/net/net_engine.h,
-// docs/roadmap/ARIADNE_NET_ENGINE.md N1).
+// docs/roadmap/ARIADNE_NET_ENGINE.md N1, N3).
 //
 // Each I/O thread is a `worker`: an io_context, the connections pinned to it, its share of every
 // group (a group's members on that thread), and its commands. A command for one connection goes
@@ -22,6 +22,14 @@
 // zero-byte overlapped WSARecv. Its wait for room to write goes through a select() thread beside
 // IOCP, though, which is slow with thousands of sockets, so there a full socket gets the rest of
 // its output as an overlapped write (async_write_some) instead.
+//
+// TLS (N3) keeps that model. A TLS connection's OpenSSL session reads and writes through a BIO of
+// our own over two strings: the records read from the socket go into `in`, and OpenSSL's records
+// come out in `out`, which the connection writes as it writes plain output. Its queue holds the
+// program's bytes as on a plain connection (one buffer for every receiver of a broadcast); they
+// are encrypted as they are written, small ones packed into one record. Asio's ssl::stream would
+// need a read buffer a connection and its own async operations, so only its ssl::context (the
+// certificate, the key, the options) is used.
 
 #include <algorithm>
 #include <atomic>
@@ -38,6 +46,21 @@
 
 #if !defined(__EMSCRIPTEN__)
 #include <boost/asio.hpp>
+#endif
+
+#if !defined(CVC_NET_HAVE_TLS) || defined(__EMSCRIPTEN__)
+#undef CVC_NET_HAVE_TLS
+#define CVC_NET_HAVE_TLS 0
+#endif
+#if CVC_NET_HAVE_TLS
+#include <boost/asio/ssl/context.hpp>
+#include <climits>
+#include <filesystem>
+#include <openssl/bio.h>
+#include <openssl/err.h>
+#include <openssl/evp.h>
+#include <openssl/ssl.h>
+#include <openssl/x509.h>
 #endif
 
 namespace cvc {
@@ -63,6 +86,8 @@ const char *to_string(close_reason reason) {
     return "first_frame_timeout";
   case close_reason::engine_stopped:
     return "engine_stopped";
+  case close_reason::tls_handshake:
+    return "tls_handshake";
   }
   return "unknown";
 }
@@ -81,6 +106,16 @@ listener_id net_engine::listen(const listener_options &, std::string *error) {
 }
 std::uint16_t net_engine::port(listener_id) const { return 0; }
 void net_engine::stop_listening(listener_id) {}
+bool net_engine::tls_available() { return false; }
+bool net_engine::reload_tls(listener_id, std::string *error) {
+  if (error)
+    *error = "a browser page cannot listen";
+  return false;
+}
+bool net_engine::reload_tls(listener_id, const tls_options &, std::string *error) {
+  return reload_tls(0, error);
+}
+std::string net_engine::tls_keyprint(listener_id) const { return {}; }
 void net_engine::send(conn_id, std::string_view) {}
 void net_engine::send(conn_id, payload) {}
 void net_engine::send_many(const std::vector<conn_id> &, std::string_view) {}
@@ -126,6 +161,9 @@ constexpr std::size_t kGatherBuffers = 64; // Asio passes at most 64 buffers to 
 constexpr std::size_t kGatherBytes = 256 * 1024;
 constexpr int kReadsPerTurn = 4; // then other connections get the thread
 constexpr std::chrono::milliseconds kAcceptRetry{100};
+constexpr std::size_t kTlsRecord = 16384;   // the most one TLS record holds
+constexpr std::size_t kTlsPass = 64 * 1024; // the output one write's turn encrypts
+constexpr std::size_t kTlsKeep = 4096;      // a TLS buffer past this is freed once it empties
 
 using counter = std::atomic<std::uint64_t>;
 
@@ -136,7 +174,7 @@ struct alignas(64) counter_block {
   std::array<counter, kCloseReasons> closed{};
   counter bytes_in{0}, frames_in{0}, bytes_out{0}, messages_out{0};
   counter broadcast_receivers{0};
-  counter queued_bytes{0}, max_queued_bytes{0};
+  counter queued_bytes{0}, max_queued_bytes{0}, tls_accepted{0};
   counter busy_ns{0}, handlers{0}, connections{0}; // the engine's blocks only
 
   void add_to(net_counters &c) const {
@@ -152,6 +190,7 @@ struct alignas(64) counter_block {
     c.queued_bytes += queued_bytes.load(std::memory_order_relaxed);
     c.max_queued_bytes =
         std::max(c.max_queued_bytes, max_queued_bytes.load(std::memory_order_relaxed));
+    c.tls_accepted += tls_accepted.load(std::memory_order_relaxed);
   }
 };
 
@@ -182,6 +221,369 @@ struct command {
   std::size_t mark = 0;
 };
 
+// ── TLS ───────────────────────────────────────────────────────────────────────────────────────
+
+// RFC 4648's base32, unpadded (ADC's keyprints and TTHs).
+std::string base32(const unsigned char *p, std::size_t n) {
+  static const char digits[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+  std::string out;
+  out.reserve((n * 8 + 4) / 5);
+  unsigned buf = 0;
+  int bits = 0;
+  for (std::size_t i = 0; i < n; ++i) {
+    buf = (buf << 8) | p[i];
+    bits += 8;
+    while (bits >= 5) {
+      out.push_back(digits[(buf >> (bits - 5)) & 31]);
+      bits -= 5;
+    }
+  }
+  if (bits > 0)
+    out.push_back(digits[(buf << (5 - bits)) & 31]);
+  return out;
+}
+
+std::string hex(const unsigned char *p, std::size_t n) {
+  static const char digits[] = "0123456789abcdef";
+  std::string out;
+  out.reserve(n * 2);
+  for (std::size_t i = 0; i < n; ++i) {
+    out.push_back(digits[p[i] >> 4]);
+    out.push_back(digits[p[i] & 15]);
+  }
+  return out;
+}
+
+#if CVC_NET_HAVE_TLS
+
+namespace ssl = asio::ssl;
+namespace fs = std::filesystem;
+
+// The two files' modification times, as the watch compares them.
+using file_times = std::pair<fs::file_time_type, fs::file_time_type>;
+
+// OpenSSL's reason for the last failure on this thread (and the queue cleared), or `otherwise`.
+std::string ssl_reason(const char *otherwise) {
+  const unsigned long code = ERR_get_error();
+  ERR_clear_error();
+  if (code == 0)
+    return otherwise;
+  if (const char *r = ERR_reason_error_string(code))
+    return r;
+  char buf[256];
+  ERR_error_string_n(code, buf, sizeof buf);
+  return buf;
+}
+
+// The SHA-256 of a certificate's DER; false when OpenSSL cannot make it.
+bool cert_sha256(X509 *cert, unsigned char (&md)[32]) {
+  unsigned int len = 0;
+  return X509_digest(cert, EVP_sha256(), md, &len) == 1 && len == 32;
+}
+
+// A listener's certificate and key, loaded: what new connections start their sessions from. Each
+// connection holds the one it started from, so its BIO method outlives the session's BIO.
+struct tls_context {
+  ssl::context ctx{ssl::context::tls_server};
+  BIO_METHOD *bio = nullptr; // tls_session's BIO (no process-wide method: libcvc keeps no globals)
+  tls_options options;
+  std::string keyprint;
+  file_times times; // the files' modification times just before they were read
+
+  tls_context() = default;
+  tls_context(const tls_context &) = delete;
+  tls_context &operator=(const tls_context &) = delete;
+  ~tls_context() {
+    if (bio)
+      BIO_meth_free(bio);
+  }
+};
+
+BIO_METHOD *new_bio_method();
+
+file_times times_of(const tls_options &o) {
+  std::error_code ec;
+  file_times t;
+  t.first = fs::last_write_time(o.certificate_file, ec);
+  if (ec)
+    t.first = fs::file_time_type::min();
+  t.second = fs::last_write_time(o.key_file.empty() ? o.certificate_file : o.key_file, ec);
+  if (ec)
+    t.second = fs::file_time_type::min();
+  return t;
+}
+
+// Load `o`'s files into a new context; nullptr with `why` when they do not load.
+std::shared_ptr<tls_context> load_tls(const tls_options &o, std::string &why) {
+  if (!o.enabled()) {
+    why = "no certificate file";
+    return nullptr;
+  }
+  auto t = std::make_shared<tls_context>();
+  t->options = o;
+  t->times = times_of(o);
+  t->bio = new_bio_method();
+  if (!t->bio) {
+    why = ssl_reason("out of memory");
+    return nullptr;
+  }
+  SSL_CTX *c = t->ctx.native_handle();
+  boost::system::error_code ec;
+  t->ctx.set_options(ssl::context::default_workarounds | ssl::context::no_sslv2 |
+                         ssl::context::no_sslv3 | ssl::context::single_dh_use,
+                     ec);
+  long opts = SSL_OP_NO_COMPRESSION;
+#if defined(SSL_OP_NO_RENEGOTIATION)
+  opts |= SSL_OP_NO_RENEGOTIATION;
+#endif
+#if defined(SSL_OP_IGNORE_UNEXPECTED_EOF)
+  opts |= SSL_OP_IGNORE_UNEXPECTED_EOF; // a peer that ends without close_notify just closed
+#endif
+  SSL_CTX_set_options(c, opts);
+  SSL_CTX_set_min_proto_version(c, o.min_version == tls_protocol::tls1_3 ? TLS1_3_VERSION
+                                                                         : TLS1_2_VERSION);
+  // An idle session holds no record buffers; resumption is by ticket, with no server-side cache
+  // of a session a connection.
+  SSL_CTX_set_mode(c, SSL_MODE_RELEASE_BUFFERS);
+  SSL_CTX_set_session_cache_mode(c, SSL_SESS_CACHE_OFF);
+  static const unsigned char sid[] = "cvc.net";
+  SSL_CTX_set_session_id_context(c, sid, sizeof sid - 1);
+  ERR_clear_error();
+  if (!o.ciphers.empty() && SSL_CTX_set_cipher_list(c, o.ciphers.c_str()) != 1) {
+    why = "the TLS 1.2 ciphers \"" + o.ciphers + "\": " + ssl_reason("none is known");
+    return nullptr;
+  }
+  if (!o.ciphersuites.empty() && SSL_CTX_set_ciphersuites(c, o.ciphersuites.c_str()) != 1) {
+    why = "the TLS 1.3 ciphersuites \"" + o.ciphersuites + "\": " + ssl_reason("none is known");
+    return nullptr;
+  }
+  t->ctx.use_certificate_chain_file(o.certificate_file, ec);
+  if (ec) {
+    why = "the certificate " + o.certificate_file + ": " + ec.message();
+    return nullptr;
+  }
+  const std::string &key = o.key_file.empty() ? o.certificate_file : o.key_file;
+  t->ctx.use_private_key_file(key, ssl::context::pem, ec);
+  if (ec) {
+    why = "the key " + key + ": " + ec.message();
+    return nullptr;
+  }
+  if (SSL_CTX_check_private_key(c) != 1) {
+    why = "the key " + key + " is not the certificate's: " + ssl_reason("they do not match");
+    return nullptr;
+  }
+  if (o.request_peer_certificate)
+    SSL_CTX_set_verify(c, SSL_VERIFY_PEER | SSL_VERIFY_CLIENT_ONCE,
+                       [](int, X509_STORE_CTX *) { return 1; }); // the program judges it
+  unsigned char md[32];
+  X509 *cert = SSL_CTX_get0_certificate(c);
+  if (!cert || !cert_sha256(cert, md)) {
+    why = "the certificate " + o.certificate_file + ": " + ssl_reason("no digest");
+    return nullptr;
+  }
+  t->keyprint = "SHA256/" + base32(md, sizeof md);
+  ERR_clear_error();
+  return t;
+}
+
+// One connection's OpenSSL session, over a BIO of `in` (records read, not yet taken) and `out`
+// (records to write). Started as a server here; N4's client connections start it as a client
+// (SSL_set_connect_state, with SNI, verification and a pin).
+struct tls_session {
+  SSL *ssl = nullptr;
+  std::string in;
+  std::size_t in_off = 0;
+  std::string out;
+  std::size_t out_off = 0;
+#if CVC_NET_ASYNC_WRITES
+  std::string flight; // an overlapped write's records
+#endif
+  bool shut = false; // close_notify made
+
+  tls_session() = default;
+  tls_session(const tls_session &) = delete;
+  tls_session &operator=(const tls_session &) = delete;
+  ~tls_session() {
+    if (ssl)
+      SSL_free(ssl); // and the BIO
+  }
+
+  static std::unique_ptr<tls_session> server(tls_context &t, std::string &why) {
+    auto s = std::make_unique<tls_session>();
+    ERR_clear_error();
+    s->ssl = SSL_new(t.ctx.native_handle());
+    BIO *b = s->ssl ? BIO_new(t.bio) : nullptr;
+    if (!b) {
+      why = ssl_reason("out of memory");
+      return nullptr;
+    }
+    BIO_set_data(b, s.get());
+    BIO_set_init(b, 1);
+    SSL_set_bio(s->ssl, b, b); // one reference, the session's
+    SSL_set_accept_state(s->ssl);
+    return s;
+  }
+
+  bool has_out() const { return out_off < out.size(); }
+  void sent(std::size_t n) {
+    out_off += n;
+    if (out_off == out.size()) {
+      out.clear();
+      out_off = 0;
+      if (out.capacity() > kTlsKeep)
+        std::string().swap(out);
+    }
+  }
+
+  // 1: done; 0: it needs more input; -1: it failed (`why`).
+  int handshake(std::string &why) {
+    ERR_clear_error();
+    const int r = SSL_do_handshake(ssl);
+    if (r == 1)
+      return 1;
+    const int e = SSL_get_error(ssl, r);
+    if (e == SSL_ERROR_WANT_READ)
+      return 0;
+    why = ssl_reason("the handshake failed");
+    return -1;
+  }
+
+  // The bytes read (>0); 0: none until more input; -1: the peer's close_notify; -2: a failure.
+  long read(char *buf, std::size_t len, std::string &why) {
+    ERR_clear_error();
+    const int r = SSL_read(ssl, buf, static_cast<int>(std::min<std::size_t>(len, INT_MAX)));
+    if (r > 0)
+      return r;
+    const int e = SSL_get_error(ssl, r);
+    if (e == SSL_ERROR_WANT_READ)
+      return 0;
+    if (e == SSL_ERROR_ZERO_RETURN)
+      return -1;
+    why = ssl_reason("a TLS read failed");
+    return -2;
+  }
+
+  // Encrypt `n` bytes into `out` (the BIO takes all of it).
+  bool write(const char *data, std::size_t n, std::string &why) {
+    ERR_clear_error();
+    if (SSL_write(ssl, data, static_cast<int>(n)) == static_cast<int>(n))
+      return true;
+    why = ssl_reason("a TLS write failed");
+    return false;
+  }
+
+  void shutdown() {
+    ERR_clear_error();
+    SSL_shutdown(ssl); // our close_notify into `out`; the peer's is not waited for
+    ERR_clear_error();
+    shut = true;
+  }
+
+  void describe(conn_info &info) const {
+    info.tls_version = SSL_get_version(ssl);
+    if (const char *c = SSL_get_cipher_name(ssl))
+      info.tls_cipher = c;
+    if (const char *sni = SSL_get_servername(ssl, TLSEXT_NAMETYPE_host_name))
+      info.tls_sni = sni;
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+    X509 *peer = SSL_get1_peer_certificate(ssl);
+#else
+    X509 *peer = SSL_get_peer_certificate(ssl);
+#endif
+    if (peer) {
+      unsigned char md[32];
+      if (cert_sha256(peer, md)) {
+        info.tls_peer_sha256 = hex(md, sizeof md);
+        info.tls_peer_keyprint = "SHA256/" + base32(md, sizeof md);
+      }
+      X509_free(peer);
+    }
+  }
+
+  // The BIO.
+  static int bio_write(BIO *b, const char *data, int len) {
+    BIO_clear_retry_flags(b);
+    if (len <= 0)
+      return 0;
+    static_cast<tls_session *>(BIO_get_data(b))->out.append(data, static_cast<std::size_t>(len));
+    return len;
+  }
+  static int bio_read(BIO *b, char *data, int len) {
+    BIO_clear_retry_flags(b);
+    auto *s = static_cast<tls_session *>(BIO_get_data(b));
+    const std::size_t have = s->in.size() - s->in_off;
+    if (have == 0) {
+      BIO_set_retry_read(b);
+      return -1;
+    }
+    const std::size_t n = std::min<std::size_t>(have, static_cast<std::size_t>(std::max(len, 0)));
+    std::memcpy(data, s->in.data() + s->in_off, n);
+    s->in_off += n;
+    if (s->in_off == s->in.size()) {
+      s->in.clear();
+      s->in_off = 0;
+      if (s->in.capacity() > kTlsKeep)
+        std::string().swap(s->in);
+    }
+    return static_cast<int>(n);
+  }
+  static long bio_ctrl(BIO *b, int cmd, long, void *) {
+    switch (cmd) {
+    case BIO_CTRL_FLUSH:
+      return 1;
+    case BIO_CTRL_PENDING: {
+      auto *s = static_cast<tls_session *>(BIO_get_data(b));
+      return static_cast<long>(s->in.size() - s->in_off);
+    }
+    default:
+      return 0;
+    }
+  }
+};
+
+BIO_METHOD *new_bio_method() {
+  BIO_METHOD *bm = BIO_meth_new(BIO_TYPE_SOURCE_SINK, "cvc.net");
+  if (bm) {
+    BIO_meth_set_write(bm, &tls_session::bio_write);
+    BIO_meth_set_read(bm, &tls_session::bio_read);
+    BIO_meth_set_ctrl(bm, &tls_session::bio_ctrl);
+  }
+  return bm;
+}
+
+#else // !CVC_NET_HAVE_TLS: no listener has TLS, so no connection makes a session.
+
+struct tls_context {
+  tls_options options;
+  std::string keyprint;
+};
+std::shared_ptr<tls_context> load_tls(const tls_options &, std::string &why) {
+  why = "this build of libcvc has no TLS (OpenSSL's libssl)";
+  return nullptr;
+}
+struct tls_session {
+  std::string out;
+  std::size_t out_off = 0;
+#if CVC_NET_ASYNC_WRITES
+  std::string flight;
+#endif
+  bool shut = false;
+  static std::unique_ptr<tls_session> server(tls_context &, std::string &why) {
+    why = "no TLS";
+    return nullptr;
+  }
+  bool has_out() const { return false; }
+  void sent(std::size_t) {}
+  int handshake(std::string &) { return -1; }
+  long read(char *, std::size_t, std::string &) { return -2; }
+  bool write(const char *, std::size_t, std::string &) { return false; }
+  void shutdown() { shut = true; }
+  void describe(conn_info &) const {}
+  std::string in;
+};
+
+#endif // CVC_NET_HAVE_TLS
+
 } // namespace
 
 struct worker;
@@ -198,8 +600,22 @@ struct listener_state {
   bool stopped = false;                    // on the acceptor's thread
   std::unique_ptr<counter_block[]> blocks; // one a worker
 
+  // TLS: what new connections start from, replaced by a reload.
+  mutable std::mutex tls_mu;
+  std::shared_ptr<tls_context> tls; // under tls_mu
+  asio::steady_timer watch;         // the files' watch, on the acceptor's thread
+#if CVC_NET_HAVE_TLS
+  file_times watch_seen{};  // the times the watch's last tick saw
+  file_times watch_tried{}; // the times a watched reload last tried (and failed) to load
+#endif
+
   listener_state(asio::io_context &ctx, unsigned workers)
-      : acceptor(ctx), retry(ctx), blocks(new counter_block[workers]) {}
+      : acceptor(ctx), retry(ctx), blocks(new counter_block[workers]), watch(ctx) {}
+
+  std::shared_ptr<tls_context> tls_now() const {
+    std::lock_guard<std::mutex> lock(tls_mu);
+    return tls;
+  }
 };
 
 struct net_engine::impl {
@@ -231,6 +647,12 @@ struct net_engine::impl {
   void post_events(std::vector<net_event> &evs, std::vector<std::shared_ptr<const void>> &k);
   void start_accept(const std::shared_ptr<listener_state> &l);
   void adopt(worker &w, tcp::socket socket, const std::shared_ptr<listener_state> &l, conn_id id);
+  // A listener's event from any thread (a TLS reload's).
+  void post_listener_event(net_event::type kind, listener_id listener, std::string message);
+  bool reload(listener_id id, const tls_options *tls, std::string *error);
+  void arm_watch(const std::shared_ptr<listener_state> &l); // on worker 0
+  void watch_tick(const std::shared_ptr<listener_state> &l);
+  std::shared_ptr<listener_state> find_listener(listener_id id) const;
   ~impl();
 };
 
@@ -254,12 +676,13 @@ struct worker {
   std::vector<net_event> out_events;
   std::vector<std::shared_ptr<const void>> out_keep;
   std::vector<char> scratch;
+  std::vector<char> tls_pack; // small sends packed into one record
   std::vector<asio::const_buffer> gather;
   std::vector<command> running; // the commands being applied
   counter_block counters;
 
   worker(net_engine::impl &e, unsigned i, std::size_t read_buffer)
-      : engine(e), index(i), scratch(read_buffer) {
+      : engine(e), index(i), scratch(read_buffer), tls_pack(kTlsRecord) {
     gather.reserve(kGatherBuffers);
   }
 
@@ -310,6 +733,10 @@ struct turn {
 
 struct connection : std::enable_shared_from_this<connection> {
   enum class phase : std::uint8_t { open, closing, closed };
+  // What it speaks. `detecting` waits for the first byte (listener_options::detect_tls);
+  // `handshaking` and `tls` have a session.
+  enum class layer : std::uint8_t { plain, detecting, handshaking, tls };
+  enum class timer_for : std::uint8_t { first_frame, flush, detect, handshake };
 
   worker &w;
   conn_id id;
@@ -319,10 +746,16 @@ struct connection : std::enable_shared_from_this<connection> {
   framing frames;
   std::size_t max_frame, max_queued;
   inbound_limits limits;
+  conn_info info; // posted with `accepted`
+
+  layer speaks = layer::plain;
+  std::shared_ptr<tls_context> tls_ctx; // the listener's TLS when this was accepted
+  std::unique_ptr<tls_session> tls;
 
   phase state = phase::open;
   bool reading = false, writing = false, paused = false, peer_eof = false;
   bool got_frame = false, is_dirty = false, want_w = false;
+  bool announced = false; // `accepted` posted: the program knows it, and hears of its close
   std::size_t low_mark = 0;
   std::uint64_t raw_left = 0;
 
@@ -333,14 +766,16 @@ struct connection : std::enable_shared_from_this<connection> {
   std::uint64_t window_bytes = 0, window_frames = 0;
 
   std::deque<net_engine::payload> out;
-  std::size_t front_off = 0; // bytes of out.front() already written
+  std::size_t front_off = 0; // bytes of out.front() already written (or encrypted)
   std::size_t queued = 0;
 #if CVC_NET_ASYNC_WRITES
   // The overlapped write's payloads, kept until its handler runs (a close clears `out` first).
   std::vector<net_engine::payload> in_flight;
 #endif
 
-  asio::steady_timer timer; // the first frame's deadline, or a flushing close's
+  // One deadline at a time: the detection's, then the handshake's, then the first frame's, or a
+  // flushing close's.
+  asio::steady_timer timer;
   unsigned timer_gen = 0;
   std::vector<std::string> groups;
   close_reason reason = close_reason::program;
@@ -370,25 +805,81 @@ struct connection : std::enable_shared_from_this<connection> {
     raw_left = frames.kind == framing::mode::raw ? frames.raw_bytes : 0;
   }
 
+  // ── the start: detection, the handshake, `accepted` ──────────────────────────────────────────
+  // Tell the program (its first sends then go out on the layer decided).
+  void announce() {
+    announced = true;
+    w.out_events.emplace_back();
+    net_event &ev = w.out_events.back();
+    ev.kind = net_event::type::accepted;
+    ev.conn = id;
+    ev.listener = listener->id;
+    ev.info = info;
+    if (limits.first_frame_timeout.count() > 0 && !got_frame)
+      arm_timer(limits.first_frame_timeout, timer_for::first_frame);
+    if (!out.empty())
+      mark_dirty();
+  }
+
+  bool begin_tls() {
+    std::string why;
+    tls = tls_session::server(*tls_ctx, why);
+    if (!tls) {
+      fail(close_reason::tls_handshake, why);
+      return false;
+    }
+    speaks = layer::handshaking;
+    if (tls_ctx->options.handshake_timeout.count() > 0)
+      arm_timer(tls_ctx->options.handshake_timeout, timer_for::handshake);
+    else
+      cancel_timer();
+    return true;
+  }
+
+  void established() {
+    speaks = layer::tls;
+    cancel_timer();
+    tls->describe(info);
+    count(&counter_block::tls_accepted);
+    announce();
+  }
+
   // ── timers ────────────────────────────────────────────────────────────────────────────────────
-  void arm_timer(std::chrono::milliseconds after, close_reason why) {
+  void arm_timer(std::chrono::milliseconds after, timer_for why) {
     const unsigned gen = ++timer_gen;
     timer.expires_after(after);
     timer.async_wait([self = shared_from_this(), gen, why](const boost::system::error_code &ec) {
       if (ec || gen != self->timer_gen)
         return;
       turn t(self->w);
-      if (why == close_reason::first_frame_timeout) {
-        if (self->state == phase::open && !self->got_frame)
-          self->fail(why);
-      } else if (self->state == phase::closing) {
-        self->fail(close_reason::program, "the flush timed out");
-      }
+      self->on_timer(why);
     });
   }
   void cancel_timer() {
     ++timer_gen;
     timer.cancel();
+  }
+  void on_timer(timer_for why) {
+    switch (why) {
+    case timer_for::first_frame:
+      if (state == phase::open && !got_frame)
+        fail(close_reason::first_frame_timeout);
+      break;
+    case timer_for::flush:
+      if (state == phase::closing)
+        fail(close_reason::program, "the flush timed out");
+      break;
+    case timer_for::detect: // nothing came: a plain client waiting for the server
+      if (state == phase::open && speaks == layer::detecting) {
+        speaks = layer::plain;
+        announce();
+      }
+      break;
+    case timer_for::handshake:
+      if (state == phase::open && speaks == layer::handshaking)
+        fail(close_reason::tls_handshake, "the handshake timed out");
+      break;
+    }
   }
 
   // ── input ─────────────────────────────────────────────────────────────────────────────────────
@@ -430,25 +921,82 @@ struct connection : std::enable_shared_from_this<connection> {
       }
       if (state != phase::open)
         continue; // closing: what comes in is dropped
-      count(&counter_block::bytes_in, n);
-      if (limits.bytes_per_window || limits.frames_per_window) {
-        if (now - window_start >= limits.window) {
-          window_start = now;
-          window_bytes = window_frames = 0;
-        }
-        window_bytes += n;
-        if (limits.bytes_per_window && window_bytes > limits.bytes_per_window) {
-          fail(close_reason::bytes_limit);
-          return;
-        }
-      }
-      consume(w.scratch.data(), n);
-      if (state != phase::open || paused)
+      if (!input(w.scratch.data(), n, now))
         return;
       if (n < w.scratch.size())
         break; // most likely all there was
     }
     start_read();
+  }
+
+  // Bytes read from the socket; false once the connection stops reading (closed or paused).
+  bool input(const char *data, std::size_t n, steady::time_point now) {
+    if (speaks == layer::detecting) {
+      cancel_timer();
+      if (static_cast<unsigned char>(data[0]) == 0x16) { // a TLS handshake record
+        if (!begin_tls())
+          return false;
+      } else {
+        speaks = layer::plain;
+        announce();
+      }
+    }
+    if (tls) {
+      tls->in.append(data, n);
+      return tls_pump(now);
+    }
+    return plain_input(data, n, now);
+  }
+
+  // The program's bytes: counted, limited, split.
+  bool plain_input(const char *data, std::size_t n, steady::time_point now) {
+    count(&counter_block::bytes_in, n);
+    if (limits.bytes_per_window || limits.frames_per_window) {
+      if (now - window_start >= limits.window) {
+        window_start = now;
+        window_bytes = window_frames = 0;
+      }
+      window_bytes += n;
+      if (limits.bytes_per_window && window_bytes > limits.bytes_per_window) {
+        fail(close_reason::bytes_limit);
+        return false;
+      }
+    }
+    consume(data, n);
+    return state == phase::open && !paused;
+  }
+
+  // Run the handshake on what has come, then decrypt it into the program's bytes (into the
+  // worker's read buffer, free again once its records are in `tls->in`).
+  bool tls_pump(steady::time_point now) {
+    std::string why;
+    if (speaks == layer::handshaking) {
+      const int r = tls->handshake(why);
+      if (tls->has_out())
+        mark_dirty(); // its records
+      if (r < 0) {
+        fail(close_reason::tls_handshake, why);
+        return false;
+      }
+      if (r == 0)
+        return true;
+      established();
+    }
+    while (state == phase::open && !paused) {
+      const long n = tls->read(w.scratch.data(), w.scratch.size(), why);
+      if (n > 0) {
+        plain_input(w.scratch.data(), static_cast<std::size_t>(n), now);
+        continue;
+      }
+      if (n == -1)
+        fail(close_reason::peer_closed);
+      else if (n < -1)
+        fail(close_reason::error, why);
+      break;
+    }
+    if (state != phase::closed && tls->has_out())
+      mark_dirty(); // a reply OpenSSL made while reading (a key update's)
+    return state == phase::open && !paused;
   }
 
   // Bytes just read: kept as `pending` while they complete no frame, else split.
@@ -602,6 +1150,9 @@ struct connection : std::enable_shared_from_this<connection> {
       pending.clear();
       split(std::move(chunk), 0);
     }
+    // TLS: records the pause left in the session (read, not yet decrypted) come next.
+    if (state == phase::open && !paused && speaks == layer::tls)
+      tls_pump(steady::now());
     if (state == phase::open && !paused)
       start_read();
   }
@@ -650,6 +1201,12 @@ struct connection : std::enable_shared_from_this<connection> {
   // Write what is queued until the socket is full; then wait for room.
   void write_now() {
     is_dirty = false;
+    if (tls) {
+      write_tls();
+      return;
+    }
+    if (speaks == layer::detecting)
+      return; // nothing goes out before the layer is decided
     while (state != phase::closed && !writing && !out.empty()) {
       const std::size_t bytes = gather_out();
       boost::system::error_code ec;
@@ -672,8 +1229,92 @@ struct connection : std::enable_shared_from_this<connection> {
       linger();
   }
 
+  // TLS: the session's records first; then, once the handshake is done, the queue encrypted a
+  // pass at a time; on a flushing close, close_notify last.
+  void write_tls() {
+    while (state != phase::closed && !writing) {
+      if (tls->has_out()) {
+        const std::size_t left = tls->out.size() - tls->out_off;
+        boost::system::error_code ec;
+        const std::size_t n =
+            sock.write_some(asio::buffer(tls->out.data() + tls->out_off, left), ec);
+        if (ec == asio::error::would_block || ec == asio::error::try_again) {
+          wait_writable();
+          return;
+        }
+        if (ec) {
+          fail(close_reason::error, ec.message());
+          return;
+        }
+        count(&counter_block::bytes_out, n);
+        tls->sent(n);
+        if (n < left) {
+          wait_writable();
+          return;
+        }
+        continue;
+      }
+      if (speaks != layer::tls)
+        break; // the handshake's records only, until it is done
+      if (!out.empty()) {
+        if (!encrypt())
+          return;
+        continue;
+      }
+      if (state == phase::closing && !tls->shut) {
+        tls->shutdown();
+        continue;
+      }
+      break;
+    }
+    if (state == phase::closing && !writing && out.empty() && !tls->has_out() &&
+        (tls->shut || speaks != layer::tls))
+      linger();
+  }
+
+  // Encrypt up to kTlsPass bytes of the queue into records: small sends packed into one record,
+  // a large one straight from its buffer.
+  bool encrypt() {
+    std::size_t budget = kTlsPass;
+    std::string why;
+    while (!out.empty() && budget) {
+      const net_engine::payload &front = out.front();
+      const std::size_t left = front->size() - front_off;
+      const char *from = nullptr;
+      std::size_t n = 0;
+      if (left >= w.tls_pack.size()) {
+        from = front->data() + front_off;
+        n = std::min(left, budget);
+      } else {
+        const std::size_t cap = std::min(w.tls_pack.size(), budget);
+        std::size_t skip = front_off;
+        for (const auto &p : out) {
+          const std::size_t take = std::min(cap - n, p->size() - skip);
+          std::memcpy(w.tls_pack.data() + n, p->data() + skip, take);
+          n += take;
+          skip = 0;
+          if (n == cap)
+            break;
+        }
+        from = w.tls_pack.data();
+      }
+      if (!tls->write(from, n, why)) {
+        fail(close_reason::error, why);
+        return false;
+      }
+      taken(n);
+      budget -= n;
+    }
+    return true;
+  }
+
   void wrote(std::size_t n) {
     count(&counter_block::bytes_out, n);
+    taken(n);
+  }
+
+  // `n` bytes of the queue are out of it (written, or encrypted into records).
+  void taken(std::size_t n) {
     uncount(&counter_block::queued_bytes, n);
     queued -= n;
     while (n) {
@@ -700,9 +1341,32 @@ struct connection : std::enable_shared_from_this<connection> {
   }
 
 #if CVC_NET_ASYNC_WRITES
-  // The rest as an overlapped write: Asio copies the buffer list, and `in_flight` keeps the bytes.
+  // The rest as an overlapped write: Asio copies the buffer list, and `in_flight` keeps the bytes
+  // (on TLS, `tls->flight` the records, while OpenSSL may add more to `tls->out`).
   void wait_writable() {
     writing = true;
+    if (tls) {
+      tls->flight.assign(tls->out, tls->out_off, std::string::npos);
+      tls->out.clear();
+      tls->out_off = 0;
+      sock.async_write_some(
+          asio::buffer(tls->flight),
+          [self = shared_from_this()](const boost::system::error_code &ec, std::size_t n) {
+            turn t(self->w);
+            self->writing = false;
+            if (self->state == phase::closed)
+              return;
+            if (ec) {
+              self->fail(close_reason::error, ec.message());
+              return;
+            }
+            self->count(&counter_block::bytes_out, n);
+            self->tls->out.insert(0, self->tls->flight, n, std::string::npos);
+            self->tls->flight.clear();
+            self->write_now();
+          });
+      return;
+    }
     gather_out();
     for (std::size_t i = 0; i < w.gather.size(); ++i)
       in_flight.push_back(out[i]);
@@ -749,11 +1413,15 @@ struct connection : std::enable_shared_from_this<connection> {
     }
     state = phase::closing;
     pending.clear();
-    arm_timer(flush_timeout, close_reason::program);
-    if (out.empty() && !writing)
+    arm_timer(flush_timeout, timer_for::flush);
+    if (tls) {
+      mark_dirty(); // the queue, then close_notify, then the lingerer
+      start_read();
+    } else if (out.empty() && !writing) {
       linger();
-    else
+    } else {
       start_read(); // drop what comes while the output drains
+    }
   }
 
   // The output is out: end our side and tell the program. The socket goes to a lingerer that
@@ -928,6 +1596,8 @@ void worker::end_turn() {
     drop(counters.connections);
     bump(counters.closed[static_cast<std::size_t>(conn->reason)]);
     bump(conn->lst.closed[static_cast<std::size_t>(conn->reason)]);
+    if (!conn->announced)
+      continue; // the program never heard of it (a failed handshake, a client gone meanwhile)
     out_events.emplace_back();
     net_event &ev = out_events.back();
     ev.kind = net_event::type::closed;
@@ -1034,21 +1704,113 @@ void net_engine::impl::adopt(worker &w, tcp::socket socket,
   conn->count(&counter_block::open);
   bump(w.counters.connections);
 
-  w.out_events.emplace_back();
-  net_event &ev = w.out_events.back();
-  ev.kind = net_event::type::accepted;
-  ev.conn = id;
-  ev.listener = l->id;
-  ev.info.id = id;
-  ev.info.listener = l->id;
-  ev.info.peer_address = peer.address().to_string();
-  ev.info.peer_port = peer.port();
-  ev.info.local_address = local.address().to_string();
-  ev.info.local_port = local.port();
+  conn_info &info = conn->info;
+  info.id = id;
+  info.listener = l->id;
+  info.peer_address = peer.address().to_string();
+  info.peer_port = peer.port();
+  info.local_address = local.address().to_string();
+  info.local_port = local.port();
 
-  if (l->options.limits.first_frame_timeout.count() > 0)
-    conn->arm_timer(l->options.limits.first_frame_timeout, close_reason::first_frame_timeout);
+  // `accepted` waits for TLS's handshake, or for the detection's first byte.
+  conn->tls_ctx = l->tls_now();
+  if (!conn->tls_ctx) {
+    conn->announce();
+  } else if (l->options.detect_tls.count() > 0) {
+    conn->speaks = connection::layer::detecting;
+    conn->arm_timer(l->options.detect_tls, connection::timer_for::detect);
+  } else if (!conn->begin_tls()) {
+    return;
+  }
   conn->start_read();
+}
+
+void net_engine::impl::post_listener_event(net_event::type kind, listener_id listener,
+                                           std::string message) {
+  std::vector<net_event> evs(1);
+  evs[0].kind = kind;
+  evs[0].listener = listener;
+  evs[0].message = std::move(message);
+  std::vector<std::shared_ptr<const void>> k;
+  post_events(evs, k);
+}
+
+std::shared_ptr<listener_state> net_engine::impl::find_listener(listener_id id) const {
+  std::lock_guard<std::mutex> lock(lst_mu);
+  auto it = listeners.find(id);
+  return it == listeners.end() ? nullptr : it->second;
+}
+
+bool net_engine::impl::reload(listener_id id, const tls_options *tls, std::string *error) {
+  auto fail = [&](const std::string &why) {
+    if (error)
+      *error = why;
+    return false;
+  };
+  const std::shared_ptr<listener_state> l = find_listener(id);
+  if (!l)
+    return fail("no listener " + std::to_string(id));
+  const std::shared_ptr<tls_context> now = l->tls_now();
+  if (!now)
+    return fail("listener " + std::to_string(id) + " has no TLS");
+  std::string why;
+  std::shared_ptr<tls_context> next = load_tls(tls ? *tls : now->options, why);
+  if (!next)
+    return fail(why);
+  const std::string keyprint = next->keyprint;
+  {
+    std::lock_guard<std::mutex> lock(l->tls_mu);
+    l->tls = std::move(next);
+  }
+  post_listener_event(net_event::type::tls_reloaded, id, keyprint);
+  if (tls) // the watch's interval may have changed
+    asio::post(workers[0]->ctx, [this, l] { arm_watch(l); });
+  return true;
+}
+
+void net_engine::impl::arm_watch(const std::shared_ptr<listener_state> &l) {
+  l->watch.cancel();
+  const std::shared_ptr<tls_context> now = l->tls_now();
+  if (l->stopped || stopping.load() || !now || now->options.watch.count() <= 0)
+    return;
+  l->watch.expires_after(now->options.watch);
+  l->watch.async_wait([this, l](const boost::system::error_code &ec) {
+    if (!ec)
+      watch_tick(l);
+  });
+}
+
+// A file changed since its context was loaded (and since the last try that failed), and both have
+// kept their times for a tick: load them. The wait lets a certificate and its key be replaced one
+// after the other, and a write end, before they are read.
+void net_engine::impl::watch_tick(const std::shared_ptr<listener_state> &l) {
+#if CVC_NET_HAVE_TLS
+  const std::shared_ptr<tls_context> now = l->tls_now();
+  if (!now || l->stopped)
+    return;
+  const file_times times = times_of(now->options);
+  const bool settled = times == l->watch_seen;
+  l->watch_seen = times;
+  if (settled && times != now->times && times != l->watch_tried) {
+    std::string why;
+    std::shared_ptr<tls_context> next = load_tls(now->options, why);
+    if (next) {
+      l->watch_tried = {};
+      const std::string keyprint = next->keyprint;
+      {
+        std::lock_guard<std::mutex> lock(l->tls_mu);
+        // A reload_tls() meanwhile wins: this one read the files it replaced.
+        if (l->tls == now)
+          l->tls = std::move(next);
+      }
+      post_listener_event(net_event::type::tls_reloaded, l->id, keyprint);
+    } else {
+      l->watch_tried = times;
+      post_listener_event(net_event::type::error, l->id, "TLS reload: " + why);
+    }
+  }
+#endif
+  arm_watch(l);
 }
 
 net_engine::impl::~impl() = default;
@@ -1093,6 +1855,14 @@ listener_id net_engine::listen(const listener_options &options, std::string *err
                                             static_cast<unsigned>(m_->workers.size()));
   l->options = options;
   l->name = options.name;
+  if (options.tls.enabled()) {
+    std::string why;
+    l->tls = load_tls(options.tls, why);
+    if (!l->tls)
+      return fail(why);
+  } else if (options.detect_tls.count() > 0) {
+    return fail("detect_tls needs a certificate (tls.certificate_file)");
+  }
   const tcp::endpoint ep(addr, options.port);
   l->acceptor.open(ep.protocol(), ec);
   if (ec)
@@ -1113,8 +1883,31 @@ listener_id net_engine::listen(const listener_options &options, std::string *err
     l->id = ++m_->next_listener;
     m_->listeners.emplace(l->id, l);
   }
-  asio::post(m_->workers[0]->ctx, [this, l] { m_->start_accept(l); });
+  asio::post(m_->workers[0]->ctx, [this, l] {
+    m_->start_accept(l);
+    m_->arm_watch(l);
+  });
   return l->id;
+}
+
+#if CVC_NET_HAVE_TLS
+bool net_engine::tls_available() { return true; }
+#else
+bool net_engine::tls_available() { return false; }
+#endif
+
+bool net_engine::reload_tls(listener_id listener, std::string *error) {
+  return m_->reload(listener, nullptr, error);
+}
+
+bool net_engine::reload_tls(listener_id listener, const tls_options &tls, std::string *error) {
+  return m_->reload(listener, &tls, error);
+}
+
+std::string net_engine::tls_keyprint(listener_id listener) const {
+  const std::shared_ptr<listener_state> l = m_->find_listener(listener);
+  const std::shared_ptr<tls_context> t = l ? l->tls_now() : nullptr;
+  return t ? t->keyprint : std::string();
 }
 
 std::uint16_t net_engine::port(listener_id listener) const {
@@ -1137,6 +1930,7 @@ void net_engine::stop_listening(listener_id listener) {
     boost::system::error_code ec;
     l->acceptor.close(ec);
     l->retry.cancel();
+    l->watch.cancel();
   });
 }
 
@@ -1327,6 +2121,7 @@ void net_engine::stop() {
       boost::system::error_code ec;
       l->acceptor.close(ec);
       l->retry.cancel();
+      l->watch.cancel();
     }
   });
   for (auto &w : m_->workers) {

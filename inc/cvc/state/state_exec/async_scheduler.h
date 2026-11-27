@@ -197,12 +197,14 @@ public:
   exec_router *router() const noexcept { return router_; }
   /// The handle set_router gave (empty with none).
   const group_ref &route_self() const noexcept { return route_self_; }
-  /// The teardown's step (S2b.4; exec_router.h, "Teardown and rehoming"): close this group's
-  /// handle, send what it holds to the keys' new homes (pending messages, remote-waiter records,
-  /// broadcast trackers, then queued messages and router entries), and only then unregister its
-  /// prefixes. The token holder, before the kills (the lock port's close may come before or not;
-  /// the kills may already have run: Ariadne's move). A second call finds nothing; a throw still
-  /// unregisters. Nothing without a router.
+  /// The teardown's step (S2b.4, S2b.R3; exec_router.h, "Teardown and rehoming"): close this
+  /// group's handle, send what it holds on (pending messages, remote-waiter records, broadcast
+  /// trackers, queued messages and router entries, then its handle's late entries until none are
+  /// left, sealing the handle if they keep coming), each key's to one target, and then, under the
+  /// handle's lock, unregister its prefixes, keep the targets as the handle's forwarding addresses
+  /// and mark it done. The token holder, before the kills (the lock port's close may come before
+  /// or not; the kills may already have run: Ariadne's move). A second call finds the handle done;
+  /// a throw still unregisters and marks it done. Nothing without a router.
   void leave_router();
   /// Any thread (group_ref::post, which keeps the scheduler alive): push a router entry into the
   /// ordered ingress, as post_message's posts are pushed (a wait or the notifier is woken). False
@@ -337,6 +339,10 @@ public:
   /// does, at the top of a drain, NOT inside step()/sync_run, so an await crosses exactly one
   /// frame). Returns the number re-readied.
   int wake_awaiting();
+  /// Frame budgets (frame_account): wake_awaiting() starts a new frame on every account a
+  /// process it holds was given, before it readies the processes parked for theirs. A process
+  /// whose account is spent parks at its next pick, as yield_frame parks it.
+  std::size_t accounts_seen() const { return accounts_.size(); }
 
   // --- Inter-process messaging (msg-send/msg-recv) ---
   bool receive_message(int pid, const std::string &path) override;
@@ -709,6 +715,14 @@ private:
   const submit_settings &settings_for_submit();
 
   std::vector<process *> woken_; // reused by the waiter wakes
+  // The frame budgets of the processes it has held (frame_account), each once; one no process
+  // holds any more goes at the next frame boundary.
+  std::vector<std::weak_ptr<frame_account>> accounts_;
+  // Give `proc` the account `a` (null: none), and note the account for the frame boundaries.
+  void adopt_account(process &proc, const std::shared_ptr<frame_account> &a);
+  // Park `proc`, ready or running, until the next frame boundary because its account is spent;
+  // false when it is neither.
+  bool park_for_account(process &proc);
   std::vector<int> charged_;     // the pids charge_async_calls charged (reused)
 
   const process_ptr no_process_; // null: current_process() while none is stepped
@@ -747,6 +761,9 @@ private:
   /// queue, and a post (a done's) is queued for it to refuse.
   std::atomic<std::size_t> controls_waiting_{0};
   bool destroying_ = false;
+  /// leave_router's (2d) took the queue (under ingress_mutex_): a posted message is refused from
+  /// then on, and post_message sends it through the closed handle instead (S2b.R3, K-3).
+  bool routed_out_ = false;
   /// A wait_for_work() is (about to be) blocked: a post notifies wakeup_.
   std::atomic<bool> idle_waiting_{false};
   /// What wait_for_work() blocks on. Made at construction and shared with the lock home's port,
@@ -803,7 +820,7 @@ private:
   void refuse_entry(ingress_entry &e) noexcept;
   // Push a message or router entry into the ingress under ingress_mutex_: false when it is being
   // destroyed, or `capped` and the cap is reached (counted).
-  bool push_capped(ingress_entry &&e, bool capped);
+  int push_capped(ingress_entry &&e, bool capped);
   uint64_t run_loop(std::optional<uint64_t> max_steps, std::optional<double> max_time);
   // The run loop's report (run_report_), at its end, while a wake notifier is installed.
   void fill_run_report();
@@ -908,8 +925,9 @@ private:
   mutable std::uint64_t home_cache_epoch_ = 0;
   mutable bool home_cache_prefixed_ = false; // this group registered a prefix, as of that epoch
   /// It registered a prefix once (S2b.R2, C-M4): its teardown forwards what it holds even once
-  /// unregistered. Set by set_router (exec_group registers its prefixes first) and the cache.
-  mutable bool prefixed_once_ = false;
+  /// unregistered. Set by set_router (exec_group registers its prefixes first) and the cache;
+  /// read by post_message on any thread too.
+  mutable std::atomic<bool> prefixed_once_{false};
   bool deliver_patched_ = false;
   /// `key`'s home through the cache (router set; not a '#' key).
   group_ref cached_home(const std::string &key) const;
@@ -922,12 +940,14 @@ private:
     return routing_on() && homed_elsewhere_slow(key, home);
   }
   bool homed_elsewhere_slow(const std::string &key, group_ref *home) const;
-  /// Post `e` to `home`. A closed handle is resolved again (home_of), waiting while it is still
-  /// that closed group (exec_router.cpp), unless the poster is this scheduler's teardown (its
-  /// handle closed, and not `host`: a host's post from another thread). `posted_to` gets the home
-  /// that took it. 1: taken; 0: refused by the home (its cap); -1: no home took it.
+  /// Post `e` to `home` (exec_router.cpp, post_with_rehome; S2b.R3): a closed home takes it into
+  /// its late queue; a sealed one makes the poster wait until it is done (never a `teardown`'s
+  /// forward, which it still takes); a done one sends the poster on by its forwarding address, else
+  /// the key's home (home_of; new_home_of for a `teardown`'s forward, which goes to open groups
+  /// only). `posted_to` gets the group that took it. 1: taken; 0: refused by the home (its cap);
+  /// -1: no home took it.
   int post_routed(group_ref home, detail::route_entry e, group_ref *posted_to = nullptr,
-                  bool host = false) const;
+                  bool teardown = false) const;
   /// A message sent at its home (a local msg-send, a host message, a send entry): every waiter,
   /// local at once and remote by a deliver, else the back of the pending FIFO (past
   /// max_pending_messages when `uncapped`: a rehomed message). The waiters reached.
@@ -959,10 +979,21 @@ private:
   /// A deliver that threw before patching its frame (the throw rule): stale, and its wait
   /// subscribed again with the same seq.
   void deliver_threw(detail::route_entry &&e) noexcept;
-  /// A router entry this scheduler will not apply (its teardown's queue, its destructor) sent on
-  /// to the key's new home (exec_router::new_home_of), as the teardown rule says, or dropped and
-  /// counted.
+  /// A router entry the destructor will not apply, sent on as a teardown's queued one is
+  /// (forward_on, no memo), or dropped and counted.
   void bounce_route(detail::route_entry &&e) noexcept;
+  /// A teardown's targets, one per key (exec_router.h, "Teardown and rehoming"; S2b.R3): kept by
+  /// the handle as its forwarding addresses once done.
+  using forward_memo = std::unordered_map<std::string, group_ref>;
+  /// Whether its teardown forwards the messages it holds (it registered a prefix once).
+  bool forwards_messages() const;
+  /// A teardown's entry for `e.key`, to the key's target in `memo` (chosen now when it has none:
+  /// new_home_of), which then records where it went; null `memo`: new_home_of. Dropped, counted,
+  /// when no home takes it.
+  void forward_keyed(detail::route_entry &&e, forward_memo *memo);
+  /// A teardown's queued or late router entry sent on (exec_router.h): a deliver as a stale one, a
+  /// send by the homed rule (`prefixed`, no '#'), the rest as they are, through forward_keyed.
+  void forward_on(detail::route_entry &&e, forward_memo *memo, bool prefixed) noexcept;
   /// Published info (S2-Q9; S2b.3): the summary's atomics, the rows under their mutex, the
   /// generation they were built at, and when their counters were last refreshed. Written at the
   /// run loop's end (publish_info), read by any thread.

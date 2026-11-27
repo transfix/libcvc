@@ -56,6 +56,7 @@
 #include <cvc/ph/compose.h>
 #include <cvc/ph/microgrid.h>
 #include <cvc/ph/se2_train.h>
+#include <cvc/ph/train.h>
 #include <cvc/physics/mujoco_robot.h>
 #include <cvc/physics/plant_log_scene.h>
 #include <cvc/physics/scrub_plant.h>
@@ -2634,12 +2635,21 @@ static int cmd_ph(cvc::app &, int argc, char **argv) {
       "  check <system>      the power balance at random states: exit 1 when\n"
       "                      the pairing does work or dH/dt departs from -loss + supplied\n"
       "  microgrid <out>     write a DC microgrid (DGUs and RL lines, docs/PH_COMPOSE.md) as a\n"
-      "                      system file\n\n"
+      "                      system file\n"
+      "  train-dgu <out>     fit a DGU law to trajectories of the reference nonlinear DGU (the\n"
+      "                      C-PHAST electrical calibration), score it on held-out rollouts\n"
+      "                      against the fitted-linear control, and write it as cvc-ph-law/1\n\n"
       "  cvc ph microgrid grid.json --dgus 4 --edges 0-1,1-2,2-3 --line-r 0.3,0.4,0.5\n"
       "  cvc ph simulate grid.json --physical 1,0,1.1,0,0.9,0,1,0,0,0,0 --u "
       "-0.1,1,-0.1,1,-0.1,1,-0.1,1\n");
   std::string op, file, x0s, physical, us, csv, coupling, scheme, edges, line_r, line_l, dgu_kind;
+  std::string v_hidden, m_hidden, d_hidden;
   int steps = 100, substeps = 2, local = 1, samples = 100, max_iter = 10, dgus = 4;
+  int updates = 2000, constraint_first = 0, batch = 128, threads = 1, train_runs = 32,
+      test_runs = 16;
+  int transitions = 200, test_transitions = 500, log_every = 0;
+  unsigned data_seed = 1, init_seed = 7;
+  double lr = 1e-4;
   unsigned seed = 1;
   double dt = 0.01, tol = 1e-6, scale = 1.0, dgu_c = 2.2, dgu_l = 1.8, dgu_r = 1.2;
   // clang-format off
@@ -2662,6 +2672,21 @@ static int cmd_ph(cvc::app &, int argc, char **argv) {
     ("samples", po::value<int>(&samples)->default_value(100), "check: random states")
     ("seed", po::value<unsigned>(&seed)->default_value(1), "check: their seed")
     ("scale", po::value<double>(&scale)->default_value(1.0), "check: their standard deviation")
+    ("updates", po::value<int>(&updates)->default_value(2000), "train-dgu: combined-loss updates (the paper: 100000, or 75000 after the constraint-first ones)")
+    ("constraint-first", po::value<int>(&constraint_first)->default_value(0), "train-dgu: constraint-only updates before them (the paper's staged schedule: 25000)")
+    ("batch", po::value<int>(&batch)->default_value(128), "train-dgu: samples per update")
+    ("lr", po::value<double>(&lr)->default_value(1e-4), "train-dgu: Adam's step")
+    ("threads", po::value<int>(&threads)->default_value(1), "train-dgu: threads for the gradient")
+    ("train-runs", po::value<int>(&train_runs)->default_value(32), "train-dgu: training trajectories")
+    ("transitions", po::value<int>(&transitions)->default_value(200), "train-dgu: transitions per training trajectory")
+    ("test-runs", po::value<int>(&test_runs)->default_value(16), "train-dgu: held-out trajectories")
+    ("test-transitions", po::value<int>(&test_transitions)->default_value(500), "train-dgu: transitions per held-out trajectory (5 s at 0.01 s)")
+    ("data-seed", po::value<unsigned>(&data_seed)->default_value(1), "train-dgu: the data's seed (held-out: data-seed + 1)")
+    ("init-seed", po::value<unsigned>(&init_seed)->default_value(7), "train-dgu: the nets' and the batches' seed")
+    ("v-hidden", po::value<std::string>(&v_hidden)->default_value("32,32"), "train-dgu: the potential net's hidden widths")
+    ("m-hidden", po::value<std::string>(&m_hidden)->default_value("32,32"), "train-dgu: the mass net's hidden widths")
+    ("d-hidden", po::value<std::string>(&d_hidden)->default_value("32"), "train-dgu: the damping net's hidden widths")
+    ("log-every", po::value<int>(&log_every)->default_value(0), "train-dgu: print the batch losses every this many updates")
     ("dgus", po::value<int>(&dgus)->default_value(4), "microgrid: buses, one DGU each")
     ("edges", po::value<std::string>(&edges), "microgrid: lines as FROM-TO, comma separated (default a chain)")
     ("line-r", po::value<std::string>(&line_r)->default_value("0.3,0.4,0.5"), "microgrid: line resistances (ohm), one or one per line (the last repeats)")
@@ -2681,6 +2706,67 @@ static int cmd_ph(cvc::app &, int argc, char **argv) {
   }
   po::notify(vm);
 
+  if (op == "train-dgu") {
+    auto widths = [](const std::string &s, const char *what) {
+      std::vector<int> w;
+      for (double v : ph_numbers(s, what))
+        w.push_back(static_cast<int>(v));
+      return w;
+    };
+    const cvc::ph::law_ptr ref = cvc::ph::reference_dgu();
+    cvc::ph::dgu_dataset_options d;
+    d.trajectories = train_runs;
+    d.transitions = transitions;
+    d.seed = data_seed;
+    const cvc::ph::dgu_dataset train = cvc::ph::make_dgu_dataset(*ref, d);
+    d.trajectories = test_runs;
+    d.transitions = test_transitions;
+    d.seed = data_seed + 1;
+    const cvc::ph::dgu_dataset test = cvc::ph::make_dgu_dataset(*ref, d);
+    const cvc::ph::linear_fit fit = cvc::ph::fit_linear_dgu(train);
+    cvc::ph::dgu_family fam;
+    fam.v_hidden = widths(v_hidden, "v-hidden");
+    fam.m_hidden = widths(m_hidden, "m-hidden");
+    fam.d_hidden = widths(d_hidden, "d-hidden");
+    fam.seed = init_seed;
+    const cvc::ph::canonical_spec init = cvc::ph::warm_start_dgu(fit, fam);
+    cvc::ph::dgu_train_options o;
+    o.updates = updates;
+    o.constraint_first = constraint_first;
+    o.batch = batch;
+    o.lr = lr;
+    o.threads = threads;
+    o.log_every = log_every;
+    o.seed = init_seed + 1000;
+    std::cout << std::setprecision(4) << "train-dgu: " << train.samples.size()
+              << " training samples (" << train_runs << " x " << transitions << "), " << test_runs
+              << " held-out runs of " << test_transitions << "\n  linear fit: C " << fit.C
+              << " F, L " << fit.L << " H, R " << fit.R << " ohm\n  "
+              << cvc::ph::trainable_parameters(init).size() << " parameters, " << constraint_first
+              << " constraint-first + " << updates << " combined updates\n";
+    const auto t0 = std::chrono::steady_clock::now();
+    const cvc::ph::dgu_train_result r = cvc::ph::train_dgu(init, train, o);
+    const double secs =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    for (const cvc::ph::dgu_train_record &h : r.history)
+      std::cout << "  update " << h.update << ": step " << h.batch.step << ", constraint "
+                << h.batch.constraint << ", total " << h.batch.total << "\n";
+    const cvc::ph::canonical_law trained(r.law), linear(cvc::ph::linear_dgu_spec(fit));
+    const cvc::ph::dgu_eval el = cvc::ph::evaluate_dgu(linear, *ref, test),
+                            et = cvc::ph::evaluate_dgu(trained, *ref, test);
+    std::cout << "  trained in " << secs
+              << " s\n  held-out rollouts, capacitor voltage / inductor current RMSE:\n"
+              << "    fitted linear: " << 1e3 * el.voltage_rmse << " mV / " << 1e3 * el.current_rmse
+              << " mA\n"
+              << "    trained:       " << 1e3 * et.voltage_rmse << " mV / " << 1e3 * et.current_rmse
+              << " mA" << (et.finite ? "" : " (a rollout left the reals)") << "\n";
+    std::ofstream out(file);
+    if (!out)
+      throw std::runtime_error("cannot write " + file);
+    out << cvc::ph::law_json(trained) << "\n";
+    std::cout << "  wrote " << file << "\n";
+    return et.finite ? 0 : 1;
+  }
   if (op == "microgrid") {
     std::vector<cvc::ph::line_spec> lines;
     if (edges.empty())

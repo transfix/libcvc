@@ -99,7 +99,8 @@
 //     vehicles.<name>.chassis, speed, steer, steer_command, throttle, brake,
 //       hand_brake, gear, engine_rpm, accel_trim, position.*, rotation.*, velocity.*,
 //       angular_velocity.*, aero_force.{x,y,z}, air_velocity.{x,y,z},
-//       water_force.{x,y,z}, engine_flooded            (wading, vehicle.h)
+//       water_force.{x,y,z}, engine_flooded, water_inside, water_inside_mass
+//                                                       (wading, vehicle.h)
 //     vehicles.<name>.wheels.<i>.{steer, angular_velocity, suspension_length, contact,
 //       contact_point.{x,y,z}, load, longitudinal_slip, lateral_slip, friction,
 //       rolling_resistance, medium_depth, sinkage, rut, medium_resistance, water_depth,
@@ -127,8 +128,8 @@
 //     vehicles.<name>.tuning.axles.<i>.{max_brake_torque, max_hand_brake_torque,
 //       suspension_frequency, suspension_damping, anti_roll_stiffness}
 //     vehicles.<name>.tuning.wading.{wheel_displacement, wheel_drag, underbody_depth,
-//       underbody_drag, tire_pressure, fording_depth}   (wading_desc; enabled and displacement
-//                                                         are fixed when it is added)
+//       underbody_drag, tire_pressure, fording_depth, flood_area}   (wading_desc; enabled,
+//       displacement and whether flood_area is 0 are fixed when it is added)
 //                                                         world::set_vehicle
 //     fields.<name>.{drag_coefficient, damping, traction} world::set_field
 //   Commands act on a change only, so a program may drive the same vehicle through

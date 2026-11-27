@@ -59,6 +59,7 @@
 #include <cvc/gl/StormFrontGLSL.h> // the storms' fronts, evaluated where each tree stands
 #include <cvc/gl/WindGLSL.h>       // the gusts the trees sway in, the water's and the physics'
 #include <cvc/gl/ariadne/scene_realize.h>
+#include <cvc/gl/ariadne/world_models.h> // the theme's models, drawn
 #include <cvc/gl/ariadne/world_nodes.h>
 #include <cvc/gl/world_geometry_nodes.h> // surface_colors: a mesh without colours of its own
 #include <cvc/image/image.h>
@@ -120,6 +121,10 @@ struct WorldJob {
   world::city_bundle_files bundle;
   std::string bundle_error;
   std::string error; // why it failed; empty when it did not
+  // The world's model assets, read (load_model_mesh) by the job off the frame thread, one per
+  // world::generated_world::model_assets entry (null where it could not be read: model_errors).
+  std::vector<std::shared_ptr<model_mesh>> models;
+  std::vector<std::string> model_errors;
 };
 
 struct WorldInstall;
@@ -183,6 +188,9 @@ struct WorldRT {
   // chooses its rung, then is held within one of its neighbours' (what the skirts cover).
   std::vector<std::weak_ptr<LodGraphicsNode>> chunks;
   std::vector<int> chunk_want; // each chunk's own choice last frame: its hysteresis history
+  // The theme's models (world::generated_world::models): a LOD ladder per instance under the group
+  // <id>_models, each choosing its own rung (world_models.h).
+  std::vector<std::weak_ptr<LodGraphicsNode>> models;
   std::shared_ptr<const ari::SceneNode> keys; // the authored node, for its mesh keys
   // The water: a surface per chunk that has any, under the group <id>_water (made the first time),
   // each a ladder on its chunk's rungs that switches with it. Null where a chunk has no water.
@@ -231,15 +239,19 @@ struct WorldRT {
 struct WorldInstall {
   std::shared_ptr<WorldJob> job; // its world and textures
   std::string suffix;            // "_g<generation>": the new nodes' names, apart from the old's
-  enum class Stage { textures, chunks, cells, buildings, roads, swap, done };
+  enum class Stage { textures, chunks, cells, buildings, roads, models, swap, done };
   Stage stage = Stage::textures;
   std::size_t next = 0;                                 // the next chunk or cell
   std::vector<std::weak_ptr<LodGraphicsNode>> chunks;   // the new ground, hidden
   std::vector<std::weak_ptr<LodGraphicsNode>> water;    // its water, hidden (null where dry)
   std::vector<WorldRT::PropCell> cells;                 // the new props, hidden
   std::weak_ptr<GeometryNode> building_mesh, road_mesh; // the new meshes, hidden
+  std::vector<std::weak_ptr<LodGraphicsNode>> models;   // the new models, hidden
   std::size_t done = 0, total = 1;                      // pieces put in, of
 };
+
+// Models put in per install piece.
+constexpr std::size_t kModelsPerPiece = 24;
 
 WorldRT::~WorldRT() {
   if (task >= 0 && app)
@@ -788,6 +800,18 @@ int select_prop_lod(WorldRT &rt, const cvc::lod::view_params &view) {
   return changes;
 }
 
+// Each model's rung for `view`. Returns how many changed rung.
+int select_model_lod(WorldRT &rt, const cvc::lod::view_params &view) {
+  int changes = 0;
+  for (const std::weak_ptr<LodGraphicsNode> &weak : rt.models)
+    if (auto n = weak.lock()) {
+      const int before = n->activeRung();
+      if (n->select(view) != before)
+        ++changes;
+    }
+  return changes;
+}
+
 // Start putting job's world into the scene (put_world_step does the work).
 void begin_world_install(WorldRT &rt, std::shared_ptr<WorldJob> job) {
   auto in = std::make_unique<WorldInstall>();
@@ -795,20 +819,22 @@ void begin_world_install(WorldRT &rt, std::shared_ptr<WorldJob> job) {
   in->job = std::move(job);
   in->suffix = "_g" + std::to_string(++rt.generation);
   // The textures, each chunk, each cell, the buildings, the roads and the swap.
-  in->total = 1 + w.terrain_chunks.size() + w.prop_cells.size() + 2 + 1;
+  in->total = 1 + w.terrain_chunks.size() + w.prop_cells.size() + 2 +
+              (w.models.size() + kModelsPerPiece - 1) / kModelsPerPiece + 1;
   rt.install = std::move(in);
 }
 
 // The parts of the world beside the terrain node, which follow its visibility.
-const char *const kWorldParts[] = {"_props", "_foliage", "_needles",  "_buildings",
-                                   "_roads", "_water",   "_underside"};
+const char *const kWorldParts[] = {"_props", "_foliage", "_needles",   "_buildings",
+                                   "_roads", "_water",   "_underside", "_models"};
 
 // A world's nodes on their way out: hidden now, removed later (retire_world_step).
 void retire_world_nodes(WorldRT &rt, const std::vector<std::weak_ptr<LodGraphicsNode>> &chunks,
                         const std::vector<std::weak_ptr<LodGraphicsNode>> &water,
                         const std::vector<WorldRT::PropCell> &cells,
                         const std::weak_ptr<GeometryNode> &building_mesh,
-                        const std::weak_ptr<GeometryNode> &road_mesh) {
+                        const std::weak_ptr<GeometryNode> &road_mesh,
+                        const std::vector<std::weak_ptr<LodGraphicsNode>> &models = {}) {
   auto retire = [&rt](const std::shared_ptr<GraphicsNode> &parent, const auto &weak) {
     std::shared_ptr<GraphicsNode> n = weak.lock();
     if (!parent || !n)
@@ -831,6 +857,9 @@ void retire_world_nodes(WorldRT &rt, const std::vector<std::weak_ptr<LodGraphics
   }
   retire(rt.buildings.lock(), building_mesh);
   retire(rt.roads.lock(), road_mesh);
+  const std::shared_ptr<GraphicsNode> group = find_part(rt, "_models");
+  for (const auto &m : models)
+    retire(group, m);
 }
 
 // One piece of a retired world freed (a ground chunk's rungs, a merged mesh, the raster); false
@@ -886,7 +915,7 @@ void drop_world_install(WorldRT &rt) {
   if (!rt.install)
     return;
   WorldInstall &in = *rt.install;
-  retire_world_nodes(rt, in.chunks, in.water, in.cells, in.building_mesh, in.road_mesh);
+  retire_world_nodes(rt, in.chunks, in.water, in.cells, in.building_mesh, in.road_mesh, in.models);
   rt.install.reset();
 }
 
@@ -911,6 +940,8 @@ void hide_world_install(WorldRT &rt) {
   }
   hide(in.building_mesh);
   hide(in.road_mesh);
+  for (const auto &m : in.models)
+    hide(m);
 }
 
 // The swap, in one frame: the shown world's nodes hidden (and retired), the new world's shown, and
@@ -919,7 +950,7 @@ void swap_world(WorldRT &rt) {
   WorldInstall &in = *rt.install;
   SceneGraph &sg = *rt.sg;
   const std::string &id = rt.id;
-  retire_world_nodes(rt, rt.chunks, rt.water, rt.cells, rt.building_mesh, rt.road_mesh);
+  retire_world_nodes(rt, rt.chunks, rt.water, rt.cells, rt.building_mesh, rt.road_mesh, rt.models);
   auto show = [](const auto &weak) {
     if (auto n = weak.lock())
       n->setVisible(true);
@@ -935,6 +966,9 @@ void swap_world(WorldRT &rt) {
   }
   show(in.building_mesh);
   show(in.road_mesh);
+  for (const auto &m : in.models)
+    show(m);
+  rt.models = std::move(in.models);
   rt.chunks = std::move(in.chunks);
   rt.water = std::move(in.water);
   rt.cells = std::move(in.cells);
@@ -1030,8 +1064,35 @@ bool put_world_step(WorldRT &rt, double budget_ms) {
         in.road_mesh = make_mesh(*h, "mesh" + in.suffix, w.roads,
                                  [soft](GeometryNode &g) { style_roads(g, soft); });
       }
-      in.stage = Stage::swap;
+      in.next = 0;
+      in.stage = w.models.empty() ? Stage::swap : Stage::models;
       break;
+    case Stage::models: {
+      // The job read the assets; a world installed without a job's reading (a data node's first
+      // world) reads them here, once each (the cache keeps them).
+      WorldJob &job = *in.job;
+      if (job.models.size() != w.model_assets.size()) {
+        job.models.assign(w.model_assets.size(), nullptr);
+        for (std::size_t k = 0; k < w.model_assets.size(); ++k) {
+          std::string why;
+          job.models[k] = load_model_mesh(*rt.app, w.model_assets[k], &why);
+          if (!job.models[k])
+            job.model_errors.push_back(why);
+        }
+      }
+      std::shared_ptr<GraphicsNode> group = make_part(rt, "_models");
+      const std::size_t end = std::min(w.models.size(), in.next + kModelsPerPiece);
+      for (; group && in.next < end; ++in.next) {
+        const world::generated_world::model_instance &m = w.models[in.next];
+        if (m.asset < 0 || std::size_t(m.asset) >= job.models.size() || !job.models[m.asset])
+          continue;
+        in.models.push_back(make_model_instance(*group, "m" + std::to_string(in.next) + in.suffix,
+                                                *job.models[m.asset], m, rt.soft));
+      }
+      if (!group || in.next >= w.models.size())
+        in.stage = Stage::swap;
+      break;
+    }
     case Stage::swap: // the next call's
     case Stage::done:
       return false;
@@ -1042,11 +1103,12 @@ bool put_world_step(WorldRT &rt, double budget_ms) {
 }
 
 // The job's world as its bundle (world::generated_world_bundle), its ground the job's texture when
-// that is the bundle's ground (the material colours at world::world_ground_size), else painted
-// for it.
+// that is the bundle's ground (the material colours at world::world_ground_size_for the world),
+// else painted for it: the same bundle whoever writes it.
 world::city_bundle_files generated_world_bundle_of(cvc::app &app, const WorldJob &job, int size) {
   world::world_ground ground;
-  if (job.color == int(world::surface_color::material) && size == world::world_ground_size &&
+  if (job.color == int(world::surface_color::material) &&
+      size == world::world_ground_size_for(*job.world) &&
       job.texture.size() == std::size_t(size) * std::size_t(size) * 3) {
     ground.width = ground.height = size;
     ground.rgb = job.texture;
@@ -1086,6 +1148,16 @@ public:
         }
         return done();
       }
+      // The theme's model assets, one a step, off the frame thread (the install draws them).
+      if (_job->world && _job->models.size() < _job->world->model_assets.size()) {
+        set("models", kBuildShare);
+        const world::model_asset &a = _job->world->model_assets[_job->models.size()];
+        std::string why;
+        _job->models.push_back(load_model_mesh(*_app, a, &why));
+        if (!_job->models.back())
+          _job->model_errors.push_back(why);
+        return done();
+      }
       if (!_painted) {
         if (!_painter)
           _painter = std::make_unique<world::surface_painter>(
@@ -1107,7 +1179,7 @@ public:
       // The world as its bundle, here rather than on the frame thread when it goes in (a 1.2 km
       // world's is about 30 MB and 1.6 s to write): its dataset is that bundle read back. Its
       // ground is the texture just painted when that is the bundle's (the material colours at
-      // world_ground_size); in another colour or size it is painted again for the bundle.
+      // world_ground_size_for the world); in another colour or size it is painted for the bundle.
       set("bundle", kPaintEnd);
       try {
         if (cvc::can_write_model_to_memory(".glb"))
@@ -1309,7 +1381,7 @@ void tick_world(WorldRT &rt, vtkRenderer *ren) {
   // different shadow.
   if (ren && ren->IsActiveCameraCreated()) {
     const cvc::lod::view_params view = make_view_params(ren, cvc::lod::preset_view(kLodPreset));
-    int recast = select_prop_lod(rt, view);
+    int recast = select_prop_lod(rt, view) + select_model_lod(rt, view);
     const int ground = select_terrain_lod(rt, view);
     if (auto t = rt.terrain.lock(); t && t->castsShadow())
       recast += ground;
@@ -1764,7 +1836,7 @@ void data_world_clear(DataWorldView &v) {
   WorldRT &rt = *v.rt;
   if (rt.job)
     stop_world_job(rt);
-  retire_world_nodes(rt, rt.chunks, rt.water, rt.cells, rt.building_mesh, rt.road_mesh);
+  retire_world_nodes(rt, rt.chunks, rt.water, rt.cells, rt.building_mesh, rt.road_mesh, rt.models);
   rt.chunks.clear();
   rt.water.clear();
   rt.cells.clear();

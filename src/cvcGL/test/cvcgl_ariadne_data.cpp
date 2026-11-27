@@ -466,7 +466,8 @@ scene:
 
 // A generated world's dataset (generate: generated_world) draws as the generated_world node draws
 // its world: the props in LOD cells under <id>_props, the buildings and the roads as meshes under
-// their holders, the water by chunk under <id>_water, on the bundle's ground (2048 a side).
+// their holders, the water by chunk under <id>_water, on the bundle's ground (world_ground_size_for
+// the world).
 void test_a_generated_worlds_dataset_draws_as_its_node_does() {
   std::printf("test_a_generated_worlds_dataset_draws_as_its_node_does\n");
   if (!cvc::ariadne::have_yaml()) {
@@ -519,10 +520,12 @@ scene:
   for (const cvc::world::terrain_chunk &ch : w->terrain_chunks)
     wet += !ch.water.empty() && !ch.water[0].const_tris().empty();
   CHECK(children("_water") >= wet); // a ladder per wet chunk, and the texture's holder
+  // The bundle's ground, at its size for the world: the largest, on a world 400 m across.
+  const int ground = cvc::world::world_ground_size_for(*w);
+  CHECK(ground == cvc::world::world_ground_size);
   if (auto terrain =
           std::dynamic_pointer_cast<cvc::gl::GeometryNode>(city->findChildByName("city_terrain")))
-    CHECK(terrain->textureWidth() == cvc::world::world_ground_size &&
-          terrain->textureHeight() == cvc::world::world_ground_size);
+    CHECK(terrain->textureWidth() == ground && terrain->textureHeight() == ground);
   else
     CHECK(false);
 }

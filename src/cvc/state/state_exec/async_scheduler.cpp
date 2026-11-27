@@ -291,9 +291,10 @@ boost::shared_ptr<cvc::state> host_held(cvc::state *node) {
 } // namespace
 
 async_scheduler::~async_scheduler() {
-  // No post reaches it through its router handle from here on (exec_router.h; group 0's teardown:
-  // an app's groups closed theirs in leave_router).
-  route_self_.close();
+  // No post reaches it through its router handle from here on, and the handle is done
+  // (exec_router.h; group 0's teardown: an app's groups finished theirs in leave_router). What its
+  // late queue held (a handle closed outside leave_router) is refused below with the ingress.
+  std::vector<detail::route_entry> late = route_self_.close_for_good();
   home_.reset();
   // What the ingress holds, never applied (S2b.1): commands refused, done(false), each counted out
   // first; plain messages dropped and counted; router entries bounced to their homes (S2-Q10).
@@ -309,6 +310,9 @@ async_scheduler::~async_scheduler() {
     left.swap(ingress_);
     ingress_capped_ = 0;
   }
+  for (detail::route_entry &e : late)
+    left.emplace_back(std::in_place_type<detail::route_entry>, std::move(e));
+  late.clear();
   while (!left.empty()) {
     for (ingress_entry &entry : left)
       refuse_entry(entry);
@@ -444,6 +448,7 @@ int async_scheduler::execute(const std::string &script, const execute_options &o
   proc.priority_floor_explicit = opts.priority_floor.has_value() && opts.priority_floor_explicit;
   proc.parent_pid = opts.parent_pid;
   proc.keep_alive = opts.keep_alive;
+  adopt_account(proc, opts.account); // its frame budget (an Ariadne mount's)
   proc.max_steps = opts.max_steps;
   proc.max_time = opts.max_time;
   proc.max_step_time = opts.max_step_time;
@@ -489,6 +494,7 @@ int async_scheduler::execute(const value_t &expr, const execute_options &opts) {
   proc.priority_floor_explicit = opts.priority_floor.has_value() && opts.priority_floor_explicit;
   proc.parent_pid = opts.parent_pid;
   proc.keep_alive = opts.keep_alive;
+  adopt_account(proc, opts.account); // its frame budget (an Ariadne mount's)
   proc.max_steps = opts.max_steps;
   proc.max_time = opts.max_time;
   proc.max_step_time = opts.max_step_time;
@@ -562,6 +568,10 @@ void async_scheduler::execute_process_step(const process_ptr &pp, uint64_t max_r
   process &proc = *pp;
   run_steps_ = 1;
   run_unchecked_ = 1;
+  // Its frame budget is spent (an Ariadne mount's, frame_account): it waits for the next frame,
+  // taking no step.
+  if (proc.account && proc.account->spent() && park_for_account(proc))
+    return;
   // Between steps: free the reference cycles programs leaked, once enough piled up (heap.h).
   // Checked every 64 steps: the check reads the registry's counters. The registry is the one its
   // evaluation context has: the one it was given (S1.1), else its evaluator's own. A run's later
@@ -650,7 +660,7 @@ void async_scheduler::execute_process_step(const process_ptr &pp, uint64_t max_r
   // Bound what one native call in this step may allocate (see scheduler.cpp).
   // Armed only when it changes something (see scheduler.cpp).
   std::optional<eval_alloc_guard> step_alloc;
-  if (proc.max_memory > 0 || proc.max_alloc_bytes != kDefaultMaxAllocBytes)
+  if (proc.measures_heap() || proc.max_alloc_bytes != kDefaultMaxAllocBytes)
     step_alloc.emplace(
         ctx, proc.alloc_limit(
                  proc.max_memory > 0 ? mem_tracker_.current_bytes(proc.pid) + proc.heap_bytes : 0));
@@ -781,8 +791,13 @@ void async_scheduler::execute_process_step(const process_ptr &pp, uint64_t max_r
   } else {
     proc.state.stats.add_step_time(secs);
   }
+  // Its frame budget is charged what the step charged it, and the step's time (frame_account).
+  if (proc.account) {
+    const uint64_t after = proc.state.stats.get_step_count();
+    proc.account->charge(after > charged.before ? after - charged.before : 1, secs);
+  }
   // Heap accounting: take a finished measurement, start the next when due (heap.h).
-  if (proc.max_memory > 0 || proc.state.heap_measured)
+  if (proc.measures_heap() || proc.state.heap_measured)
     heap_after_step(proc, step_alloc ? step_alloc->allocated() : 0,
                     mem_tracker_.current_bytes(proc.pid));
 
@@ -803,6 +818,11 @@ void async_scheduler::execute_process_step(const process_ptr &pp, uint64_t max_r
     if (proc.status == process_status::running) {
       // Only reset to ready if the intrinsic didn't change status (sleep/msg-recv set waiting).
       procs_.set_status(proc, process_status::ready);
+    }
+    // The step spent its frame budget: it waits for the next frame now, not at its next pick.
+    if (proc.account && proc.status == process_status::ready && proc.account->spent()) {
+      park_for_account(proc);
+      return;
     }
     chain_now_ = now;
     chain_cpu_ = cpu1;
@@ -960,6 +980,14 @@ bool async_scheduler::continue_run(process &proc, uint64_t max_run, clock::time_
       break;
     if (!proc.pending_signals.empty() || !proc.pending_watch_events.empty())
       break;
+    // Its frame budget (frame_account): spent already, or its steps used up by this run's.
+    if (proc.account) {
+      const frame_account &a = *proc.account;
+      const uint64_t ms = a.max_steps.load(std::memory_order_relaxed);
+      if (a.spent() ||
+          (ms > 0 && a.steps.load(std::memory_order_relaxed) + (proc.step_count() - count0) >= ms))
+        break;
+    }
     const uint64_t n = run_steps_;
     if ((n & 15) == 0 || n == 2 || n == 4 || n == 8) {
       const clock::time_point t = clock::now();
@@ -970,6 +998,13 @@ bool async_scheduler::continue_run(process &proc, uint64_t max_run, clock::time_
         break;
       if (run_budget_ && run_budget_->spent(t, n - checked))
         break;
+      if (proc.account) { // its frame budget's seconds, used up by this run's
+        const double mt = proc.account->max_seconds.load(std::memory_order_relaxed);
+        if (mt > 0.0 && proc.account->seconds.load(std::memory_order_relaxed) +
+                                std::chrono::duration<double>(t - start).count() >=
+                            mt)
+          break;
+      }
       checked = n;
       if (proc.max_time > 0.0) {
         if (!charge_cpu) {
@@ -1313,7 +1348,42 @@ bool async_scheduler::yield_frame(int pid) {
   return true;
 }
 
+void async_scheduler::adopt_account(process &proc, const std::shared_ptr<frame_account> &a) {
+  proc.account = a;
+  if (!a)
+    return;
+  for (const std::weak_ptr<frame_account> &w : accounts_)
+    if (!w.owner_before(a) && !a.owner_before(w))
+      return; // noted already
+  std::erase_if(accounts_, [](const std::weak_ptr<frame_account> &w) { return w.expired(); });
+  accounts_.push_back(a);
+}
+
+bool async_scheduler::park_for_account(process &proc) {
+  if (proc.status != process_status::ready && proc.status != process_status::running)
+    return false;
+  if (proc.status == process_status::running)
+    proc.accumulated_time +=
+        std::chrono::duration<double>(clock::now() - proc.last_run_start).count();
+  proc.awaiting_frame = true;
+  procs_.set_status(proc, process_status::waiting); // among the frame waiters, as yield_frame's
+  proc.account->held.store(true, std::memory_order_relaxed);
+  proc.account->holds.fetch_add(1, std::memory_order_relaxed);
+  chain_valid_ = false; // the park is no step's time
+  return true;
+}
+
 int async_scheduler::wake_awaiting() {
+  // A new frame for every frame budget (frame_account) first, so the processes parked for theirs
+  // run again; an account no process holds any more goes.
+  for (auto it = accounts_.begin(); it != accounts_.end();) {
+    if (const std::shared_ptr<frame_account> a = it->lock()) {
+      a->new_frame();
+      ++it;
+    } else {
+      it = accounts_.erase(it);
+    }
+  }
   std::vector<process *> list;
   list.swap(woken_);
   procs_.take_awaiting(list);
@@ -1484,39 +1554,57 @@ bool async_scheduler::post_message(const std::string &path, const value_t &msg) 
   // S2b.4: a key the router homes in another group goes there as a send, the home's cap applying
   // (exec_router.h, "Host posts"). The router's lookup is thread-safe; the cache is not, and is
   // not used here.
-  if (router_ && router_->active() && path.find('#') == std::string::npos) {
+  const bool hashed = path.find('#') != std::string::npos;
+  const auto as_send = [&] {
+    detail::route_entry e;
+    e.what = detail::route_entry::kind::send;
+    e.key = path;
+    e.value = msg;
+    return e;
+  };
+  if (router_ && !hashed && router_->active()) {
     // An island (no prefix of its own) keeps the keys no other group's prefix covers (S2b.0a): it
-    // asks only for a covering prefix, never building group 0. A key homed here once its handle
-    // closed (its teardown) goes on as a send too: the poster waits for the forward, so it arrives
-    // after what the teardown sends on.
+    // asks only for a covering prefix, never building group 0.
     const bool island = !router_->has_prefix(route_self_);
     group_ref home = island ? router_->prefix_home_of(path) : router_->home_of(path);
-    if (home && (home != route_self_ || route_self_.closed())) {
-      detail::route_entry e;
-      e.what = detail::route_entry::kind::send;
-      e.key = path;
-      e.value = msg;
-      return post_routed(std::move(home), std::move(e), nullptr, true) > 0;
-    }
+    if (home && home != route_self_)
+      return post_routed(std::move(home), as_send()) > 0;
   }
   // A '#' key's post is a runtime reply (a kernel's, a task's, a lane's): a completion, never
   // capped (S2b.R2, S-M1); its waiter would wait for good.
-  const bool capped = path.find('#') == std::string::npos;
-  return push_capped(ingress_entry(std::in_place_type<posted_message>, path, msg), capped);
+  const int pushed =
+      push_capped(ingress_entry(std::in_place_type<posted_message>, path, msg), !hashed);
+  if (pushed > 0)
+    return true;
+  if (pushed != -2)
+    return false; // at its cap, or its destructor took the queue
+  // Its teardown routes its messages out (leave_router; S2b.R3, K-3): a key it homed goes through
+  // its own handle as a send (its queue, its late queue, or on by the forwarding address), after
+  // what the teardown sends on. A message that would have died with it in its queue (a '#' key's,
+  // an island's own) dies now, counted, as it would have there.
+  if (hashed || !route_self_ || !prefixed_once_.load(std::memory_order_relaxed)) {
+    ingress_counts_.destroy_dropped.fetch_add(1, std::memory_order_relaxed);
+    return true;
+  }
+  return post_routed(route_self_, as_send()) > 0;
 }
 
-bool async_scheduler::push_capped(ingress_entry &&e, bool capped) {
+int async_scheduler::push_capped(ingress_entry &&e, bool capped) {
   // The wait is notified under the lock: once the poster lets go of it, it touches the scheduler
   // no more, so a scheduler thread that drains this post may destroy the scheduler.
   std::lock_guard<std::mutex> lock(ingress_mutex_);
+  // 1: pushed; 0: refused at the cap (counted); -1: the destructor took the queue; -2: a message,
+  // which the teardown routes out (post_message sends it through the handle).
   if (destroying_)
-    return false; // the destructor took the queue: nothing posted now would be applied
+    return -1; // the destructor took the queue: nothing posted now would be applied
+  if (routed_out_ && std::holds_alternative<posted_message>(e))
+    return -2;
   // The cap (S2-Q10) counts the capped entries in the queue; a drain empties it.
   if (capped) {
     const std::size_t cap = ingress_cap_.load(std::memory_order_relaxed);
     if (cap != 0 && ingress_capped_ >= cap) {
       ingress_counts_.ingress_refused.fetch_add(1, std::memory_order_relaxed);
-      return false;
+      return 0;
     }
     ++ingress_capped_;
   }
@@ -1527,7 +1615,7 @@ bool async_scheduler::push_capped(ingress_entry &&e, bool capped) {
   ingress_.push_back(std::move(e));
   ingress_pending_.store(true, std::memory_order_seq_cst);
   notify_work();
-  return true;
+  return 1;
 }
 
 // --- Stage 2: the router (S2b; exec_router.h). The protocol's ends are in exec_router.cpp. ---
@@ -1538,13 +1626,14 @@ void async_scheduler::set_router(exec_router *router, group_ref self) {
   // exec_group registers its prefixes before this (S2b.R2, C-M4): a group that had one forwards
   // what it holds at its teardown even once unregistered.
   if (router_ && route_self_ && router_->has_prefix(route_self_))
-    prefixed_once_ = true;
+    prefixed_once_.store(true, std::memory_order_relaxed);
 }
 
 bool async_scheduler::post_route(detail::route_entry e) {
   // Only a send counts against the cap, unless it is a rehomed one (S2-Q10).
   const bool capped = e.what == detail::route_entry::kind::send && !e.uncapped;
-  return push_capped(ingress_entry(std::in_place_type<detail::route_entry>, std::move(e)), capped);
+  return push_capped(ingress_entry(std::in_place_type<detail::route_entry>, std::move(e)), capped) >
+         0;
 }
 
 void async_scheduler::set_ingress_cap(std::size_t cap) {
@@ -2327,6 +2416,7 @@ int async_scheduler::fork(int pid) {
   child->root_path = parent.root_path;
   child->owner = parent.owner; // td B28: a host reaps the child with its parent (kill_owner)
   child->owner_root = parent.owner_root;
+  adopt_account(*child, parent.account);         // the parent's frame budget
   child->priority_floor = parent.priority_floor; // design 7.2: fork copies the floor
   child->priority_floor_explicit = parent.priority_floor_explicit;
   child->max_steps = parent.max_steps;

@@ -1104,15 +1104,22 @@ void sim_world::step(int num_threads) {
         return true; // off-grid: treat as blocked so we never push agents out of the world
       return truth_[r * cols_ + c] != 0;
     };
+    const bool all = cfg_.min_gap_parked; // the agents at rest too
+    // The point each agent's gap is measured from: min_gap_ahead along its heading (a vehicle's
+    // middle, ahead of the rear axle its position is), 0: its position.
+    const double ahead = cfg_.min_gap_ahead;
+    auto ax = [&](int k) { return ahead != 0.0 ? ahead * std::cos(th_[k]) : 0.0; };
+    auto ay = [&](int k) { return ahead != 0.0 ? ahead * std::sin(th_[k]) : 0.0; };
     for (int it = 0; it < cfg_.min_gap_iters; ++it) {
       bool moved = false;
       for (int i = 0; i < n_; ++i) {
-        if (!active_[i])
+        if (!all && !active_[i])
           continue;
         for (int j = i + 1; j < n_; ++j) {
-          if (!active_[j])
+          if (!all && !active_[j])
             continue;
-          double dx = o_[2 * j] - o_[2 * i], dy = o_[2 * j + 1] - o_[2 * i + 1];
+          double dx = (o_[2 * j] + ax(j)) - (o_[2 * i] + ax(i)),
+                 dy = (o_[2 * j + 1] + ay(j)) - (o_[2 * i + 1] + ay(i));
           double d2 = dx * dx + dy * dy;
           if (d2 >= mind2)
             continue;
@@ -1136,14 +1143,16 @@ void sim_world::step(int num_threads) {
             o_[2 * j + 1] = hjy;
             moved = true;
           } else if (jOk) { // i is wall-pinned -> move j the full gap
-            const double njx = o_[2 * i] + ux * mind, njy = o_[2 * i + 1] + uy * mind;
+            const double njx = o_[2 * i] + ax(i) + ux * mind - ax(j),
+                         njy = o_[2 * i + 1] + ay(i) + uy * mind - ay(j);
             if (!blocked(njx, njy)) {
               o_[2 * j] = njx;
               o_[2 * j + 1] = njy;
               moved = true;
             }
           } else if (iOk) { // j is wall-pinned -> move i the full gap
-            const double nix = o_[2 * j] - ux * mind, niy = o_[2 * j + 1] - uy * mind;
+            const double nix = o_[2 * j] + ax(j) - ux * mind - ax(i),
+                         niy = o_[2 * j + 1] + ay(j) - uy * mind - ay(i);
             if (!blocked(nix, niy)) {
               o_[2 * i] = nix;
               o_[2 * i + 1] = niy;

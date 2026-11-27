@@ -1076,6 +1076,65 @@ TEST(AriadneSceneWorld, AWorldNodesVisibilityFollowsItsWorld) {
   EXPECT_TRUE(scene_has_world(r.scene));
 }
 
+// A flat world's grid has what stands on its ground blocked: its other static nodes, under their
+// footprints, where they rise 0.5 m or more over it. A kerb lower than that and a body that moves
+// block nothing, and the grid is the same one from call to call (a new one lays a fleet out again).
+TEST(AriadneSceneWorld, WhatStandsOnAFlatGroundBlocksItsGrid) {
+  REQUIRE_YAML();
+  LoadResult r = fresh_load(R"(
+scene:
+  physics: {}
+  world: { source: city, cell: 2 }
+  nodes:
+    - node: ground
+      world: city
+      source: { box: { size: [60, 60, 1] } }
+      transform: { position: [0, 0, -0.5] }
+      body: static
+    - node: block
+      world: city
+      source: { box: { size: [10, 10, 8] } }
+      transform: { position: [12, 12, 4] }
+      body: static
+    - node: kerb
+      world: city
+      source: { box: { size: [10, 2, 0.2] } }
+      transform: { position: [-12, -12, 0.1] }
+      body: static
+    - node: crate
+      world: city
+      source: { box: { size: [4, 4, 4] } }
+      transform: { position: [-12, 12, 2] }
+      body: { mass: 100 }
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  ASSERT_NE(w, nullptr);
+  EXPECT_EQ(val(app, "scene.world.kind"), "flat");
+  std::shared_ptr<const cvc::nav::world_grid> g;
+  std::shared_ptr<const cvc::height_field> terrain;
+  w->vehicle_ground(g, terrain);
+  ASSERT_NE(g, nullptr);
+  EXPECT_TRUE(g->occupied(12.0, 12.0)) << "the block's middle";
+  EXPECT_TRUE(g->occupied(16.0, 8.0)) << "inside its edge";
+  EXPECT_FALSE(g->occupied(20.0, 12.0)) << "past it";
+  EXPECT_FALSE(g->occupied(0.0, 0.0));
+  EXPECT_FALSE(g->occupied(-12.0, -12.0)) << "the kerb is 0.2 m: driven over";
+  EXPECT_FALSE(g->occupied(-12.0, 12.0)) << "the crate moves";
+  // The ground's own grid is the open walled square; the world's has the block's 5 x 5 samples
+  // (8 to 16 m each way at 2 m) more, and scene.world.grid says so.
+  const std::shared_ptr<const cvc::nav::world_grid> ground = w->grid("ground", 2.0);
+  ASSERT_NE(ground, nullptr);
+  EXPECT_FALSE(ground->occupied(12.0, 12.0));
+  EXPECT_EQ(g->occupied_count(), ground->occupied_count() + 25);
+  EXPECT_EQ(val(app, "scene.world.grid.occupied"), std::to_string(g->occupied_count()));
+  std::shared_ptr<const cvc::nav::world_grid> again;
+  w->vehicle_ground(again, terrain);
+  EXPECT_EQ(again, g) << "the same grid while the world is";
+}
+
 TEST(AriadneSceneWorld, TheScenesWorldsAreOnOneAtATime) {
   REQUIRE_YAML();
   LoadResult r = fresh_load(kWorlds);
@@ -1397,6 +1456,115 @@ TEST(AriadneWorldVehicles, LooksAreFoundWhereTheyAre) {
   EXPECT_EQ(rules.vehicles[0].look.yaw, 180.0);
 }
 
+// The Humvee in parts (vehicle-humvee 1.0.0+cvc.5's humvee/chassis.glb, humvee/wheel.glb and
+// humvee/rig.json beside Humvee.glb): a humvee with no look:, or `model: humvee` unplaced, resolves
+// to a parted file look of the three, keeping the one-piece model's file; a placed model, a file
+// named, and an install without all three keep the one piece.
+TEST(AriadneWorldVehicles, TheHumveeIsInPartsWhereTheyAreInstalled) {
+  const fs::path prefix = fs::temp_directory_path() / "ariadne_world_vehicles_humvee_parts";
+  const fs::path shared = prefix / "share" / "cvc-scenes" / "shared";
+  std::error_code ec;
+  fs::remove_all(prefix, ec);
+  fs::create_directories(shared / "humvee");
+  for (const char *f : {"Humvee.glb", "humvee/chassis.glb", "humvee/wheel.glb", "humvee/rig.json"})
+    std::ofstream(shared / f) << "x";
+  EnvFor bundle("CVC_NAV_BUNDLE", "");
+  EnvFor env("CVC_PREFIX", prefix.string());
+  EnvFor cvcpkg("CVCPKG_PREFIX", "");
+  EnvFor conda("CONDA_PREFIX", "");
+  const std::string one_piece = find_vehicle_model("humvee");
+  ASSERT_NE(one_piece.find("Humvee.glb"), std::string::npos) << one_piece;
+
+  const auto archetypes = [] {
+    std::vector<vehicle_archetype> v(6);
+    v[0].id = "default"; // no look: the parts
+    v[1].id = "model";   // model: humvee, unplaced: the parts
+    v[1].look.kind = "model";
+    v[1].look.path = "humvee";
+    v[1].look.fit = true;
+    v[2].id = "turned"; // model: humvee, yaw: 180: the one piece (a parted look takes no yaw)
+    v[2].look = v[1].look;
+    v[2].look.yaw = 180.0;
+    v[3].id = "lifted"; // model: humvee, z: 0.2: the one piece
+    v[3].look = v[1].look;
+    v[3].look.z = 0.2;
+    v[4].id = "file"; // file: Humvee.glb: that file
+    v[4].look.kind = "file";
+    v[4].look.path = "Humvee.glb";
+    v[5].id = "racer"; // another preset: its box
+    v[5].preset = "roboracer";
+    return v;
+  };
+  std::vector<vehicle_archetype> v = archetypes();
+  std::vector<std::string> warnings;
+  resolve_vehicle_looks(v, (prefix / "doc").string(), {}, &warnings);
+  EXPECT_TRUE(warnings.empty());
+  for (int k : {0, 1}) {
+    const vehicle_look &look = v[k].look;
+    SCOPED_TRACE(v[k].id);
+    EXPECT_EQ(look.kind, "file");
+    EXPECT_TRUE(look.parted());
+    EXPECT_TRUE(look.fit);
+    EXPECT_EQ(fs::path(look.chassis), shared / "humvee" / "chassis.glb");
+    EXPECT_EQ(fs::path(look.wheel), shared / "humvee" / "wheel.glb");
+    EXPECT_EQ(fs::path(look.rig_file), shared / "humvee" / "rig.json");
+    EXPECT_TRUE(look.rig.hubs.empty()) << "the rig is its file's, read when it is drawn";
+    EXPECT_EQ(look.path, one_piece) << "the one piece kept, for a relay's clients";
+  }
+  for (int k : {2, 3}) {
+    SCOPED_TRACE(v[k].id);
+    EXPECT_FALSE(v[k].look.parted());
+    EXPECT_EQ(v[k].look.kind, "file");
+    EXPECT_EQ(v[k].look.path, one_piece);
+  }
+  EXPECT_EQ(v[2].look.yaw, 180.0);
+  EXPECT_EQ(v[3].look.z, 0.2);
+  EXPECT_FALSE(v[4].look.parted());
+  EXPECT_EQ(fs::path(v[4].look.path), prefix / "doc" / "Humvee.glb");
+  EXPECT_EQ(v[5].look.kind, "box");
+
+  // Resolved again (WorldVehicles resolves what a host passes it): the same.
+  std::vector<vehicle_archetype> again = {v[0]};
+  resolve_vehicle_looks(again, "", {});
+  EXPECT_EQ(again[0].look, v[0].look);
+
+  // A relay passes the look on as its kind and file: the one piece, by its file's name.
+  EXPECT_EQ(fs::path(v[0].look.path).filename().string(), "Humvee.glb");
+
+  // A host's own vehicles (a nav_swarm's agents, nav_scrub's runs) take the same look by name.
+  EXPECT_EQ(vehicle_look_named("humvee"), v[0].look);
+  const vehicle_look by_file = vehicle_look_named((shared / "Humvee.glb").string());
+  EXPECT_EQ(by_file.kind, "file");
+  EXPECT_FALSE(by_file.parted()) << "a file named is that file";
+  EXPECT_TRUE(by_file.fit);
+  std::vector<std::string> named_warnings;
+  EXPECT_EQ(vehicle_look_named("no_such_vehicle", &named_warnings).kind, "box");
+  EXPECT_TRUE(any_contains(named_warnings, "model 'no_such_vehicle' is not installed"));
+
+  // An install without all three (no rig): the one piece.
+  fs::remove(shared / "humvee" / "rig.json", ec);
+  v = archetypes();
+  resolve_vehicle_looks(v, "", {});
+  for (int k : {0, 1}) {
+    SCOPED_TRACE(v[k].id);
+    EXPECT_FALSE(v[k].look.parted());
+    EXPECT_EQ(v[k].look.kind, "file");
+    EXPECT_EQ(v[k].look.path, one_piece);
+    EXPECT_TRUE(v[k].look.fit);
+  }
+  // Neither: the box (and `model: humvee`'s warning), unless this program's own prefix has one.
+  fs::remove_all(shared, ec);
+  if (find_vehicle_model("humvee").empty()) {
+    v = archetypes();
+    warnings.clear();
+    resolve_vehicle_looks(v, "", {}, &warnings);
+    EXPECT_EQ(v[0].look.kind, "box");
+    EXPECT_EQ(v[1].look.kind, "box");
+    EXPECT_TRUE(any_contains(warnings, "model 'humvee' is not installed"));
+  }
+  fs::remove_all(prefix, ec);
+}
+
 // A look from a document's data: entry: `look: { data: NAME, file: FILE }` parses to a data look,
 // fitted unless fit: false, and resolve_vehicle_looks copies the entry's source and path: into it,
 // so the look is whole without the document (a client draws it from the same package); the loader
@@ -1413,7 +1581,7 @@ world:
   vehicles:
     archetypes:
       h: { vehicle: humvee, look: { data: humvee, file: Humvee.glb } }
-      flat: { look: { file: car.glb, data: local, fit: false } }
+      flat: { look: { file: car.glb, data: local, fit: false, texture: false } }
       lost: { look: { data: no_such_entry, file: x.glb } }
 scene:
   nodes: []
@@ -1433,6 +1601,8 @@ scene:
   EXPECT_TRUE(rules.vehicles[0].look.fit);
   EXPECT_EQ(rules.vehicles[1].look.kind, "data") << "data: and file: in either order";
   EXPECT_FALSE(rules.vehicles[1].look.fit);
+  EXPECT_TRUE(rules.vehicles[0].look.texture) << "a model wears its texture by default";
+  EXPECT_FALSE(rules.vehicles[1].look.texture) << "texture: false: in its entity's colours";
   std::vector<std::string> warnings;
   resolve_vehicle_looks(rules.vehicles, "", r.scene.assets, &warnings, r.scene.data);
   EXPECT_EQ(rules.vehicles[0].look.uri, "cvcpkg://cy-pca/vehicle-humvee");
@@ -2811,6 +2981,129 @@ TEST(AriadneWorldVehicles, AFleetHasPlantsAndAMetric) {
   art.drain();
   EXPECT_EQ(key_of("teams", "plans"), "vehicle");
   EXPECT_NEAR(kinematic_limits("teams").rr, own, 1e-6);
+}
+
+// A colliding fleet (collide:) keeps its vehicles apart: 24 kinematic Humvees driven to one rally
+// point pile into each other without it, and with it (the key switches it live) no two centres
+// come closer than nav's gap, nine tenths of a Humvee's length.
+TEST(AriadneWorldVehicles, ACollidingFleetsVehiclesStayApart) {
+  REQUIRE_YAML();
+  cvc::app app;
+  AppRuntime art(app, "");
+  art.load(write_doc("fleet_collide", R"(requires: [scene.physics]
+world:
+  vehicles:
+    archetypes:
+      v: { plant: kinematic, vehicle: humvee, controllers: [nav@1, none] }
+    start:
+      - { fleet: pack, archetype: v, count: 24, spawn: scattered, seed: 3, rally: { count: 1 },
+          policy: builtin }
+scene:
+  clock: { paused: true }
+  physics: {}
+  world: { source: square, cell: 2 }
+  nodes:
+    - node: square
+      world: square
+      source: { box: { size: [120, 120, 1] } }
+      transform: { position: [0, 0, -0.5] }
+      body: static
+)")
+               .string());
+  ASSERT_NE(art.scene_world(), nullptr);
+  WorldVehicles *v = art.scene_world()->vehicles();
+  art.drain();
+  const auto closest = [&] {
+    art.step_world(1);
+    art.drain();
+    const std::shared_ptr<const fleet_poses> p = v->poses("pack");
+    double best = 1e30;
+    for (std::size_t i = 0; p && i < p->size(); ++i)
+      for (std::size_t j = i + 1; j < p->size(); ++j)
+        best = std::min(best, std::hypot(double(p->x[i] - p->x[j]), double(p->y[i] - p->y[j])));
+    return best;
+  };
+  EXPECT_EQ(val(app, "vehicles.fleets.pack.collide"), "0");
+  // To the rally point: 20 s of world time.
+  art.step_world(2400);
+  const double piled = closest();
+  const double gap = 0.9 * 4.84 * 0.99; // nine tenths of its length (kCollideGap x its radius)
+  EXPECT_LT(piled, gap) << "without collide: they pile into each other";
+  cvc::state::instance(app)("vehicles.fleets.pack.collide").value(std::string("1"));
+  art.step_world(240);
+  const double apart = closest();
+  EXPECT_GE(apart, gap) << "with collide: kept apart";
+  EXPECT_GT(apart, piled);
+}
+
+// A fleet's size key (vehicles.fleets.<f>.size) starts at its count: writing it adds vehicles
+// after its last or takes its last ones off, and the fleet is laid out again from its seed. A
+// size out of range is held to 1..256, and the key says what the fleet holds.
+TEST(AriadneWorldVehicles, AFleetsSizeKeyAddsAndTakesOffVehicles) {
+  REQUIRE_YAML();
+  cvc::app app;
+  AppRuntime art(app, "");
+  art.load(write_doc("fleet_size", R"(requires: [scene.physics]
+world:
+  vehicles:
+    archetypes:
+      v: { plant: kinematic, vehicle: humvee, controllers: [nav@1, none] }
+    start:
+      - { fleet: pack, archetype: v, count: 12, spawn: scattered, seed: 3, rally: { count: 3 },
+          policy: builtin }
+scene:
+  clock: { paused: true }
+  physics: {}
+  world: { source: square, cell: 2 }
+  nodes:
+    - node: square
+      world: square
+      source: { box: { size: [160, 160, 1] } }
+      transform: { position: [0, 0, -0.5] }
+      body: static
+)")
+               .string());
+  ASSERT_NE(art.scene_world(), nullptr);
+  WorldVehicles *v = art.scene_world()->vehicles();
+  const auto settle = [&] {
+    art.drain();
+    art.step_world(1);
+    art.drain();
+  };
+  const auto placed = [&] {
+    const std::shared_ptr<const fleet_poses> p = v->poses("pack");
+    return p ? p->size() : std::size_t{0};
+  };
+  const auto members = [&] {
+    std::size_t n = 0;
+    for (const entity_info &e : v->entities())
+      n += e.fleet == "pack" ? 1 : 0;
+    return n;
+  };
+  settle();
+  EXPECT_EQ(val(app, "vehicles.fleets.pack.size"), "12");
+  EXPECT_EQ(placed(), 12u);
+  cvc::state &size = cvc::state::instance(app)("vehicles.fleets.pack.size");
+  size.value(std::string("30"));
+  settle();
+  EXPECT_EQ(members(), 30u);
+  EXPECT_EQ(placed(), 30u);
+  EXPECT_EQ(val(app, "vehicles.fleets.pack.count"), "30");
+  size.value(std::string("5"));
+  settle();
+  EXPECT_EQ(members(), 5u);
+  EXPECT_EQ(placed(), 5u);
+  size.value(std::string("100000"));
+  settle();
+  EXPECT_EQ(members(), 256u);
+  EXPECT_EQ(val(app, "vehicles.fleets.pack.size"), "256");
+  size.value(std::string("0"));
+  settle();
+  EXPECT_EQ(members(), 1u);
+  EXPECT_EQ(val(app, "vehicles.fleets.pack.size"), "1");
+  size.value(std::string("lots")); // not a number: nothing changes
+  settle();
+  EXPECT_EQ(members(), 1u);
 }
 
 // A fleet's poses are a snapshot (FL1d): poses(fleet) gives its placed vehicles as the last
@@ -10794,6 +11087,50 @@ TEST(AriadneOneWorld, AClientRunsTheBoatItDrivesAsTheWorldDoes) {
   EXPECT_LT(run.worst_yaw, 0.005);
   EXPECT_LT(run.worst_z, 0.02) << "afloat at the relay's height";
   EXPECT_LT(run.worst_tilt, 0.05) << "the hull's pitch and roll";
+}
+
+// A boat's model, as a relay sends it to its clients (conference::room_entities_of): fitted to its
+// length overall, its base its keel (its hull's bottom, hull-body z), where the boat node and a
+// scene's own entity layer put it; not the lake's bed under it, which a car's base is the ground.
+TEST(AriadneWorldBoats, ABoatsModelSitsOnItsKeelOnARelaysClients) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  cvc::app app;
+  register_world_block(app);
+  LoadResult r = load_string(app, kBoatDrivable);
+  ASSERT_TRUE(r.ok) << r.error;
+  {
+    const Value *world = find_world_block(r);
+    ASSERT_NE(world, nullptr);
+    world_rules rules = default_world_rules();
+    ASSERT_EQ(parse_world_block(*world, rules), "");
+    r.scene.vehicles = rules.vehicles;
+  }
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  ASSERT_NE(w, nullptr);
+  WorldVehicles &v = *w->vehicles();
+  w->sync(&warnings);
+  const std::uint64_t id = spawn_kind(v, "launch", -25.0, 0.0);
+  for (int i = 0; i < 60; ++i) {
+    v.before_step();
+    w->world().step();
+    v.after_step();
+  }
+  const entity_info e = entity(v, id);
+  ASSERT_TRUE(e.placed);
+  const cvc::physics::dyn_boat_desc b = boat_desc_of(r.scene.vehicles[0]);
+  double keel = 1e30;
+  for (const cvc::physics::vec3 &p : b.boat.hull.hull->vertices)
+    keel = std::min(keel, p.z);
+  const std::vector<conference::room_entity> wire = conference::room_entities_of(v);
+  ASSERT_EQ(wire.size(), 1u);
+  EXPECT_DOUBLE_EQ(wire[0].base_z, keel) << "its keel";
+  EXPECT_LT(keel, 0.0);
+  EXPECT_LT(e.ground_z - e.z, keel - 1.0) << "the lake's bed is well below its keel";
+  if (b.length_overall > 0.0)
+    EXPECT_DOUBLE_EQ(wire[0].fit_length, b.length_overall);
 }
 
 // A lake with a wind sea on it (OW5l): kBoatDrivable's made wider and deeper (12 m at its

@@ -17,6 +17,9 @@
 //   stream   the vehicles move: the agents' and flags' points change from frame to frame;
 //   lod      a mesh model makes four rungs, the coarser welded and decimated (fewer points a
 //            vehicle than the model), and an overview draws every vehicle on the coarsest;
+//   humvee   `look: humvee` is the look a world vehicle's is: with vehicle-humvee's parts installed
+//            (a prefix of .glb files, CVC_PREFIX) its wheels are in the template, in a tyre's dark
+//            on every rung, the coarsest too (each colour role decimated on its own);
 //   follow   the follow layer is a node a track camera finds by id, at the followed vehicle;
 //            the path layer shows only while one is followed;
 //   keys     a layer's visible: follows its key; a target's keys move its beacons;
@@ -27,12 +30,14 @@
 #include "streaming_test_util.h"
 
 #include <cmath>
+#include <cstdlib>
 #include <cvc/ariadne/bind.h>
 #include <cvc/ariadne/loader.h>
 #include <cvc/ariadne/scene.h>
 #include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/ariadne/scene_realize.h>
 #include <cvc/gl/ariadne/swarm_nodes.h>
+#include <cvc/model/model_file_io.h>
 #include <filesystem>
 #include <fstream>
 #include <random>
@@ -74,7 +79,70 @@ void write_model(const std::filesystem::path &file) {
   box(0.8, -0.9, 0.0, 2.0, 0.9, 0.8, 8);  // the hood
 }
 
-std::string doc_text(const std::string &model) {
+// vehicle-humvee's parted Humvee as cvcpkg installs it, under `prefix`: share/cvc-scenes/shared's
+// Humvee.glb and humvee/{chassis.glb, wheel.glb, rig.json} (the model above as the chassis and the
+// one piece, a 0.9 m wheel). False where this build writes no .glb.
+bool write_humvee_prefix(cvc::app &app, const std::filesystem::path &obj,
+                         const std::filesystem::path &prefix) {
+  namespace fs = std::filesystem;
+  if (!cvc::can_write_model_to_memory(".glb") || !cvc::can_read_model_from_memory(".glb"))
+    return false;
+  const fs::path shared = prefix / "share" / "cvc-scenes" / "shared";
+  std::error_code ec;
+  fs::create_directories(shared / "humvee", ec);
+  const fs::path wheel_obj = prefix / "wheel.obj";
+  {
+    std::ofstream o(wheel_obj);
+    for (int k = 0; k < 8; ++k)
+      o << "v " << (k & 1 ? 0.45 : -0.45) << " " << (k & 2 ? 0.15 : -0.15) << " "
+        << (k & 4 ? 0.45 : -0.45) << "\n";
+    const int f[12][3] = {{1, 3, 4}, {1, 4, 2}, {5, 6, 8}, {5, 8, 7}, {1, 2, 6}, {1, 6, 5},
+                          {3, 7, 8}, {3, 8, 4}, {1, 5, 7}, {1, 7, 3}, {2, 4, 8}, {2, 8, 6}};
+    for (const auto &t : f)
+      o << "f " << t[0] << " " << t[1] << " " << t[2] << "\n";
+  }
+  try {
+    const cvc::model car = cvc::read_model(app, obj.string());
+    const cvc::model wheel = cvc::read_model(app, wheel_obj.string());
+    std::ofstream(shared / "Humvee.glb", std::ios::binary)
+        << cvc::write_model_to_memory(app, car, ".glb");
+    std::ofstream(shared / "humvee" / "chassis.glb", std::ios::binary)
+        << cvc::write_model_to_memory(app, car, ".glb");
+    std::ofstream(shared / "humvee" / "wheel.glb", std::ios::binary)
+        << cvc::write_model_to_memory(app, wheel, ".glb");
+  } catch (const std::exception &e) {
+    std::printf("  the humvee prefix: %s\n", e.what());
+    return false;
+  }
+  std::ofstream(shared / "humvee" / "rig.json")
+      << R"({ "radius": 0.45, "hubs": [[1.4, 0.95, 0.45], [1.4, -0.95, 0.45], [-1.4, 0.95, 0.45],
+  [-1.4, -0.95, 0.45]] })";
+  return true;
+}
+
+// An environment variable set for the test (unset when empty).
+void set_env(const char *name, const std::string &value) {
+#ifdef _WIN32
+  _putenv_s(name, value.c_str());
+#else
+  if (value.empty())
+    unsetenv(name);
+  else
+    setenv(name, value.c_str(), 1);
+#endif
+}
+
+// How many of a mesh's points are a tyre's dark (vehicle_view's 18, 18, 20).
+std::size_t tyre_points(const std::shared_ptr<GeometryNode> &g) {
+  std::size_t n = 0;
+  if (g && g->getGeometry())
+    for (const auto &c : g->getGeometry()->const_colors())
+      if (std::fabs(c[0] - 18.0 / 255.0) < 1e-3 && std::fabs(c[2] - 20.0 / 255.0) < 1e-3)
+        ++n;
+  return n;
+}
+
+std::string doc_text(const std::string &model, bool humvee) {
   return R"(meta: { min_libcvc: "0.0.0" }
 scene:
   clock: { scale: 3.6 }
@@ -93,7 +161,11 @@ scene:
         - { node: swarm_agents, type: swarm_layer, layer: agents, look: arrow }
         - { node: swarm_models, type: swarm_layer, layer: agents, look: ")" +
          model + R"(", lod: true }
-        - { node: swarm_flags, type: swarm_layer, layer: flags, visible: show.flags }
+)" +
+         (humvee
+              ? "        - { node: swarm_humvee, type: swarm_layer, layer: agents, look: humvee }\n"
+              : "") +
+         R"(        - { node: swarm_flags, type: swarm_layer, layer: flags, visible: show.flags }
         - { node: swarm_goals, type: swarm_layer, layer: goals }
         - { node: swarm_trails, type: swarm_layer, layer: trails, every: 1 }
         - { node: swarm_path, type: swarm_layer, layer: path }
@@ -159,8 +231,18 @@ int main() {
   std::filesystem::create_directories(dir);
   const std::filesystem::path model = dir / "car.obj";
   write_model(model);
+  // The Humvee in parts where the swarm looks for it, and nowhere else.
+  const bool humvee = write_humvee_prefix(app, model, dir / "prefix");
+  if (humvee) {
+    set_env("CVC_PREFIX", (dir / "prefix").string());
+    for (const char *v : {"CVCPKG_PREFIX", "CONDA_PREFIX", "CVC_NAV_BUNDLE"})
+      set_env(v, "");
+  } else {
+    std::printf("  humvee: skipped (no .glb writer in this build)\n");
+  }
 
-  cvc::ariadne::LoadResult doc = cvc::ariadne::load_string(app, doc_text(model.generic_string()));
+  cvc::ariadne::LoadResult doc =
+      cvc::ariadne::load_string(app, doc_text(model.generic_string(), humvee));
   if (!check(doc.ok, "the document loads", doc.error))
     return finish("cvcgl_ariadne_swarm");
 
@@ -232,6 +314,20 @@ int main() {
     check(coarse > 0 && coarse % 48 == 0 && coarse / 48 <= 16,
           "lod: the coarsest rung is welded (at most the model's 16 corners a vehicle)",
           std::to_string(coarse));
+  }
+
+  // --- humvee -------------------------------------------------------------------------------
+  if (humvee) {
+    const auto fine = mesh_of(sg, "swarm_humvee", "_lod0");
+    const auto coarse = mesh_of(sg, "swarm_humvee", "_lod3");
+    check(fine && coarse, "humvee: `look: humvee` makes its rungs");
+    const std::size_t fine_tyre = tyre_points(fine), coarse_tyre = tyre_points(coarse);
+    std::printf("  humvee: the finest rung %zu points (%zu a tyre's), the coarsest %zu (%zu)\n",
+                points_of(fine), fine_tyre, points_of(coarse), coarse_tyre);
+    check(fine_tyre > 0 && fine_tyre < points_of(fine),
+          "humvee: in parts, its wheels a tyre's dark and its chassis its colour");
+    check(coarse_tyre > 0 && coarse_tyre % 48 == 0 && points_of(coarse) % 48 == 0,
+          "humvee: the coarsest rung keeps every vehicle's wheels dark");
   }
 
   // --- stream -------------------------------------------------------------------------------

@@ -1512,9 +1512,7 @@ int main(int argc, char **argv) {
   int ticks = 0;
   int mediaticks = 0;           // cadence for the media (router) heartbeat
   std::uint64_t lastRouted = 0; // last-logged media_router routed count
-#if CVC_ENABLE_WS
-  int reapticks = 0; // cadence for reaping ghost (navigated-away) connections
-#endif
+  int reapticks = 0; // cadence for reaping ghost (navigated-away) connections, gRPC's and WS's
   // The server-authoritative avatar holon for this room (H1): each room step it reads
   // every participant's proposed intent from the replicated tree and integrates it on
   // its own clock (a stamped intent at the tick the client applied it). The relay loop
@@ -2372,6 +2370,15 @@ int main(int argc, char **argv) {
 #endif
     return !signals.stop_requested();
   };
+  // The room steps from here, and its first step sends it to every client. The relay listened
+  // before the room and the server document were set up (a generated world's load makes its
+  // dataset: seconds natively, and over 10 s in a Debug build with coverage), so a client that
+  // joined meanwhile has waited for this, as long as its join allows. tests/relay_pair.py starts
+  // its client once it reads this line.
+  if (!signals.stop_requested()) {
+    std::printf("[arisrv] serving room '%s': it steps from now\n", room.c_str());
+    std::fflush(stdout);
+  }
   while (relay_running()) {
     // Reap ghosts (~every second): a peer gone without closing its connection (a tab that
     // navigated or reloaded away, a crash behind NAT, a suspended phone) sends nothing more, while

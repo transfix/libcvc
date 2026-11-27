@@ -1416,23 +1416,40 @@ pending FIFO past `max_pending_messages`.
 
 **Teardown and rehoming.** A group's teardown, holding its token after the lock port's close and
 the pool's detach and before the kills, calls `async_scheduler::leave_router()`:
-1. It closes its handle. A post through it is refused from then on, and its poster resolves the
-   home again and posts again, waiting (yielding) while the home is still this group, so what it
-   posts arrives after what the teardown forwards. (A group closed and never unregistered, which
-   only a teardown outside `leave_router` leaves, is passed over after 2^20 yields; a closed group
-   0, during `~app`, at once.)
-2. It sends what it holds to the keys' new homes, resolved without it or any other closed group
-   (`exec_router::new_home_of`), in the order it took them: the pending messages of the keys it
-   homed (uncapped sends, each key's in FIFO order), its remote-waiter records (subscribes with the
-   same seq), its broadcast trackers (`adopt`), then its queued messages and router entries in
-   queue order: a host post of a key it homed and a `send` as uncapped sends, a `deliver` as a
-   stale one (a requeue to its home, or dropped), the rest as they are. The messages of keys it did
-   not home (a `#` key's, an island's own) die with it, counted (`destroy_dropped`). Its commands
-   stay for the destructor, which refuses them (`done(false)`).
-3. Only then it unregisters its prefixes, which ends the posters' wait.
+1. It closes its handle. Its scheduler takes no post through it from then on. Until the handle is
+   done (3), a router entry posted through it (any kind, any thread, no cap) goes into the handle's
+   **late queue**, so no poster ever waits for a teardown (S2b.R3). A host's post or command
+   through the handle (`group_ref::post_message`, `post_control`) is refused.
+2. It sends what it holds on, in the order it took it: the pending messages of the keys it homed
+   (uncapped sends, each key's in FIFO order), its remote-waiter records (subscribes with the same
+   seq), its broadcast trackers (`adopt`), then its queued messages and router entries in queue
+   order, then its late entries in arrival order, again until none are left. When a round's batch
+   does not shrink, reaches the ingress cap, or a few rounds have gone (posters as fast as its
+   forward), it **seals** the handle: only another teardown's forward still goes into the late
+   queue, and any other poster waits (yielding, then sleeping briefly) until the handle is done. A
+   teardown's forward never waits (its kills, once it is done, may wait on another sealed home),
+   and a sealed one has only a finite forward left, so that wait is bounded and no cycle of waits
+   can form.
+   - A host post or `send` of a key it homed goes on as an uncapped send. A `deliver` goes as a
+     stale one: a requeue to its home, or dropped. The rest go as they are.
+   - The messages and sends of keys it did not home (a `#` key's, an island's own) die with it,
+     counted (`destroy_dropped`). Its commands stay for the destructor, which refuses them
+     (`done(false)`).
+   - Each key's entries go to **one target** for the whole teardown: the key's home among the
+     groups still open when its first entry goes (`exec_router::new_home_of`, which leaves out
+     every closed group). A deliver's requeue goes to the home that sent it.
+3. Then, under the handle's lock with the late queue empty, it unregisters its prefixes, keeps
+   each key's target as the handle's **forwarding address**, and marks the handle done.
+   - From then on a post through the handle is refused. Its poster goes on to
+     the handle's forwarding address for the key, else to the key's home (else, for a closed group
+     0, to the open group whose prefix covers the key, if any).
+   - So an entry for a key always reaches that key's state after the state, across a home's
+     teardown and any number of later ones.
+   - Every target was open when it was chosen, so no forward comes back to a teardown that sent
+     it (but a deliver's requeue, which goes to the home that sent the deliver and is made at most
+     once per entry), and two teardowns at once (each holding entries for the other) both end.
 
-The forward waits on nothing, so the wait is bounded. The kills that follow post unsubscribes for
-its processes' remote waits. An island homes nothing for another group, so its teardown forwards
+The kills that follow post unsubscribes for its processes' remote waits. An island homes nothing for another group, so its teardown forwards
 none of its own keys' messages, as a Stage 1 group's die with it. When a prefix's home goes, its
 keys come home to group 0 for groups with prefixes and to each island itself. A group that was
 only unregistered (Ariadne's move, when another thread held its token) forwards at its teardown the
@@ -1446,7 +1463,8 @@ with the router on, forwards the message to the home as a `send` (the home's cap
 island forwards only a key another group's prefix covers. So a host that posts to
 `app.exec_scheduler()` on an isolated document's channel reaches the document's group, one hop more
 than a post to the program's parking scheduler, and a `#` key never moves. A post to a group whose
-handle closed goes on to the key's new home the same way. `pool.post_message(channel, value)` posts
+teardown has taken its queue goes through its own handle as a `send`: into the late queue, or on
+by the forwarding address, after the forward. `pool.post_message(channel, value)` posts
 to the key's home (group 0's `post_message` while the router is off, and for a `#` key); `channel`
 is resolved already (no chroot is applied), and false means the home refused it (its cap), or the
 pool has no app.
@@ -1466,8 +1484,8 @@ router is made), and each scheduler's for the entries it posts.
 - **Kept:**
   - FIFO per (sender group, channel), since a group's posts to one home go through one queue in
     order and the home applies them in that order, across the home's teardown too (its forward
-    keeps the order, and a refused poster's wait puts its later posts after it); a host thread's
-    posts likewise;
+    keeps the order, its late queue takes what is posted during it, and a refused poster follows
+    its forwarding address after it); a host thread's posts likewise;
   - a broadcast reaches every process waiting at the home when the send is applied there, local
     and remote alike (a record past its deadline excepted), each receiving group with an envelope
     of its own;
@@ -5058,7 +5076,10 @@ text; the lead amended it as S2b.0a, before the implementation:
   island rule (`has_prefix`), with the gap that islands no longer exchange messages on a prefix's
   keys once its home goes.
 - Closed rather than documented: a torn-down home's broadcast trackers are forwarded (`adopt`,
-  with `outstanding` and `taken`), which unique ids and the poster's wait make safe.
+  with `outstanding` and `taken`), which unique ids and the poster's wait make safe. (S2b.R3
+  replaced the wait with the handle's late queue and forwarding addresses: the wait could not be
+  given to a teardown's own posts without a deadlock between two teardowns, and without it a
+  receiving group's teardown overlapping its home's sent answers ahead of the adopt.)
 - Then (ae66f1952) an island homes nothing for another group, so its teardown forwards none of its
   own keys' messages: they die with it, counted, as a Stage 1 group's do.
 - Kept as documented: the requeue position (`gap-requeue-order`).

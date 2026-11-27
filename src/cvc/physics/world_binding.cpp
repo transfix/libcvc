@@ -298,14 +298,16 @@ const std::pair<const char *, double vehicle_desc::*> kVehicleKnobs[] = {
     {"shift_up_rpm_light", &vehicle_desc::shift_up_rpm_light},
     {"shift_down_rpm_light", &vehicle_desc::shift_down_rpm_light}};
 // Wading's tuning world::set_vehicle accepts, as knobs under tuning.wading (wading.enabled and
-// wading.displacement are fixed when the vehicle is added).
+// wading.displacement are fixed when the vehicle is added, and so is whether flood_area is 0: a
+// change to or from 0 is refused, and so ignored).
 const std::pair<const char *, double wading_desc::*> kWadingKnobs[] = {
     {"wheel_displacement", &wading_desc::wheel_displacement},
     {"wheel_drag", &wading_desc::wheel_drag},
     {"underbody_depth", &wading_desc::underbody_depth},
     {"underbody_drag", &wading_desc::underbody_drag},
     {"tire_pressure", &wading_desc::tire_pressure},
-    {"fording_depth", &wading_desc::fording_depth}};
+    {"fording_depth", &wading_desc::fording_depth},
+    {"flood_area", &wading_desc::flood_area}};
 const std::pair<const char *, double axle_desc::*> kAxleKnobs[] = {
     {"max_brake_torque", &axle_desc::max_brake_torque},
     {"max_hand_brake_torque", &axle_desc::max_hand_brake_torque},
@@ -846,6 +848,8 @@ void world_binding::write(const publication &p) const {
     put_vec(_ctx, at(base, "air_velocity"), vs.air_velocity);
     put_vec(_ctx, at(base, "water_force"), vs.water_force);
     write_val(_ctx, at(base, "engine_flooded"), vs.engine_flooded);
+    write_val(_ctx, at(base, "water_inside"), vs.water_inside);
+    write_val(_ctx, at(base, "water_inside_mass"), vs.water_inside_mass);
     {
       // The energy ledger, in doc 31's names (D11): joules since added, P_W the last step's.
       const vehicle_energy &e = vs.energy;

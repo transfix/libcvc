@@ -160,11 +160,30 @@ imports phast and copies none of it.
      wrong; voltage-only queries are mostly inconclusive, full-state ones certify.
    - pycvc: `fit_history`, `card`, `ph_rank`. Still to do: a `cvc ph query` subcommand (it needs
      a query file format); the paper's analytic bounds (Prop. F.7/F.8) in place of sampled ones.
-4. **Training, if needed.** Either native, as `cvc::ph::se2_train` does (Adam on
-   hand-written gradients through the split step), or export from phast's PyTorch into
-   `"cvc-ph-law/1"`. Which one depends on whether Shubham's trained checkpoints can be
-   shared; exporting is the fallback that needs no new optimizer. Joe is asking him for the
-   Go2 leg checkpoints (2026-11-14), which Phase 6 needs.
+4. **Training (in review): native, Joe's choice (2026-11-26).**
+   - `cvc/ph/ad.h`: a reverse-mode tape owned by the caller.
+   - `cvc/ph/train.h`:
+     - `canonical_t<T>`, canonical_law's arithmetic over a scalar type: with `double` it is the
+       runtime law to rounding; with `ad::var` its step is differentiated through the potential's
+       and mass's input derivatives and the Picard iterations;
+     - the trainable-parameter flattening;
+     - the isolated-DGU calibration of Section 4.1 / Appendix A.5: the dataset from the reference
+       DGU, the fitted-linear control and warm start, L_constraint (Eq. 73) and L_step (Eq. 74)
+       with the 1 / 0.01 / 1e-8 weights, Adam with the combined or constraint-first schedule, and
+       5 s held-out rollouts.
+   - `cvc ph train-dgu`, `pycvc.ph_train_dgu`.
+   - The paper-size family has 2,405 parameters (the paper's: 2,407, 2,404 optimized). Its
+     fitted-linear control scores 107 mV / 58 mA on held-out rollouts (Table 3's fitted linear:
+     82-103 mV / 43-63 mA).
+   - The paper's protocol, one fit, on held-out 5 s rollouts:
+     - combined loss, 100k updates: 0.359 mV / 0.171 mA;
+     - constraint-first, 25k + 75k updates: 0.355 mV / 0.168 mA;
+     - Table 3's C-PHAST medians are 1.2 mV / 0.74 mA, ranging over 0.13-3.2 mV.
+
+     The constraint-first law is a test fixture (`tests/data/ph_dgu_trained.json`).
+   - Not yet: calibration on source networks (Eqs. 76-77), the Go2 leg blocks (Phase 5 first).
+     Shubham's checkpoints, if they come, load as `"cvc-ph-law/1"` through the fixture
+     script's exporter.
 5. **Later.** The planar arm (two-link, attachment maps `B(q) = [0; (dr/dq)^T]`), and legged
    blocks on the MuJoCo plants (Go2 and Spot are in the cvcpkg Menagerie bundle; see the
    mujoco workstream). Convoy formations are not a reason for these maps: a power-preserving

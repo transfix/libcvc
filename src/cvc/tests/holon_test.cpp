@@ -949,6 +949,188 @@ TEST(HolonPhysicsTest, ClientPredictionMatchesTheServersPhysics) {
   EXPECT_NEAR(client.state("A").position.x, server.state("A").position.x, 0.05);
 }
 
+// The room's water in the client's avatar world (OW9a, ARIADNE_WORLDS.md section 18.10): a
+// client walks its avatar from a dry floor into a lake 3 m deep beside the server, as the relay's
+// world has it (1000 kg/m^3, C_d 1, damping 1e4, inertial: a sea's numbers). With the water in
+// both, the client floats where the server does and is never corrected. Without it in the client
+// (as before OW9a) the client sinks toward the lake's bed and is corrected up to the server's
+// floating avatar again and again (20 m of corrections in the run). The water rising half a metre,
+// which the client hears a link's delay late, costs at most a small correction (the steps it
+// predicted in the old water), then the client floats where the server does again. The avatar
+// floats head-out (OW9b), so the risen water covers it and only 1.5% of its weight is left to lift
+// it: that run is 60 s, long enough for it to come back up.
+namespace {
+struct lake_run {
+  double corrected = 0.0; // m, summed over the run
+  double client_z = 0.0, server_z = 0.0, client_x = 0.0, server_x = 0.0;
+};
+cvc::physics::field lake_water(cvc::app &app, double level) {
+  auto v = std::make_shared<cvc::volume>(app, cvc::dimension(2, 2, 2), cvc::Float,
+                                         cvc::bounding_box(5.0, -50.0, -4.0, 105.0, 50.0, level));
+  v->fill(1000.0);
+  cvc::physics::field f;
+  f.kind = cvc::physics::field_kind::fluid;
+  f.volume = v;
+  f.drag_coefficient = 1.0;
+  f.damping = 1.0e4;
+  f.inertial = true;
+  return f;
+}
+lake_run walk_into_the_lake(bool client_water, bool rise) {
+  cvc::app app;
+  // A dry floor to x = 5 (its top z = 0), then the lake's bed 3 m down.
+  std::vector<cvc::ariadne::avatar_static> st(2);
+  st[0].center = vec3{-45.0, 0.0, -0.5};
+  st[0].half_extents = vec3{50.0, 50.0, 0.5};
+  st[1].center = vec3{55.0, 0.0, -3.5};
+  st[1].half_extents = vec3{50.0, 50.0, 0.5};
+  const std::vector<cvc::physics::field> water{lake_water(app, 0.0)};
+  const std::vector<cvc::physics::field> risen{lake_water(app, 0.5)};
+  holon server(holon_role::server, physics_config());
+  holon client(holon_role::client, physics_config());
+  lake_run r;
+  if (!server.physics() || !client.physics())
+    return r;
+  server.set_statics(st, 1, water);
+  client.set_statics(st, 1, client_water ? water : std::vector<cvc::physics::field>{});
+  server.add_participant("A", false, at(0.0, 0.0));
+  client.add_participant("A", true, at(0.0, 0.0));
+  constexpr int kDelay = 6;
+  client.set_lead_ticks(2 * kDelay + 2);
+  const double dt = server.clock().fixed_dt();
+  struct msg {
+    int at;
+    avatar_intent in;
+    std::uint64_t tick;
+    body_state s;
+  };
+  std::vector<msg> up, down;
+  std::uint64_t rose = 0; // the server tick the water rose at
+  const int frames = rise ? 7200 : 1800;
+  for (int f = 0; f < frames; ++f) {
+    if (f == 30) {
+      avatar_intent in;
+      in.move = vec3{2.0, 0.0, 0.0}; // into the lake, 9 m in when it stops
+      client.set_intent("A", in);
+      up.push_back({f + kDelay, in, client.tick() + 1, {}});
+    }
+    if (f == 30 + 840) { // 7 s on
+      avatar_intent in;  // stop, floating
+      client.set_intent("A", in);
+      up.push_back({f + kDelay, in, client.tick() + 1, {}});
+    }
+    if (rise && f == 1200) {
+      rose = server.tick();
+      server.set_water(risen, rose, 2);
+    }
+    if (rise && client_water && f == 1200 + kDelay) // heard a link's delay late
+      client.set_water(risen, rose, 2);
+    client.advance(dt);
+    for (auto it = up.begin(); it != up.end();)
+      if (it->at <= f) {
+        server.queue_intent("A", it->in, it->tick);
+        it = up.erase(it);
+      } else {
+        ++it;
+      }
+    server.advance(dt);
+    down.push_back({f + kDelay, {}, server.tick(), server.state("A")});
+    for (auto it = down.begin(); it != down.end();)
+      if (it->at <= f) {
+        client.apply_authoritative("A", it->s, it->tick);
+        it = down.erase(it);
+      } else {
+        ++it;
+      }
+    const vec3 c = client.take_correction("A");
+    r.corrected += std::fabs(c.x) + std::fabs(c.y) + std::fabs(c.z);
+  }
+  r.client_z = client.state("A").position.z;
+  r.server_z = server.state("A").position.z;
+  r.client_x = client.state("A").position.x;
+  r.server_x = server.state("A").position.x;
+  return r;
+}
+} // namespace
+
+TEST(HolonPhysicsTest, AClientPredictsItsAvatarInTheRoomsWater) {
+  {
+    holon probe(holon_role::client, physics_config());
+    if (!probe.physics())
+      GTEST_SKIP() << "no Jolt backend in this build";
+  }
+  const lake_run both = walk_into_the_lake(true, false);
+  const lake_run server_only = walk_into_the_lake(false, false);
+  const lake_run rising = walk_into_the_lake(true, true);
+  for (const auto &[name, r] : {std::pair<const char *, const lake_run &>{"water in both", both},
+                                {"water in the server's only", server_only},
+                                {"the water rising, heard late", rising}})
+    std::printf("  OW9A %s: corrected %.3f m in all; the client at x %.2f z %.3f, the server at "
+                "x %.2f z %.3f\n",
+                name, r.corrected, r.client_x, r.client_z, r.server_x, r.server_z);
+  EXPECT_GT(both.server_x, 10.0) << "it walked into the lake";
+  EXPECT_NEAR(both.server_z, -1.675, 0.05) << "and floats there, head-out (OW9b's 985 kg/m^3)";
+  EXPECT_LT(both.corrected, 1e-3) << "the client predicted it in the same water";
+  EXPECT_NEAR(both.client_z, both.server_z, 1e-3);
+  EXPECT_GT(server_only.corrected, 5.0) << "without the water the client sinks and is corrected";
+  EXPECT_GT(std::fabs(server_only.client_z - server_only.server_z), 0.05) << "never where it is";
+  EXPECT_NEAR(rising.server_z, both.server_z + 0.5, 0.05) << "the server's avatar rose with it";
+  EXPECT_LT(rising.corrected, 0.5) << "at most a small correction when the client heard";
+  EXPECT_NEAR(rising.client_z, rising.server_z, 1e-3) << "and the client's, replayed from the rise";
+}
+
+// A person floats head-out (OW9b, ARIADNE_WORLDS.md section 18.10): the box displaces its mass
+// over avatar_body::density (985 kg/m^3), not its own volume, so 98.5% of it is under a still
+// surface and its top 2.5 cm out. The depth is the density's, whatever the mass: a 140 kg avatar
+// (set_mass) floats as deep. A body denser than water (1100 kg/m^3) sinks to the bed, and one
+// given the box's own density (70 kg in 0.425 m^3, 165 kg/m^3: how it was before) floats like a
+// cork, 0.28 m in.
+namespace {
+double floating_top(double density, double mass) {
+  cvc::app app;
+  cvc::ariadne::avatar_body body;
+  body.density = density;
+  cvc::ariadne::avatar_world w(1.0 / 120.0, body);
+  std::vector<cvc::ariadne::avatar_static> bed(1);
+  bed[0].center = vec3{55.0, 0.0, -3.5};
+  bed[0].half_extents = vec3{50.0, 50.0, 0.5};
+  w.set_statics(bed);
+  w.set_water({lake_water(app, 0.0)});
+  body_state feet;
+  feet.position = vec3{20.0, 0.0, -1.0};
+  w.add_avatar("A", feet, true);
+  if (mass != body.mass)
+    w.set_mass("A", mass);
+  for (int i = 0; i < 3600; ++i) { // 30 s: the dense body sinks at 0.1 m/s
+    w.drive("A", avatar_intent{});
+    w.step();
+  }
+  return w.state("A").position.z + body.height;
+}
+} // namespace
+
+TEST(HolonPhysicsTest, APersonFloatsHeadOut) {
+  {
+    holon probe(holon_role::client, physics_config());
+    if (!probe.physics())
+      GTEST_SKIP() << "no Jolt backend in this build";
+  }
+  const cvc::ariadne::avatar_body person;
+  EXPECT_DOUBLE_EQ(person.density, 985.0);
+  EXPECT_NEAR(cvc::ariadne::avatar_displacement(person, person.mass), 0.167, 0.001);
+  const double head = floating_top(985.0, 70.0);
+  const double heavy = floating_top(985.0, 140.0);
+  const double dense = floating_top(1100.0, 70.0);
+  const double cork = floating_top(70.0 / 0.425, 70.0);
+  std::printf("  OW9B the top above the surface: a person %.3f m, at 140 kg %.3f m, at 1100 "
+              "kg/m^3 %.3f m, at the box's own density %.3f m\n",
+              head, heavy, dense, cork);
+  EXPECT_NEAR(head, 0.0255, 0.01) << "head-out: 1.5% of 1.7 m above the surface";
+  EXPECT_NEAR(heavy, head, 0.01) << "a heavier person floats as deep";
+  EXPECT_NEAR(dense, -3.0 + 1.7, 0.02) << "a denser body sinks to the bed";
+  EXPECT_NEAR(cork, 1.7 - 0.28, 0.03) << "the box's own density floats like a cork";
+}
+
 // A peer the host registered before its pose arrived (client_pump does, from the roster) is a
 // member with nowhere to be yet: no kinematic body at its placeholder -- at the origin that would
 // be an invisible obstacle inside the reference cube -- until its first sample puts one there.

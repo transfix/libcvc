@@ -662,10 +662,28 @@ public:
         height_min_, "height_max", height_max_);
   }
 
+  // The theme's models (generated_world_params::theme): a list of dicts, one per placed copy:
+  // asset (its name), kind ("building", "tree", ...), x, y, z (its bottom centre, m), yaw (rad)
+  // and scale.
+  PyObject *models() const {
+    PyObject *out = PyList_New(0);
+    for (const auto &m : models_) {
+      if (m.asset < 0 || m.asset >= int(model_assets_.size()))
+        continue;
+      const cvc::world::model_asset &a = model_assets_[m.asset];
+      PyObject *d = Py_BuildValue("{s:s,s:s,s:d,s:d,s:d,s:d,s:d}", "asset", a.name.c_str(), "kind",
+                                  cvc::world::model_kind_name(a.kind), "x", m.x, "y", m.y, "z",
+                                  m.z, "yaw", m.yaw, "scale", m.scale);
+      PyList_Append(out, d);
+      Py_DECREF(d);
+    }
+    return out;
+  }
+
   // Only generate_world makes one.
   generated_world(const cvc::world::generated_world &w)
       : geometry_(w.geometry()), terrain_(w.terrain ? *w.terrain : cvc::height_field()),
-        params_(w.params),
+        params_(w.params), model_assets_(w.model_assets), models_(w.models),
         building_count_(w.building_count), archetypes_(w.archetypes),
         road_length_(w.road_length), districts_(w.districts), height_min_(w.height_min),
         height_max_(w.height_max) {}
@@ -674,6 +692,8 @@ private:
   cvc::world::world_geometry geometry_;
   cvc::height_field terrain_;
   cvc::world::generated_world_params params_;
+  std::vector<cvc::world::model_asset> model_assets_;
+  std::vector<cvc::world::generated_world::model_instance> models_;
   std::size_t building_count_ = 0;
   bool archetypes_ = false;
   double road_length_ = 0.0;
@@ -684,7 +704,8 @@ private:
 // Generate a world. `params` is a dict of generated_world_params' fields, by their names or the
 // generated_world node's world.* keys (seed, half or half_m, trees, rocks, buildings, tree_gen,
 // amp or amp_m, water_level or water_level_m, preset, ontology, cell_m, max_terrain_n, raster_n,
-// terrain, city, terrain_file, edge: "wall", "shore" or "none"); a missing one keeps its default,
+// terrain, city, terrain_file, edge: "wall", "shore" or "none", theme: a world theme by name, its
+// models from app's catalog); a missing one keeps its default,
 // an unknown one is an error.
 // `building_library` is a buildings.glb (or a directory holding one) of archetypes for the city,
 // read with `app`'s model handlers (so app is then required); "" builds procedural massing. The
@@ -748,6 +769,8 @@ generated_world *generate_world(PyObject *params = nullptr,
         p.city = str();
       else if (k == "terrain_file")
         p.terrain_file = str();
+      else if (k == "theme")
+        p.theme = str();
       else if (k == "edge") {
         p.edge = cvc::world::world_edge_from_name(str());
         if (p.edge < 0)

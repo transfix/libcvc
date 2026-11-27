@@ -63,6 +63,10 @@ AppRuntime::AppRuntime(cvc::app &app, std::string prefix, SceneAdapter *scene)
   rt_.on("sim.restart", [this] { restart_world(); });
   // http_cache.ari's Clear: a document's programs cannot write the app-root clear key.
   rt_.on("http_cache.clear", [this] { clear_http_cache(app_); });
+  // docs/roadmap/ARIADNE_SHELL.md 4.2: the loader a mounts: slot asks for its entries' documents.
+  // The loader itself keeps no state; this runtime adds its component paths and the requires:
+  // check against its host.
+  rt_.set_mount_loader([this](const MountRequest &rq) { return load_mount_checked(rq); });
 }
 
 void AppRuntime::step_world(std::uint64_t n) {
@@ -1136,7 +1140,55 @@ void check_host_requirements(cvc::app &app, const Runtime &rt, LoadResult &lr) {
   }
 }
 
+// docs/roadmap/ARIADNE_SHELL.md 4.2 the requires: check at mount time. A mounts: entry's document
+// goes through the scan check_host_requirements runs over a static load's modules, and where that
+// scan would fail the load or warn, the mount is refused instead, naming what is missing: a
+// required requires: entry this host lacks, and a function a program calls that it does not
+// provide. An optional entry it lacks stays a warning: the document said it copes. "" when
+// nothing is missing.
+std::string mount_needs(const Runtime &rt, const Widget &wrapper,
+                        std::vector<std::string> &warnings) {
+  RequirementScan reqs{rt};
+  const std::set<std::string> *declared = reqs.add({}, nullptr, "");
+  std::vector<ScannedProgram> programs;
+  collect_programs(wrapper, nullptr, declared, reqs, programs);
+  for (std::string &w : reqs.warnings)
+    warnings.push_back(std::move(w));
+  std::vector<std::string> missing = reqs.missing;
+  std::set<std::string> calls;
+  for (const auto &[where, script, functions, names] : programs)
+    for (const std::string &name : free_heads(script))
+      if (!names->count(name) && !defines(functions, name) && !rt.has_function(name) &&
+          calls.insert(name).second)
+        missing.push_back("(" + name + " ...), which " + where + " calls");
+  std::string out;
+  for (const std::string &m : missing)
+    out += (out.empty() ? "" : ", ") + m;
+  return out;
+}
+
 } // namespace
+
+MountResult AppRuntime::load_mount_checked(const MountRequest &rq) {
+  register_cvc_uri_handler(app_, componentPaths_); // cvc:// documents and their imports
+  MountResult r = load_mount(app_, rq);
+  if (!r.ok)
+    return r;
+  std::string needs = mount_needs(rt_, r.wrapper, r.warnings);
+  // Its scene (SH3 mounts it): a host that draws no scene refuses a document with one, naming
+  // gl.scene, as a static load of it would warn that the scene is ignored.
+  if (r.has_scene && !rt_.has("gl.scene"))
+    needs = "gl.scene (its scene:)" + (needs.empty() ? std::string() : ", " + needs);
+  else if (r.has_scene)
+    r.warnings.push_back("ari: load '" + rq.uri +
+                         "': its scene: is not drawn in a mount yet (ARIADNE_SHELL.md SH3)");
+  if (!needs.empty()) {
+    r.ok = false;
+    r.error = "this host does not provide what it requires: " + needs;
+    r.wrapper = Widget{};
+  }
+  return r;
+}
 
 // ── document ────────────────────────────────────────────────────────────────────────────────────
 
@@ -1193,8 +1245,30 @@ std::vector<std::string> AppRuntime::load(const std::string &path) {
     std::lock_guard<std::mutex> lock(verbs_->mutex);
     verbs_->doc_dir = ec ? std::string() : abs.parent_path().string();
   }
-  for (const DataSpec &d : lr.data)
+  for (DataSpec &d : lr.data) {
+    // `uri: { arg: <name> }`: the document's argument, as parsed above; relative to the working
+    // directory, where the command line was typed. Not given and no default: nothing to load.
+    if (!d.uri_arg.empty()) {
+      std::string value;
+      for (const auto &[name, v] : parsed.values)
+        if (name == d.uri_arg)
+          value = v;
+      if (!lr.has_args_block || value.empty()) {
+        lr.warnings.push_back(
+            "ari: data." + d.name + ": its uri is the argument '" + d.uri_arg + "', which " +
+            (lr.has_args_block ? "was not given" : "no args: block declares") + " — not loaded");
+        continue;
+      }
+      if (value.find("://") == std::string::npos) {
+        std::error_code ec;
+        const std::filesystem::path abs = std::filesystem::absolute(value, ec);
+        if (!ec)
+          value = abs.lexically_normal().generic_string();
+      }
+      d.uri = std::move(value);
+    }
     data_->bind(prefix_, d);
+  }
 
   // A different document from the last one (a reload is the same file under any spelling): its
   // windows and key defaults start afresh. The defaults go in before init:, which may set its own.
@@ -1202,6 +1276,9 @@ std::vector<std::string> AppRuntime::load(const std::string &path) {
   const bool new_document =
       docPath_.empty() || !std::filesystem::equivalent(docPath_, path, same_ec);
   seed_keys(lr.keys, new_document);
+
+  // §5.3 state: the document's literal seeds, just before init:, which reads and may override them.
+  seed_state(app_, prefix_, lr.state_seeds);
 
   std::vector<std::string> initErrors;
   // §init: seeds win over widget defaults. It runs with the document's functions (§6.6), and with
@@ -1487,8 +1564,11 @@ void AppRuntime::add_warning(std::string warning) {
 }
 
 bool AppRuntime::reload_if_changed() {
+  // ARIADNE_SHELL.md 4.2 a mounts: entry's document is parsed again by itself, at the next frame;
+  // the document's own change reloads it whole, its mounts kept.
+  const bool mounts = rt_.reload_mounts_if_changed();
   if (sources_.empty() || !sources_changed(sources_, stamps_))
-    return false;
+    return mounts;
   // Re-load from the first source (the document root); tolerate a transient failure.
   try {
     load(sources_.front());

@@ -28,7 +28,7 @@
 #include <cvc/gl/GraphicsNode.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/ariadne/scene_realize.h>
-#include <cvc/gl/ariadne/vehicle_view.h> // add_hull_node, attach_vehicle_model
+#include <cvc/gl/ariadne/vehicle_view.h> // add_hull_node, attach_vehicle_model, boat_fit_of
 #include <cvc/gl/ariadne/world_nodes.h>
 #include <cvc/gl/physics_scene_binding.h>
 #include <exception>
@@ -66,35 +66,6 @@ ari::vehicle_look boat_look(const ari::SceneNode &n, const std::string &preset,
     look.path = path;
   }
   return look;
-}
-
-// The size a boat's model is fitted to: its length overall (its hull's when it gives none), and
-// the hull's bottom, the model's keel (body z).
-struct boat_fit {
-  vehicle_shape shape;
-  double keel = 0.0;
-  bool ok = false;
-};
-boat_fit boat_fit_of(const cvc::physics::dyn_boat_desc &desc) {
-  boat_fit out;
-  const cvc::physics::boat_desc &boat = desc.boat;
-  if (!boat.hull.hull || boat.hull.hull->vertices.empty())
-    return out;
-  double x0 = 1e300, x1 = -1e300, y0 = 1e300, y1 = -1e300, z0 = 1e300, z1 = -1e300;
-  for (const cvc::physics::vec3 &v : boat.hull.hull->vertices) {
-    x0 = std::min(x0, v.x);
-    x1 = std::max(x1, v.x);
-    y0 = std::min(y0, v.y);
-    y1 = std::max(y1, v.y);
-    z0 = std::min(z0, v.z);
-    z1 = std::max(z1, v.z);
-  }
-  out.shape.length = desc.length_overall > 0.0 ? desc.length_overall : x1 - x0;
-  out.shape.width = y1 - y0;
-  out.shape.height = z1 - z0;
-  out.keel = z0;
-  out.ok = true;
-  return out;
 }
 
 std::shared_ptr<GraphicsNode> realize_boat(SceneGraph &sg, const ari::SceneNode &n,

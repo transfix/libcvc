@@ -343,4 +343,11 @@ catalog:
     binds: "<prefix>.{rows}.* rows (count, total, more, at, every, max, <i>.{pid,scope,app,name,status,steps,waits,memory}); reads <prefix>.ariadne.apps.* and <prefix>.ariadne.name (the Runtime's mirror)"
     for: "the document's running DSL programs, a row each: the application each belongs to (from its (ps) scope), pid, name, status, steps, what it waits on, memory, and a Kill button (docs/roadmap/ARIADNE_SHELL.md 4.10)"
     args: { id: processes, title: Processes, rows: processes }   # defaults
-    note: "call (processes-step ROWS) from on_tick: it polls (ps) twice a second (ROWS.every), at most ROWS.max rows (50); (processes-kill ROWS I) is the Kill button"
+    note: "call (processes-step ROWS) from on_tick: it polls (ps) twice a second (ROWS.every), at most ROWS.max rows (50); (processes-kill ROWS I) is the Kill button; each mounts: application's share of its budget goes in ROWS.apps.<i>.{name,principal,steps,time,memory,held}, from ariadne.apps.<key>.budget.*"
+  - component: shell
+    file: shell.ari
+    document: true                         # run it, not import it: it has no unit
+    binds: "<prefix>.shell.{apps,catalog,catalog_uris,allow}.*, <prefix>.data.catalog (its --catalog), <prefix>.includes.<id> (each application's own state)"
+    for: "a document of its own, not a unit: runs a catalog of .ari documents as applications on demand, with an Apps menu, a Launcher window, a mounts: slot and the Processes window (docs/roadmap/ARIADNE_SHELL.md, SH1; docs/ARIADNE.md §6.8)"
+    args: { catalog: "a gallery.json-format catalog (required)", open: "catalog slugs to open at start" }
+    note: "ari run cvc://components/shell.ari --catalog <prefix>/share/libcvc-examples/ariadne/documents/shell_apps.json"

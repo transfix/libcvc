@@ -9,6 +9,7 @@
 #include <cvc/state/state_exec/async_scheduler.h>
 #include <cvc/state/state_exec/exec_group.h>
 #include <cvc/state/state_exec/exec_router.h>
+#include <limits>
 #include <mutex>
 #include <shared_mutex>
 #include <thread>
@@ -23,7 +24,10 @@ namespace detail {
 // What a group_ref points at. A post holds `mu` shared while it pushes into the scheduler's
 // ingress, and close() takes it exclusively, so once close() returns no post touches the scheduler.
 // `closed` is read without the lock (closed()), so a scheduler reached under one handle's lock
-// never takes it again (S2b.R2, C-M3).
+// never takes it again (S2b.R2, C-M3). Once closed (S2b.R3), a post takes only `late_mu`, never
+// holding `mu` then: `late`, `sealed` and `done` are written under `late_mu`; `addresses` before
+// `done` is stored (release), and never after, so a poster that loads `done` true (acquire) reads
+// them without a lock, and a sealed poster waits on `done` without taking any.
 struct route_target {
   mutable std::shared_mutex mu;
   std::atomic<bool> closed{false};
@@ -31,6 +35,11 @@ struct route_target {
   exec_group *group = nullptr;      // null for group 0
   bool group0 = false;
   std::uint64_t id = 0;
+  std::mutex late_mu;
+  std::atomic<bool> done{false};
+  bool sealed = false; // only a teardown's forward goes into `late` (the teardown's backstop)
+  std::vector<route_entry> late;
+  std::unordered_map<std::string, group_ref> addresses; // once done: key -> where its entries went
 };
 } // namespace detail
 
@@ -58,17 +67,87 @@ bool group_ref::closed() const noexcept {
   return !t_ || t_->closed.load(std::memory_order_acquire);
 }
 
+bool group_ref::done() const noexcept { return !t_ || t_->done.load(std::memory_order_acquire); }
+
+group_ref group_ref::forwarded(std::string_view key) const {
+  if (!t_ || !t_->done.load(std::memory_order_acquire) || t_->addresses.empty())
+    return group_ref();
+  const auto it = t_->addresses.find(std::string(key)); // never written once done
+  return it == t_->addresses.end() ? group_ref() : it->second;
+}
+
+bool group_ref::finish(std::vector<detail::route_entry> &late,
+                       std::unordered_map<std::string, group_ref> &addresses,
+                       const std::function<void()> &at_done) const {
+  if (!t_)
+    return true;
+  std::lock_guard<std::mutex> lock(t_->late_mu); // every poster of a closed handle takes it
+  if (t_->done.load(std::memory_order_relaxed))
+    return true;
+  if (!t_->late.empty()) {
+    late.clear();
+    late.swap(t_->late);
+    return false;
+  }
+  // Under the lock, so no poster sees the handle done while its prefixes are still registered (a
+  // refused poster's home_of then gives the new home). The router's lock is a leaf.
+  if (at_done)
+    at_done();
+  t_->addresses = std::move(addresses);
+  t_->done.store(true, std::memory_order_release);
+  return true;
+}
+
+void group_ref::seal() const {
+  if (!t_)
+    return;
+  std::lock_guard<std::mutex> lock(t_->late_mu);
+  t_->sealed = true;
+}
+
+std::vector<detail::route_entry> group_ref::close_for_good() const noexcept {
+  std::vector<detail::route_entry> late;
+  if (!t_)
+    return late;
+  {
+    std::unique_lock<std::shared_mutex> lock(t_->mu); // waits for a post in progress
+    t_->sched = nullptr;
+    t_->closed.store(true, std::memory_order_release);
+  }
+  std::lock_guard<std::mutex> lock(t_->late_mu);
+  t_->done.store(true, std::memory_order_release);
+  late.swap(t_->late);
+  return late;
+}
+
 bool group_ref::is_group0() const noexcept { return t_ && t_->group0; }
 
 exec_group *group_ref::group() const noexcept { return t_ ? t_->group : nullptr; }
 
 std::uint64_t group_ref::id() const noexcept { return t_ ? t_->id : 0; }
 
-bool group_ref::post(detail::route_entry e) const {
+group_ref::post_result group_ref::try_post(detail::route_entry e, bool teardown) const {
   if (!t_)
-    return false;
-  std::shared_lock<std::shared_mutex> lock(t_->mu);
-  return t_->sched && t_->sched->post_route(std::move(e));
+    return post_result::done;
+  {
+    std::shared_lock<std::shared_mutex> lock(t_->mu);
+    if (t_->sched)
+      return t_->sched->post_route(std::move(e)) ? post_result::taken : post_result::refused;
+  }
+  // Closed (for good: close() is never undone), so `mu` is no longer needed.
+  std::lock_guard<std::mutex> late(t_->late_mu);
+  if (t_->done.load(std::memory_order_relaxed))
+    return post_result::done; // its poster goes on by the forwarding address
+  if (t_->sealed && !teardown)
+    return post_result::sealed; // its poster waits for done (post_with_rehome)
+  // Its teardown still forwarding: the late queue, which it forwards before it is done (S2b.R3),
+  // so this entry arrives after the state it refers to. No cap, no wait.
+  t_->late.push_back(std::move(e));
+  return post_result::taken;
+}
+
+bool group_ref::post(detail::route_entry e, bool teardown) const {
+  return try_post(std::move(e), teardown) == post_result::taken;
 }
 
 bool group_ref::post_message(const std::string &key, const value_t &value) const {
@@ -273,50 +352,60 @@ void exec_router::note_remote_waiters(int delta) noexcept {
 
 namespace {
 
-// A refused poster's wait for a closed home's teardown to unregister (exec_router.h): yields
-// first, then short sleeps; no cap (S2b.R2, C-M5). The teardown's forward waits on nothing, so the
-// wait ends with it.
-void rehome_backoff(unsigned n) {
+// A poster's wait for a sealed teardown to be done (exec_router.h): yields first, then short
+// sleeps. A sealed teardown waits on nothing and has finitely many entries left, so this ends.
+void sealed_backoff(unsigned n) {
   if (n < 64)
     std::this_thread::yield();
   else
     std::this_thread::sleep_for(std::chrono::microseconds(100));
 }
 
-// Post `e` to `home` (exec_router.h, "Teardown and rehoming", S2b.0a and S2b.R2). A handle closed
-// meanwhile refuses it: the home is resolved again (home_of), waiting while that is still the
-// closed, registered group, whose teardown forwards what it holds and only then unregisters, so `e`
-// arrives at the new home after the forward. A poster that may not wait (`may_wait` false: a post
-// made on the thread running a teardown, its own group's) and one refused by a closed group 0
-// (~app: never unregistered) resolve without closed groups at once (new_home_of). Broadcast ids are
-// unique in the app, so an answer keeps its id (the new home adopted the tracker). An empty `home`
-// is resolved first. 1: taken (`posted_to` gets the home); 0: refused by the home (its cap); -1: no
-// home took it.
+// Post `e` to `home` (exec_router.h, "Teardown and rehoming", as amended in S2b.R3). A closed
+// handle still forwarding takes it into its late queue (once sealed, only a teardown's forward:
+// another poster waits until it is done); a done one refuses it, and the poster goes on at once:
+// to the done handle's forwarding address for the key (where its
+// teardown sent that key's entries, so `e` arrives after them), else the key's home (home_of: the
+// done handle is unregistered), else, when that is the same handle (group 0 during ~app, never
+// unregistered), its home without closed groups (new_home_of). A teardown's forward (`teardown`)
+// skips the home_of step: its targets are open groups only, so no forward comes back to a teardown
+// still forwarding (its own late queue among them), but a deliver's requeue to its sender.
+// Broadcast ids are unique in the app, so an answer keeps its id (the new home adopted the
+// tracker). An empty `home` is resolved first. 1: taken (`posted_to` gets the group that took it);
+// 0: refused by the home (its cap); -1: no home took it.
 int post_with_rehome(const exec_router *router, group_ref home, detail::route_entry e,
-                     detail::lock_fuzz *fuzz, group_ref *posted_to, bool may_wait) {
-  for (int tries = 0; tries < 16; ++tries) {
+                     detail::lock_fuzz *fuzz, group_ref *posted_to, bool teardown) {
+  // A forwarding address is followed whatever the chain's length (its targets close in turn, so
+  // it ends; the cap on hops is a guard only); the home is resolved again at most 16 times.
+  int resolved = 0;
+  for (int hops = 0; hops < 4096; ++hops) {
     if (home) {
       detail::lock_fuzz_point(fuzz, detail::lock_fuzz_at::post_enter); // S2-Q15's router posts
-      if (home.post(e)) { // a copy: a refused post consumes what it was given
+      // A copy: a refused post consumes what it was given.
+      const group_ref::post_result r = home.try_post(e, teardown);
+      if (r == group_ref::post_result::taken) {
         if (posted_to)
           *posted_to = std::move(home);
         return 1;
       }
-      if (!home.closed())
-        return 0; // refused: a capped send at the home's cap
-    }
-    if (!router)
-      return -1;
-    group_ref next = router->home_of(e.key);
-    if (home && next == home) {
-      if (!may_wait || home.is_group0()) {
-        next = router->new_home_of(e.key);
-      } else {
-        for (unsigned n = 0; next == home; ++n) {
-          rehome_backoff(n);
-          next = router->home_of(e.key);
-        }
+      if (r == group_ref::post_result::refused)
+        return 0; // a capped send at the open home's cap, whatever it does since
+      for (unsigned n = 0; r == group_ref::post_result::sealed && !home.done(); ++n)
+        sealed_backoff(n); // sealed: its teardown has only a finite forward left
+      if (group_ref next = home.forwarded(e.key)) {
+        home = std::move(next);
+        continue;
       }
+    }
+    if (!router || ++resolved > 16)
+      return -1;
+    group_ref next;
+    if (!teardown) {
+      next = router->home_of(e.key);
+      if (home && next == home)
+        next = router->new_home_of(e.key);
+    } else {
+      next = router->new_home_of(e.key);
     }
     if (!next || next == home)
       return -1;
@@ -392,7 +481,7 @@ bool exec_router::post_message(const std::string &key, const value_t &value) {
     return app_->exec_scheduler().post_message(key, value);
   detail::route_entry e = make_entry(detail::route_entry::kind::send, key);
   e.value = value;
-  return post_with_rehome(this, home_of(key), std::move(e), impl_->fuzz.get(), nullptr, true) > 0;
+  return post_with_rehome(this, home_of(key), std::move(e), impl_->fuzz.get(), nullptr, false) > 0;
 }
 
 // --- async_scheduler's ends of the protocol (S2b.4; exec_router.h, as amended in S2b.0a) ---
@@ -408,7 +497,8 @@ group_ref async_scheduler::cached_home(const std::string &key) const {
     home_cache_.clear();
     home_cache_epoch_ = epoch;
     home_cache_prefixed_ = router_->has_prefix(route_self_); // registrations move the epoch
-    prefixed_once_ = prefixed_once_ || home_cache_prefixed_;
+    if (home_cache_prefixed_)
+      prefixed_once_.store(true, std::memory_order_relaxed);
   }
   if (const auto it = home_cache_.find(key); it != home_cache_.end())
     return it->second;
@@ -438,12 +528,9 @@ bool async_scheduler::homed_elsewhere_slow(const std::string &key, group_ref *ho
 }
 
 int async_scheduler::post_routed(group_ref home, detail::route_entry e, group_ref *posted_to,
-                                 bool host) const {
-  // The scheduler's own posts are its token holder's: once its handle is closed they are its
-  // teardown's, which never waits (on its own unregister, or on another teardown waiting on it).
-  const bool may_wait = host || !route_self_.closed();
+                                 bool teardown) const {
   return post_with_rehome(router_, std::move(home), std::move(e), ingress_fuzz_.get(), posted_to,
-                          may_wait);
+                          teardown);
 }
 
 std::uint64_t async_scheduler::new_broadcast_id() {
@@ -811,68 +898,119 @@ void async_scheduler::deliver_threw(detail::route_entry &&e) noexcept {
   }
 }
 
-void async_scheduler::bounce_route(detail::route_entry &&e) noexcept {
-  // As a teardown forwards its queued router entries (exec_router.h): a deliver as a stale one (a
-  // requeue to its home, or dropped when requeue_if_stale is false), a send uncapped, the rest as
-  // they are, to the key's new home resolved without closed groups. What no home takes is dropped
-  // and counted.
+bool async_scheduler::forwards_messages() const {
+  // A group that registered a prefix forwards every message it holds but '#' ones, even once
+  // unregistered (Ariadne's move unregisters it early) and for a key a longer prefix covers now
+  // (S2b.R2, C-M4, C-m4); an island homes nothing for another group: its own keys' messages die
+  // with it, counted.
+  return prefixed_once_.load(std::memory_order_relaxed) ||
+         (router_ && router_->has_prefix(route_self_));
+}
+
+void async_scheduler::forward_keyed(detail::route_entry &&e, forward_memo *memo) {
+  // One target per key for the whole teardown (S2b.R3): the first entry's goes to the key's home
+  // among the open groups (new_home_of), every later one to wherever the first went, so they arrive
+  // in order after it (a done target sends them on by its forwarding address).
+  forward_memo::iterator slot;
+  group_ref to;
+  if (memo) {
+    slot = memo->try_emplace(e.key).first;
+    to = slot->second;
+  }
+  if (!to && router_)
+    to = router_->new_home_of(e.key);
+  group_ref at;
+  if (post_routed(std::move(to), std::move(e), &at, true) <= 0) {
+    ingress_counts_.destroy_dropped.fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
+  if (memo)
+    slot->second = std::move(at);
+}
+
+void async_scheduler::forward_on(detail::route_entry &&e, forward_memo *memo,
+                                 bool prefixed) noexcept {
+  // As a teardown forwards its queued and late router entries (exec_router.h): a deliver as a stale
+  // one (a requeue to the home that sent it, or dropped when requeue_if_stale is false); a send of
+  // a key it homed uncapped, of one it did not home ('#', an island's own) dropped and counted
+  // (S2b.R3, K-2); the rest as they are, to the key's target. What no home takes is dropped and
+  // counted.
   using kind = detail::route_entry::kind;
   try {
-    group_ref to;
     if (e.what == kind::deliver) {
       if (!e.requeue_if_stale) {
         ingress_counts_.stale_dropped.fetch_add(1, std::memory_order_relaxed);
         return;
       }
-      e.what = kind::requeue;
-      to = std::move(e.from);
-      e.from = group_ref();
-      e.pid = -1;
-      e.seq = 0;
-    } else if (e.what == kind::send) {
+      detail::route_entry r = make_entry(kind::requeue, e.key);
+      r.value = std::move(e.value);
+      r.broadcast = e.broadcast;
+      if (!e.from) {
+        forward_keyed(std::move(r), memo);
+        return;
+      }
+      if (post_routed(std::move(e.from), std::move(r), nullptr, true) <= 0)
+        ingress_counts_.destroy_dropped.fetch_add(1, std::memory_order_relaxed);
+      return;
+    }
+    if (e.what == kind::send) {
+      if (!prefixed || never_routed(e.key)) {
+        ingress_counts_.destroy_dropped.fetch_add(1, std::memory_order_relaxed);
+        return;
+      }
       e.uncapped = true;
     }
-    if (!to && router_)
-      to = router_->new_home_of(e.key);
-    if (post_routed(std::move(to), std::move(e)) <= 0)
-      ingress_counts_.destroy_dropped.fetch_add(1, std::memory_order_relaxed);
+    forward_keyed(std::move(e), memo);
   } catch (...) {
     ingress_counts_.destroy_dropped.fetch_add(1, std::memory_order_relaxed);
   }
 }
 
+void async_scheduler::bounce_route(detail::route_entry &&e) noexcept {
+  // A router entry the destructor will not apply (S2-Q10): sent on as a teardown's queued one is,
+  // to the key's home among the open groups; a send whatever group it came to (only group 0, at
+  // ~app, has router entries left by then), but never on a '#' key.
+  forward_on(std::move(e), nullptr, true);
+}
+
 void async_scheduler::leave_router() {
-  if (!router_)
+  // A second call (Ariadne's move, then the teardown) finds the handle done: nothing to do.
+  if (!router_ || route_self_.done())
     return;
-  // (3), however this ends: a throw still unregisters, so no group stays closed and registered
-  // (S2b.R2, C-m2), and a second call finds nothing to do.
-  struct unregister_at_end {
-    exec_router &router;
-    const group_ref &self;
-    ~unregister_at_end() {
+  // Each key's target for this teardown, kept by the handle as its forwarding addresses (S2b.R3).
+  forward_memo memo;
+  // However this ends: a throw still unregisters and marks the handle done, so no group stays
+  // closed and registered (S2b.R2, C-m2); what its late queue still holds is dropped, counted.
+  struct finish_at_end {
+    async_scheduler &s;
+    bool armed = true;
+    ~finish_at_end() {
+      if (!armed)
+        return;
       try {
-        router.unregister(self);
+        s.router_->unregister(s.route_self_);
       } catch (...) {
       }
+      const std::size_t left = s.route_self_.close_for_good().size();
+      s.ingress_counts_.destroy_dropped.fetch_add(left, std::memory_order_relaxed);
     }
-  } at_end{*router_, route_self_};
-  // (1) Its handle closes: a post through it is refused from now on, and its poster re-resolves
-  // the home, waiting while that is still this group (exec_router.h, "Teardown and rehoming").
+  } at_end{*this};
+  // (1) A message posted to it from now on goes through its handle as a send (post_message; S2b.R3,
+  // K-3), so a host's posts keep their order whichever way they come; then its handle closes: no
+  // post reaches this scheduler through it from now on, and a router entry posted through it goes
+  // into its late queue until it is done (3).
+  {
+    std::lock_guard<std::mutex> lock(ingress_mutex_);
+    routed_out_ = true;
+  }
   route_self_.close();
-  // A group that registered a prefix forwards every message it holds but '#' ones, even once
-  // unregistered (Ariadne's move unregisters it early) and for a key a longer prefix covers now
-  // (S2b.R2, C-M4, C-m4); an island homes nothing for another group: its own keys' messages die
-  // with it, counted. No router lookup either way (RT-1).
-  const bool prefixed = prefixed_once_ || router_->has_prefix(route_self_);
+  // A group that registered a prefix forwards every message it holds but '#' ones; an island homes
+  // nothing for another group. No router lookup either way (RT-1).
+  const bool prefixed = forwards_messages();
   const auto homed = [&](const std::string &key) { return prefixed && !never_routed(key); };
-  const auto forward = [&](detail::route_entry &&e) {
-    // The home first: the arguments' order is unspecified, and the entry is moved from.
-    group_ref to = router_->new_home_of(e.key);
-    if (post_routed(std::move(to), std::move(e)) <= 0)
-      ingress_counts_.destroy_dropped.fetch_add(1, std::memory_order_relaxed);
-  };
-  // (2) What it holds goes to the keys' new homes, resolved without closed groups, in the order it
-  // took it, and in key order where no order was taken (DT-4).
+  const auto forward = [&](detail::route_entry &&e) { forward_keyed(std::move(e), &memo); };
+  // (2) What it holds goes on, each key's to its target, in the order it took it, and in key order
+  // where no order was taken (DT-4).
   // (2a) The pending messages of the keys it homed, as uncapped sends, each key's in FIFO order.
   std::vector<std::string> keys;
   for (const auto &[key, q] : pending_messages_)
@@ -917,7 +1055,7 @@ void async_scheduler::leave_router() {
     }
   }
   // (2c) Its broadcast trackers (adopt), by id: the new home takes each over, and the copies' late
-  // answers, held back by the poster's wait until (3), find it there.
+  // answers find it there (this handle's late queue, or its forwarding address, sends them after).
   std::vector<std::uint64_t> ids;
   ids.reserve(tracked_.size());
   for (const auto &[id, t] : tracked_)
@@ -935,7 +1073,7 @@ void async_scheduler::leave_router() {
   tracked_.clear();
   // (2d) Its queued messages and router entries, in queue order (taken out under the lock, sent on
   // outside it): a host post of a key it homed as an uncapped send, the router entries as
-  // bounce_route sends them on; a message of a key it did not home ('#' keys among them) dies with
+  // forward_on sends them on; a message of a key it did not home ('#' keys among them) dies with
   // it, counted. Its commands stay for the destructor to refuse.
   std::vector<ingress_entry> taken;
   {
@@ -957,11 +1095,35 @@ void async_scheduler::leave_router() {
       e.uncapped = true;
       forward(std::move(e));
     } else {
-      bounce_route(std::move(std::get<detail::route_entry>(entry)));
+      forward_on(std::move(std::get<detail::route_entry>(entry)), &memo, prefixed);
     }
   }
-  // (3) Only then its prefixes go (at_end): a refused poster's wait ends, and it finds the new
-  // home, after everything forwarded. Its kills then unsubscribe its processes' remote waits.
+  // (2e), (3) Its late entries, in arrival order, until none are left; then, under the handle's
+  // lock, it unregisters its prefixes, keeps `memo` as the forwarding addresses and is done. Every
+  // target was open when chosen, so nothing forwarded comes back here. Posters as fast as this
+  // forward could keep the loop going: once a round's batch does not shrink, reaches the ingress
+  // cap, or a few rounds have gone, it seals the handle, so only another teardown's (finite)
+  // forward still comes in, and the loop ends.
+  constexpr int kSealAfterRounds = 4;
+  const std::size_t cap = ingress_cap_.load(std::memory_order_relaxed);
+  const std::size_t seal_at = cap != 0 ? cap : std::size_t{65536};
+  std::size_t last = std::numeric_limits<std::size_t>::max();
+  bool sealed = false;
+  for (int round = 0;; ++round) {
+    std::vector<detail::route_entry> late;
+    if (route_self_.finish(late, memo, [this] { router_->unregister(route_self_); }))
+      break;
+    if (!sealed &&
+        (round + 1 >= kSealAfterRounds || late.size() >= last || late.size() >= seal_at)) {
+      route_self_.seal();
+      sealed = true;
+    }
+    last = late.size();
+    for (detail::route_entry &e : late)
+      forward_on(std::move(e), &memo, prefixed);
+  }
+  at_end.armed = false;
+  // Its kills then unsubscribe its processes' remote waits.
 }
 
 } // namespace cvc::state_exec
