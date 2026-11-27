@@ -836,7 +836,17 @@ std::string action(const YAML::Node &n) {
 // held on the way down (§6.7).
 void parse_widget(Ctx &ctx, const YAML::Node &n, Widget &w);
 void expand_include(Ctx &ctx, const YAML::Node &n, Widget &w); // §12 include: a units: template
-void expand_load(Ctx &ctx, const YAML::Node &n, Widget &w);    // §12 load: an isolated fragment
+// What expand_load tells a caller that asks (load_mount): why the fragment was not mounted, where
+// its bytes came from, and whether it has a scene (not mounted until SH3).
+struct LoadOutcome {
+  std::string error;
+  std::string canonical;
+  bool has_scene = false;
+};
+void expand_load(Ctx &ctx, const YAML::Node &n, Widget &w,
+                 LoadOutcome *outcome = nullptr);            // §12 load: an isolated fragment
+void parse_mounts(Ctx &ctx, const YAML::Node &n, Widget &w); // ARIADNE_SHELL.md 4.2 mounts:
+Meta parse_meta(const YAML::Node &m);                        // a document's meta: block
 std::vector<HostRequirement> parse_requires(Ctx &ctx, const YAML::Node &n,
                                             const std::string &where = ""); // §7.6
 StateSeeds parse_state(Ctx &ctx, const YAML::Node &n, const std::string &where = ""); // §5.3
@@ -2057,6 +2067,12 @@ void parse_widget_impl(Ctx &ctx, const YAML::Node &n, Widget &w) {
     expand_load(ctx, n, w);
     return;
   }
+  // docs/roadmap/ARIADNE_SHELL.md 4.2 `mounts: <key>`: the mounts the Runtime makes at run time,
+  // one per child of the key. Not a widget type either: the loader reads only the slot.
+  if (n["mounts"].IsDefined()) {
+    parse_mounts(ctx, n, w);
+    return;
+  }
 
   std::string label;
   const std::string type = widget_type(n, label);
@@ -2983,45 +2999,55 @@ std::string default_mount_id(const std::string &uri) {
 // §12 the fragment `load: <uri>` names, read: its URI, its canonical identity, and its YAML with
 // the mount's `args:` substituted, checked against the schema. False (with a warning) when it is
 // not mounted: no URI, not resolved, a cycle, past the depth or count caps, or YAML that does not
-// parse.
+// parse. A caller that asks (load_mount, through expand_load) is told in `outcome` why, where the
+// bytes came from and whether the fragment has a scene, and a fragment whose min_libcvc this build
+// is older than is not mounted.
 CVC_ARI_NOINLINE bool read_fragment(Ctx &ctx, const YAML::Node &n, std::string &uri,
-                                    std::string &canonical, YAML::Node &frag) {
+                                    std::string &canonical, YAML::Node &frag,
+                                    LoadOutcome *outcome) {
+  // A failure warns, as it always has, and tells a caller that asks why (load_mount).
+  const auto fail = [&](const std::string &why) {
+    ctx.warn(why);
+    if (outcome)
+      outcome->error = why;
+    return false;
+  };
   uri = str(n, "load");
-  if (uri.empty()) {
-    ctx.warn("ari: load: entry has no URI");
-    return false;
-  }
+  if (uri.empty())
+    return fail("ari: load: entry has no URI");
   const UriResult res = resolve(*ctx.app, uri, ctx.base_dir);
-  if (!res.ok) {
-    ctx.warn("ari: load '" + uri + "' could not be resolved: " + res.error);
-    return false;
-  }
+  if (!res.ok)
+    return fail("ari: load '" + uri + "' could not be resolved: " + res.error);
+  if (outcome)
+    outcome->canonical = res.canonical;
   note_source(ctx, res.canonical); // §12.5 watch this mounted fragment for hot-reload
-  if (ctx.mounting.count(res.canonical)) {
-    ctx.warn("ari: load: mount cycle on '" + res.canonical + "' — refused");
-    return false;
-  }
-  if (ctx.mounting.size() >= kMaxMountDepth) {
-    ctx.warn("ari: load: mount chain exceeds the maximum depth (" + std::to_string(kMaxMountDepth) +
-             ") — refused");
-    return false;
-  }
+  if (ctx.mounting.count(res.canonical))
+    return fail("ari: load: mount cycle on '" + res.canonical + "' — refused");
+  if (ctx.mounting.size() >= kMaxMountDepth)
+    return fail("ari: load: mount chain exceeds the maximum depth (" +
+                std::to_string(kMaxMountDepth) + ") — refused");
   // Aggregate (document-wide) mount cap: the depth guard alone lets a BRANCHING mount graph fan
   // out K^depth (the cycle guard only blocks re-mounting an ancestor, not sibling reuse). Count
   // total mounts on a shared counter and refuse past the cap — the load: analogue of kMaxImports.
   if (!ctx.mount_count)
     ctx.mount_count = std::make_shared<int>(0);
-  if (*ctx.mount_count >= kMaxMounts) {
-    ctx.warn("ari: load: mount limit reached (" + std::to_string(kMaxMounts) +
-             " fragments) — refused");
-    return false;
-  }
+  if (*ctx.mount_count >= kMaxMounts)
+    return fail("ari: load: mount limit reached (" + std::to_string(kMaxMounts) +
+                " fragments) — refused");
   ++*ctx.mount_count;
   try {
     frag = YAML::Load(res.content);
   } catch (const std::exception &e) {
-    ctx.warn("ari: load '" + uri + "' parse error: " + e.what());
-    return false;
+    return fail("ari: load '" + uri + "' parse error: " + e.what());
+  }
+  if (outcome) {
+    if (frag.IsMap() && (frag["scene"] || frag["scenes"]))
+      outcome->has_scene = true;
+    // A mount at run time keeps the min_libcvc gate a top-level document has (§3.1a).
+    const Meta m = frag.IsMap() ? parse_meta(frag["meta"]) : Meta{};
+    if (!m.min_libcvc.empty() && !version_at_least(libcvc_version(), m.min_libcvc))
+      return fail("ari: load '" + uri + "' requires libcvc >= " + m.min_libcvc +
+                  " but this build is " + libcvc_version());
   }
   // Args substitute into the cloned fragment before parse (same single-pass rule as include:).
   std::map<std::string, std::string> args;
@@ -3240,6 +3266,42 @@ CVC_ARI_NOINLINE void finish_mount(Ctx &ctx, const YAML::Node &n, const std::str
   }
 }
 
+// docs/roadmap/ARIADNE_SHELL.md 4.2: `mounts: <state key>` — one isolated mount per child of the
+// key, which the Runtime loads when the child appears (load_mount, through its host's loader) and
+// frees when it goes. The loader reads only the slot: `allow:` and `catalog:`, each a URI prefix,
+// a list of them, or `{ bind: <key> }`, and the document's directory, against which the entries'
+// relative URIs resolve. Built in `w`, as a widget is.
+void parse_mounts(Ctx &ctx, const YAML::Node &n, Widget &w) {
+  w.kind = Kind::Mounts;
+  w.bind = str(n, "mounts");
+  if (w.bind.empty() || w.bind.front() == '(') { // a key, not an expression
+    ctx.warn("ari: mounts: needs a state key (mounts: shell.apps) — nothing is mounted");
+    w.bind.clear();
+  }
+  const auto uris = [&](const char *key, std::vector<std::string> &list, std::string &bind) {
+    const YAML::Node v = n[key];
+    if (!v)
+      return;
+    if (v.IsScalar()) {
+      list.push_back(v.Scalar());
+    } else if (v.IsSequence()) {
+      for (const YAML::Node &e : v)
+        if (e.IsScalar())
+          list.push_back(e.Scalar());
+    } else if (v.IsMap() && v["bind"] && v["bind"].IsScalar()) {
+      bind = v["bind"].Scalar();
+    } else {
+      ctx.warn(std::string("ari: mounts: ") + key +
+               ": is a URI prefix, a list of them or { bind: <key> } — ignored");
+    }
+  };
+  auto spec = std::make_shared<MountsSpec>();
+  uris("allow", spec->allow, spec->allow_bind);
+  uris("catalog", spec->catalog, spec->catalog_bind);
+  spec->base = ctx.base_dir;
+  w.mounts = std::move(spec);
+}
+
 // §12: mount a `load: <uri>` fragment — resolve + parse another .ari as an ISOLATED module, in `w`:
 // a group that carries `scope = includes.<as>` (§12.1), so the fragment's binds, reactive
 // predicates, and init: resolve under that sub-prefix, with the fragment's own tree its child; the
@@ -3248,10 +3310,10 @@ CVC_ARI_NOINLINE void finish_mount(Ctx &ctx, const YAML::Node &n, const std::str
 // sub-Ctx (its units are its own, not the host's), based at its own directory so ITS relative
 // imports/loads resolve there. A resolved-URI cycle guard + depth cap stop recursion. Its widgets
 // are a level below the load: entry (§6.7).
-void expand_load(Ctx &ctx, const YAML::Node &n, Widget &w) {
+void expand_load(Ctx &ctx, const YAML::Node &n, Widget &w, LoadOutcome *outcome) {
   std::string uri, canonical;
   YAML::Node frag;
-  if (!read_fragment(ctx, n, uri, canonical, frag))
+  if (!read_fragment(ctx, n, uri, canonical, frag, outcome))
     return; // an empty group
   Ctx sub;
   open_mount(ctx, n, uri, canonical, frag, sub);
@@ -5365,7 +5427,13 @@ std::vector<DataSpec> parse_data(Ctx &ctx, const YAML::Node &n) {
     if (e.IsScalar()) {
       d.uri = e.Scalar();
     } else if (e.IsMap()) {
-      d.uri = str(e, "uri");
+      if (const YAML::Node u = e["uri"]; u && u.IsMap()) { // { arg: <name> }: from the command line
+        d.uri_arg = str(u, "arg");
+        if (d.uri_arg.empty())
+          ctx.warn("ari: data." + d.name + ": uri: is a URI or { arg: <name> } — ignored");
+      } else {
+        d.uri = str(e, "uri");
+      }
       d.path = str(e, "path");
       d.as = str(e, "as");
       d.generate = str(e, "generate");
@@ -5392,7 +5460,7 @@ std::vector<DataSpec> parse_data(Ctx &ctx, const YAML::Node &n) {
                  " is not a generator this build has — ignored");
         continue;
       }
-    } else if (d.uri.empty()) {
+    } else if (d.uri.empty() && d.uri_arg.empty()) {
       ctx.warn("ari: data." + d.name + " names no uri (or generate:) — ignored");
       continue;
     }
@@ -5734,6 +5802,56 @@ LoadResult load_string(cvc::app &app, const std::string &yaml) {
   }
 }
 
+MountResult load_mount(cvc::app &app, const MountRequest &req) {
+  MountResult r;
+  try {
+    // As load_node's context, at the directory of the document that holds the slot, and with a
+    // fresh mount stack: the fragment is mounted exactly as a static `load:` with `as:` and
+    // `args:` would be (expand_load), so its guards, resolver and component paths are the same.
+    Ctx ctx;
+    ctx.app = &app;
+    ctx.base_dir = req.base_dir;
+    ctx.sources = std::make_shared<std::vector<std::string>>();
+    ctx.source_stamps = std::make_shared<std::map<std::string, std::int64_t>>();
+    ctx.nesting = std::make_shared<Nesting>(); // §6.7 how deep the mount's widgets nest
+    if (have_jsonschema())
+      ctx.schema_issues = std::make_shared<std::vector<SchemaIssue>>();
+    YAML::Node site(YAML::NodeType::Map);
+    site["load"] = req.uri;
+    site["as"] = req.as;
+    if (!req.args.empty()) {
+      YAML::Node args(YAML::NodeType::Map);
+      for (const auto &[k, v] : req.args)
+        args[k] = v;
+      site["args"] = args;
+    }
+    LoadOutcome outcome;
+    Widget wrapper;
+    expand_load(ctx, site, wrapper, &outcome);
+    r.canonical = outcome.canonical;
+    r.has_scene = outcome.has_scene;
+    r.warnings = std::move(ctx.warnings);
+    if (ctx.schema_issues)
+      r.schema_issues = *ctx.schema_issues;
+    r.sources = *ctx.sources;
+    r.source_stamps = *ctx.source_stamps;
+    if (!outcome.error.empty()) {
+      r.error = outcome.error;
+      return r;
+    }
+    if (ctx.nesting->refused) { // §6.7 nested deeper than a document may: its parse stopped
+      r.error = ctx.nesting->error;
+      return r;
+    }
+    r.wrapper = std::move(wrapper);
+    r.ok = true;
+  } catch (const std::exception &e) {
+    r.ok = false;
+    r.error = std::string("ari: load '") + req.uri + "': " + e.what();
+  }
+  return r;
+}
+
 LoadResult load_file(cvc::app &app, const std::string &path) {
   try {
     // §12: a relative `import:` in this file resolves against the file's directory, and the
@@ -5856,6 +5974,11 @@ LoadResult unavailable() {
 
 LoadResult load_string(cvc::app &, const std::string &) { return unavailable(); }
 LoadResult load_file(cvc::app &, const std::string &) { return unavailable(); }
+MountResult load_mount(cvc::app &, const MountRequest &) {
+  MountResult r;
+  r.error = unavailable().error;
+  return r;
+}
 ValidationResult validate_string(cvc::app &, const std::string &) {
   ValidationResult v;
   v.error = unavailable().error;

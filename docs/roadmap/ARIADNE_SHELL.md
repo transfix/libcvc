@@ -170,6 +170,27 @@ shell.apps.<as>.budget.*     its budget, when the user changed the default (4.11
   removes it. `(app-view AS window|main)` moves its scene; `main` writes the `front:` key. They
   act on the document that calls them: a mounted application cannot open others unless the shell
   grants it the functions.
+- **As built in SH1** (ARIADNE.md §6.8). `Kind::Mounts` reads `mounts:`, `allow:` and a third
+  key, `catalog:` (a list, or `{ bind: <key> }`), which names the documents that run as `local`:
+  the runtime takes the principal from where the bytes came (4.12), and the slot is where it
+  learns which local files are the shell's catalog. `load_mount` (loader.h) runs `expand_load`
+  in a fresh context, stateless; `AppRuntime` hands the Runtime a loader that adds its component
+  paths and the `requires:` check (`Runtime::set_mount_loader`). The Runtime keeps each mount in
+  a slot by sub-prefix, reconciles the slots at the top of each frame (open, close, parse again)
+  and plans the Windows menu over them, so a mount's menu bar, windows and tray icons are an
+  application's (4.9: one without a bar gets a menu of Restart, Quit and Close). A mount's
+  `state:` is written, its `init:` runs and its `on_tick:` starts as it opens, not when first
+  drawn. Closing quits it,
+  kills every process under its scope (forks and spawns too) and frees the slot; `ran_inits`
+  keeps it, so reopening resumes. The `requires:` check refuses what the static scan would fail
+  or warn on: a required entry, a function a program calls, `gl.scene` for a `scene:` on a host
+  without one; an optional entry stays a warning. The entry gets `status`, `error`, `principal`
+  and `name` back. `(app-open)` without an id takes the URI's file name and returns an entry
+  already open on that URI; the verbs read the slot's key when called (it is set with the tree,
+  so a resident started before the first frame finds it). The shell (`components/shell.ari`)
+  takes `--open` besides `--catalog`, to open entries at start; its Apps menu lists the catalog
+  by title through a `menu_item:` label that is an expression. `view`, `background`, `grants`
+  and `argv` are not read yet (SH3, SH6, SH7).
 
 ### 4.3 Scenes of mounted documents
 
@@ -607,6 +628,29 @@ stall the shell, local or not:
 A mount in an execution group of its own comes later; it needs processes that can move between
 groups (threaded execution Stage 3).
 
+**As built in SH1** (ARIADNE.md §6.8). The scheduler holds a mount to its budget:
+`cvc::state_exec::frame_account` (process.h) is a share of each frame that the processes given it
+draw on together (`execute_options::account`; `spawn` and `fork` keep the parent's). The async
+scheduler charges each step's steps and seconds to it, ends a run at its limit, and parks a
+process whose account is spent as `(await)` parks it, at its next pick or right after the step that
+spent it; `wake_awaiting()`, once a frame, starts a new frame on every account it has seen. The
+Runtime gives every process whose scope is under a `mounts:` entry that entry's account
+(`make_action_context`, so its actions and its `on_tick:` resident). Memory: state_exec's
+per-process state-write tracker is not fed by the state verbs, so a mount's memory is its
+processes' measured heap shares, which the scheduler now measures for a process whose account
+has a memory cap (`process::measures_heap`), without a limit of its own; the Runtime sums them
+four times a second into the account, and past the cap the account is spent. The defaults
+(`Runtime::default_mount_budget`): `local` 100000 steps, 0.025 s and 256 MB a frame, `file:` and
+`remote:` 20000 steps, 0.005 s and 64 MB. Settled against the shipped examples
+(`AriadneMounts.TheShippedExamplesKeepWithinTheLocalBudget` mounts every one as a catalog
+application with a stub scene adapter): the busiest uses 108 steps and well under a millisecond
+in a frame, so the defaults leave room for documents far heavier than the examples while a
+runaway mount takes at most a quarter of the pump's 200000 steps and 0.1 s. The notice comes
+after 3 seconds held; its click opens a Budgets window (Allow more, which doubles the entry's
+`budget.*`, Quit, Restart), since a feed entry has one action. The mirror carries
+`ariadne.apps.<id>.budget.*` and `principal`, and `processes.ari` lists each application's
+share. A static `load:` still shares its document's budget.
+
 ### 4.12 Documents from the network: the nicotina golden
 
 **The golden.** cy-pca/nicotina, the TX.WTF client written as `.ari` documents, runs as an
@@ -937,7 +981,7 @@ The closed `.ari` schema (transfix/libcvc#1464, open) learns the new keys (`moun
 2. The media types' names (`application/vnd.cvc.ari+yaml`, `application/vnd.cvc.aria+zip`), and
    whether to register them.
 3. The shape of TX.WTF's application attachment, and where its server change is made.
-4. The default budget numbers per principal (settled in SH1 against the examples).
+4. ~~The default budget numbers per principal~~: settled in SH1 (4.11, *As built in SH1*).
 5. In the browser, IndexedDB or `localStorage` for the saved settings (4.13).
 
 ## 7. Not in scope

@@ -85,6 +85,9 @@ struct execute_options {
   bool priority_floor_explicit = true;
   /// The spawning process (the DSL's spawn), or -1.
   int parent_pid = -1;
+  /// The frame budget the process shares (an Ariadne mount's, docs/roadmap/ARIADNE_SHELL.md
+  /// 4.11), or null: see frame_account. The async scheduler keeps it; the sync one ignores it.
+  std::shared_ptr<frame_account> account;
 };
 
 /// Snapshot of a single process for query purposes.

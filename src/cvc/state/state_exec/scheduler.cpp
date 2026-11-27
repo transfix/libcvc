@@ -750,7 +750,7 @@ void scheduler::execute_process_step(const process_ptr &pp) {
     proc.charge_cpu_time(std::max(0.0, cpu1 - cpu0 - proc.step_async_cpu));
   }
   // Heap accounting: take a finished measurement, start the next when due (heap.h).
-  if (proc.max_memory > 0 || proc.state.heap_measured)
+  if (proc.measures_heap() || proc.state.heap_measured)
     heap_after_step(proc, step_alloc ? step_alloc->allocated() : 0,
                     mem_tracker_.current_bytes(proc.pid));
 

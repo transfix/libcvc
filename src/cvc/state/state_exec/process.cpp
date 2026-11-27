@@ -107,11 +107,11 @@ void process::release_state() {
 }
 
 bool process::heap_measure_due(uint64_t state_bytes) const {
-  if (max_memory == 0 || heap_measuring)
+  if (!measures_heap() || heap_measuring)
     return false;
   if (heap_alloc_bytes >= heap_remeasure_bytes(static_cast<std::size_t>(heap_bytes)))
     return true;
-  if (state_bytes + heap_bytes + heap_alloc_bytes >= max_memory)
+  if (max_memory > 0 && state_bytes + heap_bytes + heap_alloc_bytes >= max_memory)
     return heap_alloc_bytes > 0; // what natives allocated since may have crossed the budget
   return heap_check_steps > 0 && heap_steps >= heap_check_steps;
 }

@@ -20,7 +20,7 @@ unfamiliar; every binding, computed field, and handler in an `.ari` document is 
 3. [The per-frame (deferred-intent) contract](#3-the-per-frame-deferred-intent-contract)
 4. [Backends](#4-backends)
 5. [Documents and the `.ari` schema](#5-documents-and-the-ari-schema)
-6. [Composition: include / import / load](#6-composition-include--import--load)
+6. [Composition: include / import / load](#6-composition-include--import--load) (§6.8 `mounts:`)
 7. [State prefix and mount scoping](#7-state-prefix-and-mount-scoping)
 8. [Channel scoping](#8-channel-scoping)
 9. [Running a document](#9-running-a-document)
@@ -1051,7 +1051,7 @@ wrote, without the program:
   value is used.
 - **When.** Like `init:`, it is written on every load and reload. A `load:`ed module's `state:` is
   written at its mount's sub-prefix just before the module's `init:` (§12), and again when the
-  module is restarted (§5.25).
+  module is restarted (§5.25). A `mounts:` entry's is written the same way, as it opens (§6.8).
 
 `init`, `on_tick`, `on_key`, `on_pointer`, and `on_signal` are scalar `state_exec` strings
 the loader only *captures*. The host wires them:
@@ -4591,6 +4591,11 @@ scene:
 - `state://PATH?data`, where the host registered the `state` scheme (`register_state_uri_handler`);
 - any scheme a host registered (§6.4).
 
+The uri may come from the command line: `uri: { arg: <name> }` takes the document's argument
+`<name>` (§5.6) once it is parsed, a relative path relative to the working directory. Not given
+and with no default, the dataset is not loaded, with a warning. The shell's catalog is one
+(`data: { catalog: { uri: { arg: catalog }, as: json } }`, §6.8).
+
 `https` and `cvcpkg` need the host's network: `--net-allow https://cvcpkg.org` (or
 `AriRuntime.enable_net_allow([...])` in Python). A document that loads from the network lists
 `net` in `requires:`.
@@ -6348,6 +6353,9 @@ A module with a `menubar:` of its own is an application: its bar becomes one men
 bar, with Restart and Quit, and its tray icons join the outer tray (§5.25). The loader names it
 by the fragment's `meta.name` (`Widget::app_name`), else by the mount id.
 
+To mount documents while the document runs, picked by the user or a program, use a `mounts:`
+slot (§6.8).
+
 ### 6.4 The URI resolver
 
 All external references (`import:`, `load:`, scene `source:`, `fetch`) go through one
@@ -6405,7 +6413,8 @@ copy (a libcvc checkout's `src/cvc/ariadne`). Each binds state keys a C++ object
 | `volume_grid` (+ `volume_grid_views`, `volume_grid_tools`) | a `volume_grid` node (§5.4; args `node`, `title`, `id`, `view_size`, `layout`): VolumeGridRover's slice views under an XY / XZ / ZY switch beside a 3D view (`layout: switch`, the default) or all four in a 2 x 2 grid (`layout: quad`), the tool, and the Probe, Point classes, Contours, Transfer function and Segmentation tabs. `volume_grid_tools`' tabs end in `slot: tabs`; `volume_grid_contours_tab` is the Contours tab alone (objects, the curve being drawn, edits, Tile with its progress and Stop, Save and Load through the app) |
 | `volume_grid_segmentation` (+ `volume_grid_segmentation_tab`) | the Segmentation tab in a window of its own (args `node`, `title`, `id`; the `_tab` unit is the controls alone, a group): thresholds, gamma, automatic seeds, Segment and Stop with a progress bar, the result's classes, how labels and surfaces draw, Save classes and Save labels |
 | `chat`, `chat_panel` | a room's chat and direct messages through the chat verbs (args `id`, `title`, `room`); its functions come with the import: call `(chat-ui-step ID ROOM)` from `on_tick` (§5.16) |
-| `processes` | the document's running DSL programs, a row each ([ARIADNE_SHELL.md](roadmap/ARIADNE_SHELL.md) 4.10): the application each belongs to (its `(ps)` scope looked up in `ariadne.apps`, §5.25; the document's own rows by its `meta.name`), pid, name, status, steps, what it waits on, memory, and a Kill button (args `id`, `title`, `rows`). Call `(processes-step ROWS)` from `on_tick`: it polls `(ps)` and `(inspect)` twice a second (`ROWS.every`), at most `ROWS.max` rows (50), the rest counted in `ROWS.more`. It lists only its own Runtime's processes (the document's and the documents it loads), in execution group 0 too, where it once listed every document's: a program with an owner sees only its owner's processes (§2.5) |
+| `shell` | not a unit but a document of its own: the Ariadne shell, which runs a catalog of documents as applications on demand (§6.8). `ari run cvc://components/shell.ari --catalog shell_apps.json [--open SLUG,...]` |
+| `processes` | the document's running DSL programs, a row each ([ARIADNE_SHELL.md](roadmap/ARIADNE_SHELL.md) 4.10): the application each belongs to (its `(ps)` scope looked up in `ariadne.apps`, §5.25; the document's own rows by its `meta.name`), pid, name, status, steps, what it waits on, memory, and a Kill button (args `id`, `title`, `rows`). Call `(processes-step ROWS)` from `on_tick`: it polls `(ps)` and `(inspect)` twice a second (`ROWS.every`), at most `ROWS.max` rows (50), the rest counted in `ROWS.more`, and each `mounts:` application's share of its budget (§6.8) in `ROWS.apps`. It lists only its own Runtime's processes (the document's and the documents it loads), in execution group 0 too, where it once listed every document's: a program with an owner sees only its owner's processes (§2.5) |
 | `room_users`, `room_users_compact` | everyone in a room from `room-roster` (bridged users in rows of their own, with no media), with local cam / mic / volume and a message button (args `id`, `title`, `rows`, `chat`, `self`); call `(room-users-step ROWS ROOM CHAT)` from `on_tick` |
 | `conference`, `conference_avatar`, `conference_peers` | the conference app's windows (`conference.ari`, which imports `room_users` and `chat`): My Camera (your name, camera, mic and their pickers), Avatar (Colour, Wear, the Body where the world offers more than one, the energy budget and ledger), and a camera window per other participant (arg `rows`). Call `(conference-step)` from `on_tick` for the whole app, or its pieces for some of it: `conference-join`, `conference-media-open`, `conference-name-step`, `conference-devices-step`, `conference-avatar-step`. The baseline conference app (`examples/ariadne/documents/conference_roster.ari`) is these placed in a document with its menus; another app adds its own windows beside them |
 | `http_cache` | the app's HTTP cache (§10.3): what it holds of its budget, its hits, misses, revalidations and evictions, the budget and the largest entry in MiB, how long a reply that says nothing stays fresh, on / off, and Clear (the bare action `http_cache.clear`). It binds app-root keys (`/sys.net.http_cache.*`), so it shows the same cache in any document; arigl puts it in every one (*Settings > Network cache...*) |
@@ -6608,6 +6617,138 @@ So the most stack a load takes is for a fragment as deep as yaml-cpp reads, `loa
 bottom of a 254-level chain: 640 to 704 KiB in MSVC Release, about a third of 2 MiB. Checking
 every level of it took 1.5 to 1.6 MiB. `ariadne_deep_nesting_test` loads each worst case on
 1 MiB: that fragment, a document and a scene as deep as yaml-cpp reads, and a scene at the limit.
+
+### 6.8 `mounts:` — documents mounted on demand
+
+A `load:` is fixed when its document is parsed: its fragment loads at start and stays. A `mounts:`
+slot mounts documents while the document runs, one per child of a state key, loaded when the child
+appears and freed when it goes. The Ariadne shell (`cvc://components/shell.ari`, below) is built on
+it. The design is [ARIADNE_SHELL.md](roadmap/ARIADNE_SHELL.md) 4.2 and 4.11.
+
+```yaml
+root:
+  - mounts: shell.apps                 # one mount per child of shell.apps
+    allow: { bind: shell.allow }       # the URI prefixes that may be mounted; empty: any
+    catalog: { bind: shell.catalog_uris }   # the documents that run as the local principal
+```
+
+Each child of the key is an entry:
+
+```
+shell.apps.<id>.uri               the document to mount (relative to the slot's document)
+shell.apps.<id>.args.<name>       its args: substitutions, as a load:'s args: are
+shell.apps.<id>.budget.steps      its budget, when not its principal's default (below)
+shell.apps.<id>.budget.time
+shell.apps.<id>.budget.memory
+```
+
+and the Runtime writes back `status` (`open`, `refused`, `closed`), `error` (why it was
+refused), `principal` and `name`. `<id>` is a state key segment (`[A-Za-z0-9_]`, not starting
+with a digit). `view`, `background`, `grants` and `argv` are SH3, SH6 and SH7's.
+
+- **Mounting.** When an entry with a `uri` appears, the Runtime asks its host's loader for the
+  document. The loader resolves and parses it as `load: <uri>` with `as: <id>` and its `args:`
+  would be (`load_mount`, [`loader.h`](../inc/cvc/ariadne/loader.h): the same resolver,
+  component paths and guards, and the `min_libcvc` gate), and keeps nothing: the Runtime keeps
+  what it mounts. Its widgets nest at most 256 levels, counted from its own top as a document's
+  are (§6.7); one that nests deeper is refused with that error. `AppRuntime` gives its Runtime
+  that loader (`Runtime::set_mount_loader`). The
+  mount is at `includes.<id>` under the slot's scope, exactly as a static `load:` would be: its
+  `state:` is written (§5.3) and its `init:` runs as it opens, its `on_tick:` starts, whether or
+  not its windows show. Each mount is
+  an application (§5.25): its menu bar becomes one menu of the outer bar, and one without a bar
+  gets a menu with its commands alone. Both end in Restart, Quit and Close. It is mirrored in
+  `ariadne.apps.<id>` with its `principal`.
+- **Closing.** When the entry goes (or Close in its menu removes it), the mount is quit: its
+  `on_tick:`, its actions and every process under its scope are stopped, its widgets and its
+  budget are freed, and it is no longer an application. Its state stays under `includes.<id>`, so
+  the same entry opened again resumes it, its `state:` not written and its `init:` not run again.
+  An entry whose `uri` or `args` change is closed and the new document opened, its `state:`
+  written and its `init:` run.
+- **Caching and hot reload.** A mount is parsed when it opens and again only when its `uri`, its
+  `args` or one of its files changes: `AppRuntime::reload_if_changed` watches the mounts' files
+  (`Runtime::mount_sources`) beside the document's. A mount parsed again keeps its `on_tick:`
+  resident when the program is the same, as a static `load:` does on a reload.
+- **What may be mounted.** Any local file or URL, unless `allow:` lists URI prefixes (literally,
+  or `{ bind: <key> }`: the key's children's values, or its own). A local prefix is relative to
+  the slot's document. Local paths are compared in canonical form, the form the document's own
+  path has: links followed, and Windows short names such as `RUNNER~1` spelled out. A prefix that
+  ends in `/` matches only under that directory. A refused entry is posted to the feed (§5.24),
+  its `status` `refused` and its `error` saying why.
+- **`requires:` at mount time.** The document goes through the scan a static load's modules go
+  through (§5.7), and where that scan would fail the load or warn, the mount is refused instead,
+  naming what is missing: a `requires:` entry this host lacks, a function a program calls that it
+  does not provide, or `gl.scene` for a document with a `scene:` on a host that draws none. An
+  optional entry this host lacks is not refused: the document said it copes. A mount's scene is
+  not drawn yet (SH3).
+- **Limits.** At most 256 open mounts and 32 levels of them, as a document's `load:`s.
+
+**The verbs.** A document's own programs open and close entries in its first `mounts:` slot:
+
+```
+(app-open URI [AS [ARGS]])  write <slot>.<AS>.uri, and args.<name> from the ARGS dict; return AS.
+                            Without AS an id is made from the URI's name ("counter" for
+                            apps/counter.ari, numbered when taken), and an entry already open on
+                            the same URI is returned as it is
+(app-close AS)              remove the entry: the mount closes at the next frame. #t when there was one
+```
+
+A mounted document's programs get a `PermissionError`: opening others needs a grant
+(`request.open`, SH14). A document with no slot gets a `RuntimeError`.
+
+**Principals and budgets.** Every mount runs as a principal, from where its bytes came: `local`
+for a `cvc://` or `state://` document and for one the slot's `catalog:` lists (a URI, or a prefix
+ending in `/`), `remote:<scheme>://<host>` for one from the network, and `file:<its directory>`
+for any other local file. Each mount has a budget for its programs, counted over every process
+whose scope is under it (the mount's actions, its `on_tick:` resident, what they spawn and fork):
+
+| | `local` | `file:`, `remote:` |
+|---|---|---|
+| steps a frame | 100000 | 20000 |
+| seconds of evaluation a frame | 0.025 | 0.005 |
+| memory held | 256 MB | 64 MB |
+
+(`Runtime::default_mount_budget`). The defaults were settled against the shipped examples: the
+example documents' programs, run mounted, use at most a few hundred steps and well under a
+millisecond a frame. An entry's `budget.steps`, `budget.time` and `budget.memory` replace them (0:
+no limit). A frame that spends a mount's steps or seconds, or a mount holding more memory than its
+cap, holds its processes: each waits for the next frame, as `(await)` parks it, and none is
+killed for it. The others run on. The scheduler does it (`frame_account`,
+[`process.h`](../inc/cvc/state/state_exec/process.h): `execute_options::account`, a spawned or
+forked child keeping its parent's). A mount's memory is its processes' heap shares, which the
+scheduler measures for a process under an account with a memory cap (`(inspect)`'s
+`heap_memory`), summed by the Runtime four times a second. A mount held every frame for 3
+seconds posts a notice: *Counter is using all the time it is allowed. Click for Allow more,
+Quit or Restart.* Its click opens the Budgets window, whose Allow more doubles the mount's
+budget in its entry. The mirror carries each mount's share,
+`ariadne.apps.<id>.budget.{steps, max_steps, time, max_time, memory, max_memory, held}` (its last
+frame's), which the Processes window (§6.5) shows. A static `load:` keeps sharing its document's
+budget.
+
+`Runtime::mounts()` lists the mounts as they stand, for a host or a test.
+
+**The shell.** `cvc://components/shell.ari` runs a catalog of documents as applications:
+
+```
+ari run cvc://components/shell.ari --catalog <prefix>/share/libcvc-examples/ariadne/documents/shell_apps.json
+ari run cvc://components/shell.ari --catalog shell_apps.json --open counter,json_feed
+```
+
+`--catalog` is in the format arigl's gallery reads (`{"demos": [{slug, title, desc, doc}]}`,
+each `doc` relative to the catalog; an entry without one is left out). It is a `data:` entry
+whose uri is the argument (§5.17). Nothing in it loads until it is picked: the Apps menu lists
+the entries by title, and the Launcher window lists them with Open and Close and each one's
+state. `--open` opens entries at start. The catalog's documents run as `local`; any other
+document opened by `(app-open)` runs as `file:` or `remote:`. It includes the Processes window
+(§6.5). `examples/ariadne/documents/shell_apps.json` lists the example documents without scenes
+(`tray_demo`, `json_feed`, `apps/counter`). For the Apps menu, a `menu_item:` whose label is an
+expression is worked out each frame on the read lane, as a text's bind is:
+
+```yaml
+- menu_item: '(state-get "shell.catalog.{i}.title")'
+  repeat: (int (state-get "shell.catalog"))
+  on: (shell-open {i})
+```
 
 ## 7. State prefix and mount scoping
 

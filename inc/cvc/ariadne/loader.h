@@ -229,6 +229,34 @@ LoadResult load_string(cvc::app &app, const std::string &yaml);
 // Parse a .ari document from a file path, against `app`'s registries. Never throws.
 LoadResult load_file(cvc::app &app, const std::string &path);
 
+// A `mounts:` entry's document (docs/roadmap/ARIADNE_SHELL.md 4.2): mount `uri` as a static
+// `load: <uri>` with `as: <as>` and `args:` would be, its relative URI resolved against `base_dir`
+// (the directory of the document that holds the slot).
+struct MountRequest {
+  std::string uri;
+  std::string as;
+  std::vector<std::pair<std::string, std::string>> args;
+  std::string base_dir;
+};
+struct MountResult {
+  bool ok = false;
+  std::string error; // why not mounted (unresolved, a parse error, a guard, min_libcvc, too deep)
+  // The mount: a Group with scope `includes.<as>`, the fragment its child, carrying its init:,
+  // on_tick:, functions, requires: and application name, as expand_load builds a load:'s.
+  Widget wrapper;
+  std::string canonical;  // where its bytes came from (the resolver's canonical: a file's path)
+  bool has_scene = false; // it declares scene: or scenes:, which a mount does not carry yet (SH3)
+  std::vector<std::string> warnings;
+  std::vector<SchemaIssue> schema_issues; // its own and its imports' and loads' (each in warnings)
+  // The local files read, its own first, and each one's mtime when it was read (hot reload).
+  std::vector<std::string> sources;
+  std::map<std::string, std::int64_t> source_stamps;
+};
+// Resolve and parse a mounts: entry's document, against `app`'s registries and resolver, through
+// the path a static load: takes (the URI resolver, the cycle, depth and total guards, the
+// component paths). Stateless: the Runtime keeps what it mounts. Never throws.
+MountResult load_mount(cvc::app &app, const MountRequest &req);
+
 // A YAML text (JSON is YAML too) as a Value, as a document's own maps are read: false, and why,
 // when it does not parse or this build has no YAML. Never throws. A vehicle rig's file is read
 // with it (vehicle_rig).

@@ -66,6 +66,8 @@ enum class Kind {
                   // Add / Remove buttons that edit the array
   Heatmap,        // a rows x cols grid of cells, each filled from a colour ramp by its value, with
                   // an optional text, corner mark and tooltip; hover and click report the cell
+  Mounts,         // on-demand mounts (docs/roadmap/ARIADNE_SHELL.md 4.2): one isolated mount per
+                  // child of the state key at `bind`, loaded when it appears, freed when it goes
 };
 
 // How a Kind::Image fills its box (`fit:`) and the box's shape (`shape:`); media.h fits a picture
@@ -261,6 +263,8 @@ struct TextRunSpec {
   std::string tooltip;
   bool operator==(const TextRunSpec &) const = default;
 };
+
+struct MountsSpec; // Kind::Mounts's slot, below
 
 // §5.3 a `state:` block's seeds, in document order: each a path (relative to the prefix it is
 // written under, or app-root-absolute with a leading '/') and the text written there.
@@ -634,6 +638,11 @@ struct WidgetNode {
   // a mount wrapper; empty otherwise.
   std::string tick_script;
 
+  // Kind::Mounts (docs/roadmap/ARIADNE_SHELL.md 4.2): `bind` is the state key whose children are
+  // the mounts (<bind>.<as>.uri, .args.<name>, ...), and this the rest of the slot (MountsSpec,
+  // below). Out of line, so every other widget stays the size it was. Null for every other kind.
+  std::shared_ptr<const MountsSpec> mounts;
+
   // §6.6 functions: set on the document's root and on every mount wrapper, null elsewhere. The
   // programs started inside this subtree (on: actions, the mount's init:) run with these
   // functions defined, and no others: a mount gets an empty scope unless it grants some.
@@ -734,6 +743,19 @@ inline Widget::~Widget() {
     take(node.context_items);
   }
 }
+
+// Kind::Mounts's slot (Widget::mounts). `allow` lists the URI prefixes that may be mounted, or
+// `allow_bind` names a state key holding them (a list, or one per child); both empty: any.
+// `catalog` / `catalog_bind` likewise list the catalog's documents, which run as the `local`
+// principal. `base` is the directory of the document that holds the slot: its entries' relative
+// URIs resolve against it.
+struct MountsSpec {
+  std::vector<std::string> allow;
+  std::string allow_bind;
+  std::vector<std::string> catalog;
+  std::string catalog_bind;
+  std::string base;
+};
 
 // §5.30 `w` with a right-click menu of `items` (named `id`, "" for none).
 inline Widget with_context_menu(Widget w, std::vector<Widget> items, std::string id = {}) {
