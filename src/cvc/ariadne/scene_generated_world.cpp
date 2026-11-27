@@ -162,6 +162,7 @@ world::generated_world_params generated_world_params_from(const SceneNode &n) {
   b.city = n.props.str("city", b.city);
   b.terrain_file = n.props.str("terrain_file", b.terrain_file);
   b.edge = std::max(0, world::world_edge_from_name(n.props.str("edge", "wall")));
+  b.theme = n.props.str("theme", b.theme); // a world theme by name (world::find_world_theme)
   return b;
 }
 
@@ -244,6 +245,7 @@ GeneratedWorldKeys generated_world_keys(cvc::app &app, const SceneNode &n,
   k.terrain_gen = seed_str("world.terrain", b.terrain);
   k.city = seed_str("world.city", b.city);
   k.terrain_file = seed_str("world.terrain_file", b.terrain_file);
+  k.theme = seed_str("world.theme", b.theme);
   // Save: where (the node's save_as prop, else its dataset's name: a directory beside the
   // document), whether with the exports, and how it went.
   k.save_file = seed_str("world.save.file", n.props.str("save_as", generated_world_data_name(n)));
@@ -278,6 +280,7 @@ world::generated_world_params read_generated_world_params(cvc::app &app,
   p.terrain = read_or<std::string>(app, k.terrain_gen, b.terrain);
   p.city = read_or<std::string>(app, k.city, b.city);
   p.terrain_file = read_or<std::string>(app, k.terrain_file, b.terrain_file);
+  p.theme = read_or<std::string>(app, k.theme, b.theme);
   p.edge = std::clamp(static_cast<int>(read_or<double>(app, k.edge, b.edge)), 0, 2);
   return p;
 }
@@ -288,7 +291,7 @@ std::string generated_world_signature(const world::generated_world_params &p) {
          to_string(p.trees) + "|" + to_string(p.rocks) + "|" + to_string(p.buildings) + "|" +
          to_string(p.tree_gen) + "|" + to_string(p.amp_m) + "|" + to_string(p.water_level_m) + "|" +
          to_string(p.preset) + "|" + to_string(p.ontology) + "|" + p.terrain + "|" + p.city + "|" +
-         p.terrain_file + "|" + to_string(p.edge);
+         p.terrain_file + "|" + to_string(p.edge) + "|" + p.theme;
 }
 
 world::generated_world_params resolve_generated_world_file(cvc::app &app,
@@ -411,6 +414,7 @@ void write_generated_world_keys(cvc::app &app, const GeneratedWorldKeys &k,
   write<std::string>(app, k.terrain_gen, p.terrain);
   write<std::string>(app, k.city, p.city);
   write<std::string>(app, k.terrain_file, p.terrain_file);
+  write<std::string>(app, k.theme, p.theme);
 }
 
 // ── GB5: a generated world while this host is joined to a relay ─────────────────────────────────

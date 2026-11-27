@@ -800,6 +800,9 @@ add_test(NAME cvcgl_physics_scene_binding COMMAND cvcgl_physics_scene_binding)
 add_executable(cvcgl_world_geometry_nodes test/cvcgl_world_geometry_nodes.cpp)
 target_link_libraries(cvcgl_world_geometry_nodes PRIVATE cvcGL)
 add_test(NAME cvcgl_world_geometry_nodes COMMAND cvcgl_world_geometry_nodes)
+add_executable(cvcgl_world_models test/cvcgl_world_models.cpp)
+target_link_libraries(cvcgl_world_models PRIVATE cvcGL)
+add_test(NAME cvcgl_world_models COMMAND cvcgl_world_models)
 
 # A node can outlive the scene that made it (removeGraphics hands it back; a
 # Python proxy or a viewer keeps holding it). Guards the raw back-pointers that
@@ -1840,7 +1843,8 @@ list(REMOVE_ITEM _cvcgl_gl_tests
   cvcgl_grid_bounds cvcgl_bounds_walk cvcgl_scene_chrome cvcgl_remove
   cvcgl_teardown cvcgl_light_state_thread cvcgl_unattached_node_thread cvcgl_pose_echo
   cvcgl_physics_scene_binding
-  cvcgl_world_geometry_nodes cvcgl_ariadne_physics cvcgl_ariadne_frame cvcgl_ariadne_data
+  cvcgl_world_geometry_nodes cvcgl_world_models cvcgl_ariadne_physics cvcgl_ariadne_frame
+  cvcgl_ariadne_data
   cvcgl_node_outlives_scene cvcgl_tree_version cvcgl_texture cvcgl_texture_zerocopy
   cvcgl_stream_texture cvcgl_state_publisher cvcgl_multi_app cvcgl_nav_stats_publish
   cvcgl_camera cvcgl_track_parity cvcgl_fps_hud cvcgl_stage_setters
