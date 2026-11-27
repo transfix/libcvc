@@ -222,7 +222,11 @@ bool weather::scheduled(long k, storm_cell &c) const {
 bool weather::authored(const weather_event &e, storm_cell &c) const {
   if (e.type != weather_event::kind::storm)
     return false;
+#if defined(__cpp_lib_bit_cast)
   const std::uint64_t bits = std::bit_cast<std::uint64_t>(e.t);
+#else // NetBSD's libstdc++ (gcc 10) has no std::bit_cast; its clang has the builtin
+  const std::uint64_t bits = __builtin_bit_cast(std::uint64_t, e.t);
+#endif
   const std::uint64_t el = bits ^ AUTHORED_SALT;
   c = storm_cell();
   c.id = storm_cell::AUTHORED | (bits & ~storm_cell::AUTHORED);
