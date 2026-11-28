@@ -81,6 +81,13 @@ vehicle_desc vehicle_desc::humvee() {
   // [AMG] the centre of gravity at curb: 0.742 m above the ground, 1.537 m behind the front
   // axle, so 0.113 m ahead of the wheelbase's middle; the chassis origin rides about 1.02 m up.
   d.center_of_mass = {0.113, 0.0, -0.28};
+  // [model] The cabin and hard top, from the windshield's foot to the tailgate, narrower than the
+  // body and up to the roof 1.88 m above the ground (vehicle-humvee's Humvee.glb, fitted to the
+  // box's length: the roof at 1.83 m of its 4.68 m, the top over its rear 3.1 m, +-0.95 m wide at
+  // the roof): on the box from its top (0.45 m over the origin, which rides about 1.02 m up) to
+  // 0.86 m over it.
+  d.cabin_half_extents = {1.56, 0.95, 0.205};
+  d.cabin_center = {-0.60, 0.0, 0.655};
   d.mass = 2676.0; // [AMG] curb weight; the GVW is 4672 kg (1996 kg payload)
   axle_desc a;
   a.half_track = 0.91; // [AMG] 1.82 m track
@@ -292,6 +299,10 @@ void validate(const vehicle_desc &d, const char *op = "add_vehicle") {
   need(positive(d.half_extents.x) && positive(d.half_extents.y) && positive(d.half_extents.z),
        "the chassis's half extents must be finite and > 0");
   need(finite(d.center_of_mass), "the centre of mass must be finite");
+  const vec3 &cab = d.cabin_half_extents;
+  need(finite(d.cabin_center) && ((cab.x == 0.0 && cab.y == 0.0 && cab.z == 0.0) ||
+                                  (positive(cab.x) && positive(cab.y) && positive(cab.z))),
+       "the cabin's half extents must be all 0 (none) or finite and > 0, its centre finite");
   need(positive(d.mass), "mass must be finite and > 0");
   need(!d.axles.empty(), "a vehicle needs at least one axle");
   bool steered = false, driven = false;
@@ -393,6 +404,10 @@ std::string fixed_change(const vehicle_desc &a, const vehicle_desc &b) {
     return "half_extents";
   if (!same(a.center_of_mass, b.center_of_mass))
     return "center_of_mass";
+  if (!same(a.cabin_half_extents, b.cabin_half_extents))
+    return "cabin_half_extents";
+  if (!same(a.cabin_center, b.cabin_center))
+    return "cabin_center";
   if (a.mass != b.mass)
     return "mass";
   if (a.axles.size() != b.axles.size())

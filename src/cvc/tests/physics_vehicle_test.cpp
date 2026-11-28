@@ -586,6 +586,77 @@ TEST(PhysicsVehicle, TheRoboRacerDrives) {
       0.95); // upright
 }
 
+// The Humvee's chassis collides at its outline (vehicle_desc::cabin_half_extents): the body box
+// and its cabin to the roof, 1.88 m up. Dropped onto its roof it rests on the cabin's top, not
+// 0.4 m deeper on the box's; on its side, on the box's flank. The cabin changes no handling: with
+// and without it the vehicle has the box's mass, centre of mass and inertia, and the same drive
+// on flat ground ends at the same state.
+TEST(PhysicsVehicle, TheHumveesChassisIsItsOutline) {
+  REQUIRE_JOLT();
+  const vehicle_desc d = vehicle_desc::humvee();
+  ASSERT_GT(d.cabin_half_extents.z, 0.0);
+  vehicle_desc box_only = d;
+  box_only.cabin_half_extents = {};
+  const double roof = d.cabin_center.z + d.cabin_half_extents.z; // over the chassis origin
+  EXPECT_NEAR(roof, 0.86, 1e-9);
+  {
+    world w(jolt_config());
+    flat_ground(w, 0.9);
+    const vehicle_id v = settled_humvee(w);
+    const double ride = w.vehicle_state(v).body.position.z;
+    std::printf("  upright: the origin %.2f m up, the roof %.2f m\n", ride, ride + roof);
+    EXPECT_NEAR(ride + roof, 1.88, 0.08);
+  }
+  // At rest after a drop: the chassis origin's height and the body's up axis.
+  const auto dropped = [](const vehicle_desc &desc, const quat &q) {
+    world w(jolt_config());
+    flat_ground(w, 0.9);
+    const vehicle_id v = w.add_vehicle(desc, {0.0, 0.0, 2.0}, q);
+    w.drive(v, {});
+    w.step(400);
+    const body_state b = w.vehicle_state(v).body;
+    const double up_z = 1.0 - 2.0 * (b.rotation.x * b.rotation.x + b.rotation.y * b.rotation.y);
+    return std::pair<double, double>{b.position.z, up_z};
+  };
+  const quat on_roof{0.0, 1.0, 0.0, 0.0}; // rolled half a turn about its length
+  const auto [z_roof, up_roof] = dropped(d, on_roof);
+  const auto [z_box, up_box] = dropped(box_only, on_roof);
+  std::printf("  on its roof: the origin %.2f m up (the box alone: %.2f m)\n", z_roof, z_box);
+  EXPECT_LT(up_roof, -0.95);
+  EXPECT_NEAR(z_roof, roof, 0.06);
+  EXPECT_LT(up_box, -0.95);
+  EXPECT_NEAR(z_box, d.half_extents.z, 0.06);
+  const double h = std::sqrt(0.5);
+  const auto [z_side, up_side] = dropped(d, quat{h, h, 0.0, 0.0}); // on its right flank
+  std::printf("  on its side: the origin %.2f m up\n", z_side);
+  EXPECT_LT(std::fabs(up_side), 0.1);
+  EXPECT_NEAR(z_side, d.half_extents.y, 0.06);
+
+  // The same drive with and without the cabin: a launch, a turn and a stop.
+  const auto drive = [](const vehicle_desc &desc) {
+    world w(jolt_config());
+    flat_ground(w, 0.9);
+    const vehicle_id v = w.add_vehicle(desc, {0.0, 0.0, 1.2});
+    for (int i = 0; i < 900; ++i) {
+      w.drive(v, {i < 300 ? 0.0 : 0.3, i < 600 ? 2.0 : -4.0});
+      w.step();
+    }
+    return w.vehicle_state(v).body;
+  };
+  // Not bit for bit: the compound's centre of mass is put back on center_of_mass in floats, and
+  // that rounding grows over the drive, by well under a millimetre.
+  const body_state a = drive(d), b = drive(box_only);
+  const double gap = std::hypot(a.position.x - b.position.x, a.position.y - b.position.y);
+  std::printf("  the same drive with and without the cabin: %.1f m, %.2g m apart\n",
+              std::hypot(a.position.x, a.position.y), gap);
+  EXPECT_GT(std::hypot(a.position.x, a.position.y), 20.0) << "it drove";
+  EXPECT_LT(gap, 0.01);
+  EXPECT_NEAR(a.position.z, b.position.z, 1e-3);
+  EXPECT_NEAR(a.rotation.z, b.rotation.z, 1e-3);
+  EXPECT_NEAR(a.linear_velocity.x, b.linear_velocity.x, 1e-3);
+  EXPECT_NEAR(a.linear_velocity.y, b.linear_velocity.y, 1e-3);
+}
+
 // --- grades ----------------------------------------------------------------------------------
 
 namespace {

@@ -94,6 +94,14 @@ struct nav_plant_options {
   double accel_margin = 0.8;
   double lateral_g = 0.5;
   double tip_margin = 0.8;
+  // Righting: a vehicle that has lain on its side or roof (its body's up axis at most right_up_z
+  // above the horizontal: up . z <= right_up_z) and slow (its centre of mass under right_speed
+  // m/s) for right_after seconds of ticks is set back on its wheels where it is, at the end of a
+  // tick: its heading kept, upright (onto the ground's slope there, as attach() places a start)
+  // and lifted clear of the ground under it, at rest. 0: never.
+  double right_after = 0.0;
+  double right_up_z = 0.3;
+  double right_speed = 1.0;
 };
 
 class nav_plant final : public cvc::nav::vehicle_plant {
@@ -135,6 +143,10 @@ public:
   // resting against another counts every tick it does.
   int vehicle_contact_step(int i) const;
   double vehicle_contact_depth(int i) const;
+  // How many times agent i's vehicle has been set back on its wheels (options' right_after), and
+  // how long it has now lain on its side or roof, slow (s).
+  int righted(int i) const;
+  double down_time(int i) const;
   // Agent i's energy ledger over the last tick, J: energy_lines of the vehicle's ledger at the
   // tick's start and end (vehicle.h), so its lines balance as the ledger does; all zero at
   // attach(). energy_step(i) is what the source paid of it.
@@ -257,6 +269,7 @@ public:
   void set_accel_margin(double share); // (0, 1]
   void set_lateral_g(double g);        // (0, 2]
   void set_tip_margin(double share);   // (0, 1]
+  void set_right_after(double s); // >= 0 (0: never); a vehicle lying down starts its count again
   // Onsets >= 0, gains >= 0.
   void set_modulation(const cvc::nav::plant_modulation &m);
 
@@ -304,6 +317,8 @@ private:
     double vwx = 0.0, vwy = 0.0;   // the centre of mass's world velocity then, m/s
     vehicle_energy ledger;         // the vehicle's ledger then
     vehicle_energy line;           // and over that tick (ledger_step())
+    double down = 0.0;             // s on its side or roof, slow (right_after)
+    int righted = 0;               // times set back on its wheels
   };
   struct bin_sums {
     std::uint64_t ticks = 0;
@@ -315,6 +330,8 @@ private:
   // (the accelerations), else at rest (attach).
   void measure(agent &a, const physics::vehicle_state &vs, bool tick) const;
   void count_contacts();
+  // Sets agent a's vehicle back on its wheels where it is (right_after), from its state `vs`.
+  void right(agent &a, const physics::vehicle_state &vs);
   // A vehicle `desc` at rest at `start`, appended (attach's, add_vehicle's).
   void place(const cvc::nav::plant_state &start, const vehicle_desc &desc);
 

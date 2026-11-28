@@ -277,6 +277,8 @@ void vehicle(writer &w, const vehicle_snapshot &v) {
   w.key("desc").begin_object();
   w.key("half_extents").vec(d.half_extents);
   w.key("center_of_mass").vec(d.center_of_mass);
+  w.key("cabin_half_extents").vec(d.cabin_half_extents);
+  w.key("cabin_center").vec(d.cabin_center);
   w.key("mass").number(d.mass);
   w.key("max_steer").number(d.max_steer);
   w.key("max_steer_rate").number(d.max_steer_rate);

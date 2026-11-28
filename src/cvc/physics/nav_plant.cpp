@@ -338,6 +338,40 @@ void nav_plant::place(const cvc::nav::plant_state &start, const vehicle_desc &de
   }
 }
 
+void nav_plant::right(agent &a, const physics::vehicle_state &vs) {
+  const body_state &b = vs.body;
+  // Its heading: its nose's, or on its nose or tail (the nose near vertical) its left side's.
+  const vec3 fwd = rotate(b.rotation, {1.0, 0.0, 0.0});
+  const vec3 left = rotate(b.rotation, {0.0, 1.0, 0.0});
+  const double yaw = std::hypot(fwd.x, fwd.y) > 0.25 ? det::atan2(fwd.y, fwd.x)
+                                                     : det::atan2(left.y, left.x) - 0.5 * kPiRad;
+  // Upright where it lies: its origin over the same point, as high above the ground as a start
+  // is (place()), onto the ground's slope and lifted clear of it, at rest.
+  const double h = _o.spawn_height >= 0.0 ? _o.spawn_height : resting_height(a.desc);
+  vec3 origin{b.position.x, b.position.y, 0.0};
+  const double gz = _o.ground_height ? _o.ground_height(origin.x, origin.y) : _o.ground_z;
+  origin.z = (std::isfinite(gz) ? gz : _o.ground_z) + h;
+  quat q;
+  q.w = det::cos(0.5 * yaw);
+  q.z = det::sin(0.5 * yaw);
+  if (_o.ground_height)
+    ground_pose(a.desc, yaw, h, _o.ground_height, origin, q);
+  body_state s = b;
+  s.position = origin;
+  s.rotation = q;
+  s.linear_velocity = vec3{};
+  s.angular_velocity = vec3{};
+  _w.set_state(a.chassis, s);
+  // What it reads now: upright and at rest, so the next tick's accelerations start from there.
+  const physics::vehicle_state now = _w.vehicle_state(a.vehicle);
+  a.ledger = now.energy;
+  measure(a, now, false);
+}
+
+int nav_plant::righted(int i) const { return _agents.at(static_cast<std::size_t>(i)).righted; }
+
+double nav_plant::down_time(int i) const { return _agents.at(static_cast<std::size_t>(i)).down; }
+
 int nav_plant::add_desc(vehicle_desc d) {
   _descs.push_back(std::move(d));
   return static_cast<int>(_descs.size()) - 1;
@@ -597,13 +631,16 @@ void nav_plant::command(int i, float steer, float accel) {
   agent &a = _agents.at(static_cast<std::size_t>(i));
   const double a_si = _units.from_normalized(accel, dim::acceleration, _frame);
   const double speed = _units.from_normalized(state(i).speed, dim::velocity, _frame);
-  // Forward or backward by where the agent is to be moving at the tick's end; the driver
-  // model takes the acceleration along that direction. A vehicle at rest reads a few cm/s on its
-  // springs; that is rest, so a command to back up from it backs up (as nav's bicycle does from
-  // zero) rather than braking against the jitter forever.
-  constexpr double kRestSpeed = 0.1; // m/s
-  const double v0 = std::fabs(speed) < kRestSpeed ? 0.0 : speed;
-  const bool reverse = v0 + _dt * a_si < 0.0;
+  // Forward or backward by where the agent is to be moving at the tick's end, from the speed the
+  // command was given at; the driver model takes the acceleration along that direction. A stop
+  // (nav's command to be at rest at the tick's end: -speed / dt) is a brake, whichever way the
+  // springs' few cm/s read, never the other gear: rounding to rest first turned a stop at +2 cm/s
+  // into reverse, and the next tick's stop at -2 cm/s into forward, and each change of direction
+  // costs an automatic gearbox its shift (Jolt's: half a second with the clutch out, then its
+  // release), so a vehicle that stopped by a wall sat there with its engine idling. A command to
+  // back up from rest is past kStopSpeed below it, and backs up (as nav's bicycle does from zero).
+  constexpr double kStopSpeed = 1e-3; // m/s: a stop's rounding
+  const bool reverse = speed + _dt * a_si < -kStopSpeed;
   drive_command c;
   c.steer = steer;
   c.accel = reverse ? -a_si : a_si;
@@ -636,6 +673,19 @@ void nav_plant::advance() {
     a.line = energy_lines(a.ledger, vs.energy);
     a.ledger = vs.energy;
     measure(a, vs, true);
+    // On its side or roof and slow for right_after: back on its wheels.
+    if (_o.right_after > 0.0) {
+      const vec3 up = rotate(vs.body.rotation, {0.0, 0.0, 1.0});
+      const bool down =
+          up.z <= _o.right_up_z &&
+          std::sqrt(dot(vs.body.linear_velocity, vs.body.linear_velocity)) < _o.right_speed;
+      a.down = down ? a.down + _dt : 0.0;
+      if (a.down >= _o.right_after - 1e-9) {
+        right(a, vs);
+        a.down = 0.0;
+        ++a.righted;
+      }
+    }
   }
   _advance_us +=
       std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
@@ -729,6 +779,14 @@ void nav_plant::set_tip_margin(double share) {
   if (!(share > 0.0 && share <= 1.0))
     throw cvc::physics_error("nav_plant: tip_margin must be in (0, 1]");
   _o.tip_margin = share;
+}
+
+void nav_plant::set_right_after(double s) {
+  if (!(std::isfinite(s) && s >= 0.0))
+    throw cvc::physics_error("nav_plant: right_after must be finite and >= 0");
+  _o.right_after = s;
+  for (agent &a : _agents)
+    a.down = 0.0;
 }
 
 void nav_plant::set_drift_nsub(int n) {
@@ -969,6 +1027,8 @@ std::vector<std::uint8_t> nav_plant::save() const {
     put_pod(out, a.vwy);
     put_pod(out, a.ledger);
     put_pod(out, a.line);
+    put_pod(out, a.down);
+    put_pod(out, a.righted);
   }
   put_pod(out, _ticks);
   put_pod(out, static_cast<std::uint64_t>(_bins.size()));
@@ -1010,6 +1070,8 @@ void nav_plant::restore(const std::vector<std::uint8_t> &state) {
     a.vwy = get_pod<double>(state, pos);
     a.ledger = get_pod<vehicle_energy>(state, pos);
     a.line = get_pod<vehicle_energy>(state, pos);
+    a.down = get_pod<double>(state, pos);
+    a.righted = get_pod<int>(state, pos);
   }
   const auto ticks = get_pod<std::uint64_t>(state, pos);
   if (get_pod<std::uint64_t>(state, pos) != _bins.size())

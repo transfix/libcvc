@@ -2538,7 +2538,7 @@ scene:
 
     | `plant:` | The vehicle | Its body in the world |
     |---|---|---|
-    | `jolt` (the default) | a Jolt vehicle: wheels, suspension, engine and gearbox | the vehicle's chassis |
+    | `jolt` (the default) | a Jolt vehicle: wheels, suspension, engine and gearbox | the vehicle's chassis: its body box, and a Humvee's cabin up to its roof (1.88 m), so it rests on its roof or side at its outline |
     | `dynamic` (`dynamic:<preset>`) | the dynamic single-track model: tires, load transfer, actuator lag, with its energy books | its chassis box, which the world's contacts push back into the model |
     | `dynamic4w` (`dynamic4w:<preset>`) | the four-wheel model with suspension: each wheel on the ground under it | as `dynamic`'s |
     | `kinematic` | nav's bicycle | a kinematic box: it pushes what it meets, and nothing stops it (the navigator keeps it off the buildings) |
@@ -2819,7 +2819,12 @@ scene:
     - `collide: true` keeps its vehicles from passing through each other on nav's own plant
       (kinematic): after each navigator step, any two closer than nine tenths of the vehicle's
       length are pushed apart (never into what blocks the grid). A Jolt plant's vehicles collide as
-      bodies anyway. `vehicles.fleets.<fleet>.collide` (`1` or `0`) switches it live.
+      bodies anyway. `vehicles.fleets.<fleet>.collide` (`1` or `0`) switches it live. Collide or
+      not, a vehicle on a plant brakes for another of its navigator's in its lane ahead, as for a
+      wall, and backing up for one behind it; one held at rest by another at rest for a second
+      backs off with its wheels the other way and passes it (two meeting head on both on their
+      right). One that meets another at rest on its goal waits: a crowd at a rally point does not
+      circle it.
     - Its navigator is its own (one per plant, `<plant>/<fleet>` to `WorldVehicles::belief`).
       `sense:` `known` or `fog` is what it knows (the world's `vehicles.sense` by default).
       `belief:` is how its vehicles share what they sense: `shared` (the default, one map),
@@ -2840,8 +2845,10 @@ scene:
       the weights are on their way, or `builtin: no trained weights (<why>)`. Without the
       weights it drives on the built-in net, and the host's log says why once.
     - `metric:` is what it plans with. `trained` is the trainer's vehicle (a 3 m disc and 18 m/s,
-      the bicycle the weights learned on; its plants plan with it too). `vehicle` is each plant's
-      own size and limits. `policy` (the default) follows the policy: `trained` while weights
+      the bicycle the weights learned on; its kinematic and dynamic plants plan with it too, but a
+      Jolt vehicle plans with its own size and limits on either metric: the trainer's accelerates
+      at 30 m/s^2, corners at 2 g and misses a Humvee's nose). `vehicle` is each plant's own size
+      and limits. `policy` (the default) follows the policy: `trained` while weights
       drive it or are on their way, `vehicle` on the built-in net, its own or a fallback's.
       `vehicles.fleets.<fleet>.metric` switches it, and `.plans` says which it plans with now.
       A change makes its navigators again, its vehicles at rest where they are.
@@ -2852,6 +2859,14 @@ scene:
       `0: jolt, 2: jolt` or `kinematic, 0: jolt` (team 0 on Jolt, the rest kinematic): the
       vehicles start at rest where they are on the new plants. A plant or team that is not one is
       said in `vehicles.status` and changes nothing.
+    - `righting:` sets one of its Jolt vehicles that has lain on its side or roof, slow, back on
+      its wheels where it lies: its heading kept, upright on the ground and at rest
+      (`nav_plant_options::right_after`). It is off by default: a vehicle that rolls stays down
+      until the fleet is laid out again (its `.restart.request`, `.reseed.request` or another
+      world), which puts every vehicle back on its wheels at its start. `righting: true` rights it
+      after 2 s there, `righting: <seconds>` after that long (`0` is off).
+      `vehicles.fleets.<fleet>.righting` (`1` or `0`, as a checkbox writes it) switches it live,
+      and `.righting_after` (seconds) sets how long. A Jolt vehicle in no fleet is never righted.
     - A view draws a fleet from `WorldVehicles::poses(fleet)`, not from state: a snapshot of its
       placed vehicles as the last step left them (ids, chassis centres, headings, speeds, teams,
       the box they lie in and the tick), made each step and read from any thread without a lock.

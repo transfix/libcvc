@@ -345,6 +345,14 @@ struct vehicle_start {
   // collide: true: a fleet's vehicles kept from passing through each other (nav's hard de-overlap
   // on its own plants; a Jolt plant's bodies collide anyway).
   bool collide = false;
+  // righting: whether a fleet's Jolt vehicle that has lain on its side or roof, slow, for
+  // `righting_after` s is set back on its wheels where it lies (nav_plant_options::right_after).
+  // Off by default: a vehicle that rolls stays down until the fleet is laid out again (a restart,
+  // a reseed, another world). `righting: true` is on after 2 s, `righting: <s>` on after that
+  // long (0: off).
+  static constexpr double kRighting = 2.0;
+  bool righting = false;
+  double righting_after = kRighting;
   // A fleet's plant: as a list or each team's (`plant` is then the list's first, or "").
   fleet_plants plants;
   bool operator==(const vehicle_start &) const = default;

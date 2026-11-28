@@ -54,6 +54,7 @@
 #include <Jolt/Physics/Collision/Shape/MeshShape.h>
 #include <Jolt/Physics/Collision/Shape/OffsetCenterOfMassShape.h>
 #include <Jolt/Physics/Collision/Shape/SphereShape.h>
+#include <Jolt/Physics/Collision/Shape/StaticCompoundShape.h>
 #include <Jolt/Physics/PhysicsSettings.h>
 #include <Jolt/Physics/PhysicsSystem.h>
 #include <Jolt/Physics/StateRecorder.h>
@@ -919,11 +920,15 @@ public:
       return is_heightfield(lock.GetBody());
     }();
     const JPH::Quat q = hf ? heightfield_rotation() : to_jolt(s.rotation);
-    if (bi.GetMotionType(jid) == JPH::EMotionType::Static)
+    if (bi.GetMotionType(jid) == JPH::EMotionType::Static) {
       bi.SetPositionAndRotation(jid, to_engine(s.position), q, JPH::EActivation::DontActivate);
-    else
+    } else {
       bi.SetPositionRotationAndVelocity(jid, to_engine(s.position), q, to_jolt(s.linear_velocity),
                                         to_jolt(s.angular_velocity));
+      // Jolt wakes it only for a velocity that is not zero: a sleeping body put at rest in the
+      // air (a vehicle set back on its wheels) would hang there.
+      bi.ActivateBody(jid);
+    }
   }
 
   void add_force(body_id id, const vec3 &f) override {
@@ -1062,10 +1067,44 @@ public:
     const JPH::ShapeSettings::ShapeResult shape = shifted.Create();
     if (shape.HasError())
       throw std::invalid_argument(jolt_error(shape, "vehicle chassis"));
-    JPH::BodyCreationSettings bcs(shape.Get(), to_engine(s.position), to_jolt(s.rotation),
+    // A cabin (vehicle_desc::cabin_half_extents) joins the box in a compound, its centre of mass
+    // moved back to center_of_mass, with the box's mass properties at the vehicle's mass (as
+    // CalculateInertia gives the box alone): it changes what the chassis collides with, not how
+    // the vehicle handles.
+    JPH::RefConst<JPH::Shape> chassis_shape = shape.Get();
+    const vec3 &cab = d.cabin_half_extents;
+    const bool cabin = cab.x > 0.0 && cab.y > 0.0 && cab.z > 0.0;
+    JPH::MassProperties mass;
+    if (cabin) {
+      mass = shape.Get()->GetMassProperties();
+      mass.ScaleToMass(static_cast<float>(d.mass));
+      mass.mInertia(3, 3) = 1.0f;
+      const JPH::Vec3 ch = to_jolt(cab);
+      JPH::Ref<JPH::StaticCompoundShapeSettings> outline = new JPH::StaticCompoundShapeSettings;
+      outline->AddShape(JPH::Vec3::sZero(), JPH::Quat::sIdentity(), box);
+      outline->AddShape(
+          to_jolt(d.cabin_center), JPH::Quat::sIdentity(),
+          new JPH::BoxShapeSettings(ch, std::min(JPH::cDefaultConvexRadius, 0.5f * ch.ReduceMin()),
+                                    _mats.at(0).GetPtr()));
+      const JPH::ShapeSettings::ShapeResult compound = outline->Create();
+      if (compound.HasError())
+        throw std::invalid_argument(jolt_error(compound, "vehicle chassis and cabin"));
+      JPH::OffsetCenterOfMassShapeSettings moved(
+          to_jolt(d.center_of_mass) - compound.Get()->GetCenterOfMass(), compound.Get());
+      const JPH::ShapeSettings::ShapeResult whole = moved.Create();
+      if (whole.HasError())
+        throw std::invalid_argument(jolt_error(whole, "vehicle chassis and cabin"));
+      chassis_shape = whole.Get();
+    }
+    JPH::BodyCreationSettings bcs(chassis_shape, to_engine(s.position), to_jolt(s.rotation),
                                   JPH::EMotionType::Dynamic, layers::moving);
-    bcs.mOverrideMassProperties = JPH::EOverrideMassProperties::CalculateInertia;
-    bcs.mMassPropertiesOverride.mMass = static_cast<float>(d.mass);
+    if (cabin) {
+      bcs.mOverrideMassProperties = JPH::EOverrideMassProperties::MassAndInertiaProvided;
+      bcs.mMassPropertiesOverride = mass;
+    } else {
+      bcs.mOverrideMassProperties = JPH::EOverrideMassProperties::CalculateInertia;
+      bcs.mMassPropertiesOverride.mMass = static_cast<float>(d.mass);
+    }
     bcs.mLinearDamping = 0.0f; // its resistance is the vehicle model's
     bcs.mAngularDamping = 0.05f;
     JPH::BodyInterface &bi = _ps->GetBodyInterface();

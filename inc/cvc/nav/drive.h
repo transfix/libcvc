@@ -144,6 +144,23 @@ void coef_feats(const field_stack &f, const float *on, const float *goal, int n,
 //   - it stays within the plant's steering lock.
 // The in-columns are borrowed [n], any may be null (none of that limit); the out-columns are
 // [n] and must be set. The kinematic arm (plant null, the default) is byte-identical.
+
+// One vehicle's way through the others (plant_drive::give_way), held from tick to tick so a
+// vehicle at rest, a few mm/s either way on its springs, does not flip between ahead and astern
+// (each flip an automatic gearbox's shift, with no drive). `phase` 0: driving (`t`: how long the
+// vehicle in its lane, `other`, has held it at rest); 1: backing off from `other`, its wheels the
+// other way, so its nose swings to `side` (+1 its left, -1 its right); 2: passing `other` on that
+// side. `t` is the time in the phase. `held` (out, each tick): 1 while another vehicle holds it at
+// rest or it gives way, for sim_world, whose carrot FSM then does not count it as stalled at a
+// wall (a vehicle waiting in traffic, or backing off from it, is not following a wall).
+struct give_way_state {
+  std::uint8_t phase = 0;
+  std::int8_t side = 0;
+  std::uint8_t held = 0;
+  std::int32_t other = -1;
+  float t = 0.0f;
+};
+
 struct plant_drive {
   const float *latency = nullptr;    // s
   const float *a_brake = nullptr;    // normalized / s^2
@@ -161,6 +178,41 @@ struct plant_drive {
   float *steer_cmd = nullptr; // out: delta_cmd (rad)
   float *accel_cmd = nullptr; // out: a_cmd (normalized / s^2)
   float *v_stop = nullptr;    // out: the stopping speed the command respects
+  // In/out, [n], may be null: each agent's tight turn (sim_world::config::plant_turns), 1 while
+  // it backs up. A vehicle that must turn hard (its wanted steer at least 0.7 of the lock) with a
+  // wall ahead within its stopping distance (it could not creep round at the turn's 0.08) backs
+  // up at up to 0.10 with its wheels the other way, no faster than it stops short of what is
+  // behind its tail, until it has a wheelbase of room ahead, the turn needs under half the lock,
+  // or no wall is ahead: its next leg forward turns it on (a three-point turn). With it the
+  // stopping governor takes the wall ahead whatever way the measured speed points (v_lim caps
+  // only the forward speed). Null: neither, as before.
+  std::uint8_t *backing = nullptr;
+  // THE FLEET'S OTHER VEHICLES (sim_world::config::plant_give_way), all null without: the
+  // drive keeps each vehicle from pushing into another, as it keeps it off a wall. `peers`,
+  // [4 n_peers], is each agent's x, y, heading and speed at the tick's start (normalized, rad,
+  // normalized / s), a copy apart from o / th / sp; `outline`, [3 n_peers], its reach ahead of
+  // and behind its rear axle and its half width (normalized). A vehicle's lane is the strip ahead
+  // of its nose (behind its tail, backing up) as wide as it is, and a quarter of its half width
+  // more each side. Its forward speed is held to the speed from which it stops a third of its
+  // wheelbase short of another's outline in its lane (half the gap when that one comes at it,
+  // the gap plus that one's stopping distance when it drives away), as v_stop holds it to a
+  // wall's; backing up, to the speed from which it stops that short of one behind it, and a
+  // three-point turn (`backing`) ends where one is behind it.
+  const float *peers = nullptr;
+  const float *outline = nullptr;
+  int n_peers = 0;
+  // In/out, [n], with `peers` (may be null: braking alone): giving way. A vehicle held at rest by
+  // another at rest in its lane (closer than two of those gaps, the walls, its corner and its
+  // stop point leaving it free to go) for 1 s backs off from it: at up to 0.10, no faster than it
+  // stops short of a wall or a vehicle behind it, its wheels the other way so its nose swings to
+  // the side it passes on (its right: two that meet head on both swing right, as the separation
+  // turns them; the other side if the one it waits for is on its right, or if the pass on its
+  // right is in a wall), for at most 4 s, until that one is a wheelbase and the gap ahead or out
+  // of its lane. Then it passes it: it steers for the point beside that one on its side, at up
+  // to 0.15, until that one's middle is behind its rear axle, for at most 8 s, or until it is
+  // held at rest again (and waits 1 s again). It does not back off from one at rest on its goal
+  // (veh_params::stop_at): a crowd at a rally point waits. A parked agent's is reset.
+  give_way_state *give_way = nullptr;
 };
 
 // Terrain's soft grade force and hard barrier (P5 H1, cvc/nav/terrain.h): a material_stack

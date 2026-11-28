@@ -414,6 +414,105 @@ void coef_feats(const field_stack &f, const float *on, const float *goal, int n,
 
 namespace {
 
+// The part of the segment (a0, c0)-(a1, c1), along and across a lane, within |c| <= w: its range
+// of a, [lo, hi]. False: none of it.
+inline bool clip_to_lane(float a0, float c0, float a1, float c1, float w, float &lo, float &hi) {
+  float t0 = 0.0f, t1 = 1.0f;
+  const float dc = c1 - c0;
+  if (std::fabs(dc) < 1e-12f) {
+    if (std::fabs(c0) > w)
+      return false;
+  } else {
+    float ta = (-w - c0) / dc, tb = (w - c0) / dc;
+    if (ta > tb)
+      std::swap(ta, tb);
+    t0 = std::max(t0, ta);
+    t1 = std::min(t1, tb);
+    if (t0 > t1)
+      return false;
+  }
+  const float e0 = a0 + t0 * (a1 - a0), e1 = a0 + t1 * (a1 - a0);
+  lo = std::min(e0, e1);
+  hi = std::max(e0, e1);
+  return true;
+}
+
+// The fleet's other vehicles in agent i's lane (plant_drive::peers), the vehicle at (x, y) facing
+// (ch, sh): the nearest outline ahead of its nose and behind its tail, how far from its own, and
+// that one's speed along its heading. Within `reach` of its outline; -1: none.
+struct lane_view {
+  float gap_ahead = 3.0e38f, gap_astern = 3.0e38f;
+  int ahead = -1, astern = -1;
+  float ahead_along = 0.0f, astern_along = 0.0f;
+};
+
+lane_view lane_of(const plant_drive &pd, int i, float x, float y, float ch, float sh, float reach) {
+  lane_view out;
+  const float front = pd.outline[3 * i], rear = pd.outline[3 * i + 1], hw = pd.outline[3 * i + 2];
+  // Its lane: as wide as it is and a quarter of its half width more each side, for an outline
+  // wholly ahead of (behind) it. One alongside counts only where it overlaps the middle 0.8 of its
+  // width ahead of its nose (behind its tail): two scraping past each other do not hold each other.
+  const float w_lane = 1.25f * hw, w_core = 0.8f * hw;
+  const float nose_from = front - 0.25f * hw, tail_from = -rear + 0.25f * hw;
+  for (int j = 0; j < pd.n_peers; ++j) {
+    if (j == i)
+      continue;
+    const float *pj = pd.peers + 4 * j, *oj = pd.outline + 3 * j;
+    const float dx = pj[0] - x, dy = pj[1] - y;
+    const float far = reach + front + rear + oj[0] + oj[1] + oj[2];
+    if (dx * dx + dy * dy > far * far)
+      continue;
+    const float cj = std::cos(pj[2]), sj = std::sin(pj[2]);
+    // Its corners (front left, front right, rear right, rear left), along and across this lane.
+    const float us[4] = {oj[0], oj[0], -oj[1], -oj[1]}, ws[4] = {oj[2], -oj[2], -oj[2], oj[2]};
+    float ca[4], cc[4];
+    for (int k = 0; k < 4; ++k) {
+      const float px = dx + us[k] * cj - ws[k] * sj, py = dy + us[k] * sj + ws[k] * cj;
+      ca[k] = px * ch + py * sh;
+      cc[k] = -px * sh + py * ch;
+    }
+    float lo_l = 3.0e38f, hi_l = -3.0e38f, lo_c = 3.0e38f, hi_c = -3.0e38f;
+    bool in_l = false, in_c = false;
+    for (int k = 0; k < 4; ++k) {
+      const int k1 = (k + 1) % 4;
+      float lo, hi;
+      if (clip_to_lane(ca[k], cc[k], ca[k1], cc[k1], w_lane, lo, hi)) {
+        lo_l = std::min(lo_l, lo);
+        hi_l = std::max(hi_l, hi);
+        in_l = true;
+      }
+      if (clip_to_lane(ca[k], cc[k], ca[k1], cc[k1], w_core, lo, hi)) {
+        lo_c = std::min(lo_c, lo);
+        hi_c = std::max(hi_c, hi);
+        in_c = true;
+      }
+    }
+    if (!in_l)
+      continue;
+    float ahead = 3.0e38f, astern = 3.0e38f;
+    if (lo_l > nose_from)
+      ahead = lo_l - front;
+    if (in_c && hi_c > nose_from)
+      ahead = std::min(ahead, std::max(lo_c, nose_from) - front);
+    if (hi_l < tail_from)
+      astern = -rear - hi_l;
+    if (in_c && lo_c < tail_from)
+      astern = std::min(astern, -rear - std::min(hi_c, tail_from));
+    const float along = pj[3] * (cj * ch + sj * sh);
+    if (ahead < out.gap_ahead) {
+      out.gap_ahead = std::max(ahead, 0.0f);
+      out.ahead = j;
+      out.ahead_along = along;
+    }
+    if (astern < out.gap_astern) {
+      out.gap_astern = std::max(astern, 0.0f);
+      out.astern = j;
+      out.astern_along = along;
+    }
+  }
+  return out;
+}
+
 // The rollout body, shared by the plain and material entry points. `mat` is
 // nullptr for the plain path — the guarded material blocks then never execute
 // and the float op sequence is EXACTLY the pre-material code (byte-identical;
@@ -494,10 +593,15 @@ void rollout_impl(const field_stack &f, float *o, float *th, float *sp, const fl
       const float ch = std::cos(thi), sh = std::sin(thi);
       float nx, ny, d, gov_rr;
       float Fbar_x, Fbar_y, Frep_x = 0.0f, Frep_y = 0.0f;
+      // The tail's disc's clearance and its wall's normal (the plant arm's room to back up).
+      float d_tail = 3.0e38f, nx_tail = 0.0f, ny_tail = 0.0f;
       if (!has_fp) {
         float phi;
         sample_unit(f, plane, ox, oy, phi, nx, ny);
         d = phi - rr_i;
+        d_tail = d;
+        nx_tail = nx;
+        ny_tail = ny;
         const float ipc = ipc_dbdd(d, d_hat);
         Fbar_x = -(ali * ipc) * nx;
         Fbar_y = -(ali * ipc) * ny;
@@ -522,6 +626,11 @@ void rollout_impl(const field_stack &f, float *o, float *th, float *sp, const fl
           float bphi, bnx, bny;
           sample_unit(f, plane, ox + off * ch, oy + off * sh, bphi, bnx, bny);
           const float bd = bphi - body_rr_i;
+          if (b == 0) { // a plant's discs run from its tail to its nose
+            d_tail = bd;
+            nx_tail = bnx;
+            ny_tail = bny;
+          }
           const float bipc = ipc_dbdd(bd, d_hat);
           const float alg = v.body_gain == 1.0f ? ali : ali * v.body_gain;
           Fbar_x += -(alg * bipc) * bnx;
@@ -690,6 +799,7 @@ void rollout_impl(const field_stack &f, float *o, float *th, float *sp, const fl
         delta = delta + k_steer * std::tanh(Frep_x * (-sh) + Frep_y * ch); // F_rep . left
       }
       delta = std::min(std::max(delta, -dmax), dmax);
+      const float delta_want = delta; // before the actuator's reach (a tight turn's)
       if (rate_limited)
         delta = within_reach(delta);
 
@@ -724,7 +834,12 @@ void rollout_impl(const field_stack &f, float *o, float *th, float *sp, const fl
               0.1f * ab_p);
         v_stop = std::sqrt(ab_p * ab_p * tau_p * tau_p + 2.0f * ab_p * ds + 1e-24f) - ab_p * tau_p;
       }
-      const float motion_sign = spi >= 0.0f ? 1.0f : -1.0f;
+      // With tight turns the plant arm takes the wall ahead whatever way its measured speed points:
+      // v_lim caps only the forward speed, and a vehicle at rest reads a few mm/s either way on its
+      // springs, so by the sign a stop at a wall read as backing away from it, and the next tick's
+      // command was full ahead into it.
+      const bool turns = pd && pd->backing;
+      const float motion_sign = (turns || spi >= 0.0f) ? 1.0f : -1.0f;
       float approach = -(nx * ch + ny * sh) * motion_sign;
       approach = std::min(std::max(approach, 0.0f), 1.0f);
       const float v_stop_dir = approach > 0.05f ? v_stop / std::max(approach, 0.05f) : vmax;
@@ -758,6 +873,38 @@ void rollout_impl(const field_stack &f, float *o, float *th, float *sp, const fl
         v_arrive_dir = closing > 0.05f ? v_arrive / std::max(closing, 0.05f) : vmax;
         v_lim = std::min(v_lim, v_arrive_dir);
       }
+      // The fleet's other vehicles (plant_drive::peers): the speed from which it stops a third of
+      // its wheelbase short of the one in its lane ahead (v_veh) and behind (v_veh_back), braking
+      // as v_stop plans to.
+      const bool traffic = pd && pd->peers && pd->outline && i < pd->n_peers;
+      const float v_lim_free = v_lim; // the walls', its corner's, its stop point's
+      float v_veh = vmax, v_veh_back = vmax;
+      lane_view lane;
+      const float veh_gap = L / 3.0f;
+      const auto stop_within = [&](float g) {
+        g = std::max(g, 0.0f);
+        return std::sqrt(ab_p * ab_p * tau_p * tau_p + 2.0f * ab_p * g + 1e-24f) - ab_p * tau_p;
+      };
+      if (traffic) {
+        const float ab_t = std::max(ab_p, 1e-6f);
+        const float reach = vmax * tau_p + vmax * vmax / (2.0f * ab_t) + 4.0f * veh_gap;
+        lane = lane_of(*pd, i, ox, oy, ch, sh, reach);
+        // One driving on ahead of it stops further on (as it would); one coming at it stops too,
+        // so each has half the gap.
+        const auto room = [&](float gap, float away) {
+          float g = gap - veh_gap;
+          if (away > 0.0f)
+            g += away * away / (2.0f * ab_t);
+          else if (away < -0.01f)
+            g *= 0.5f;
+          return g;
+        };
+        if (lane.ahead >= 0)
+          v_veh = std::min(vmax, stop_within(room(lane.gap_ahead, lane.ahead_along)));
+        if (lane.astern >= 0) // behind it, driving its way is coming at it
+          v_veh_back = std::min(vmax, stop_within(room(lane.gap_astern, -lane.astern_along)));
+        v_lim = std::min(v_lim, v_veh);
+      }
 
       const bool hard_steer = std::fabs(delta) >= 0.7f * dmax;
       const bool can_move = d > 0.25f * gov_rr;
@@ -766,6 +913,8 @@ void rollout_impl(const field_stack &f, float *o, float *th, float *sp, const fl
         v_floor = std::min(v_floor, v_stop_dir); // the plant arm creeps only as fast as it can stop
       if (stops)
         v_floor = std::min(v_floor, v_arrive_dir); // nor past its stop point
+      if (traffic)
+        v_floor = std::min(v_floor, v_veh); // nor into another vehicle
       v_lim = std::max(v_lim, v_floor);
 
       const float v_creep = std::min(0.5f * v_corner, creep_cap);
@@ -784,8 +933,175 @@ void rollout_impl(const field_stack &f, float *o, float *th, float *sp, const fl
         if (nose_blocked) {
           a_long = (-0.10f - spi) / hdt;
           delta = -delta;
+          if (turns)
+            pd->backing[i] = 0;
+        } else if (turns) {
+          // The plant arm's tight turn (plant_drive::backing), a three-point turn. The kinematic
+          // arm creeps into the wall's margin to turn (v_floor), which a vehicle with mass and a
+          // turning circle cannot: it stood at the wall. Held as state, not decided afresh each
+          // tick, so the jitter of a vehicle at rest, and the steer slewing over, do not flip it
+          // between ahead and astern (each flip an automatic gearbox's shift, with no drive).
+          // How fast it may back up: as fast as it stops short of the wall nearest its tail,
+          // over the part of backing that closes on it (none when that wall is ahead of it).
+          const float ds_tail = std::max(d_tail - 0.5f * gov_rr, 0.0f);
+          const float closing_tail =
+              std::min(std::max(nx_tail * ch + ny_tail * sh, 0.0f), 1.0f); // backing: -heading
+          const float v_tail =
+              std::sqrt(ab_p * ab_p * tau_p * tau_p + 2.0f * ab_p * ds_tail + 1e-24f) -
+              ab_p * tau_p;
+          float back = std::min(0.10f, closing_tail > 0.05f ? v_tail / closing_tail : 0.10f);
+          if (traffic)
+            back = std::min(back, v_veh_back); // nor into a vehicle behind it
+          std::uint8_t &bk = pd->backing[i];
+          if (bk) {
+            if (ds >= L || std::fabs(delta_want) < 0.5f * dmax || back <= 0.01f || head_on <= 0.0f)
+              bk = 0; // room enough ahead, turned enough, no room behind, or no wall ahead
+          } else if (std::fabs(delta_want) >= 0.7f * dmax && head_on > 0.05f &&
+                     v_stop_dir < 0.08f && spi < 0.02f && back > 0.01f) {
+            bk = 1;
+          }
+          if (bk) {
+            a_long = (-back - spi) / hdt;
+            delta = -delta_want;
+          }
         }
       }
+      if (traffic && pd->give_way && v.allow_reverse) {
+        // Giving way (plant_drive::give_way): backing off from the vehicle it is stuck at, and
+        // passing it. Held as state, as the tight turn is: a vehicle at rest reads a few mm/s
+        // either way on its springs, and each flip between ahead and astern costs a shift.
+        give_way_state &gw = pd->give_way[i];
+        if (gw.other >= pd->n_peers || gw.other == i)
+          gw = give_way_state{}; // the agents changed under it
+        const float *pk = gw.other >= 0 ? pd->peers + 4 * gw.other : nullptr;
+        const float *ok = gw.other >= 0 ? pd->outline + 3 * gw.other : nullptr;
+        // The middle of vehicle k (its outline's), from its rear axle along its heading.
+        const auto middle = [&](const float *p, const float *o, float &mx, float &my) {
+          const float off = 0.5f * (o[0] - o[1]);
+          mx = p[0] + off * std::cos(p[2]);
+          my = p[1] + off * std::sin(p[2]);
+        };
+        // How fast it may back up: as the tight turn may, short of the wall nearest its tail, and
+        // short of the vehicle behind it.
+        const float ds_tail = std::max(d_tail - 0.5f * gov_rr, 0.0f);
+        const float closing_tail = std::min(std::max(nx_tail * ch + ny_tail * sh, 0.0f), 1.0f);
+        const float v_tail = stop_within(ds_tail);
+        const float back = std::min(
+            std::min(0.10f, closing_tail > 0.05f ? v_tail / closing_tail : 0.10f), v_veh_back);
+        const bool slow = std::fabs(spi) < 0.02f;
+        const float hw = pd->outline[3 * i + 2];
+        if (gw.phase == 0) {
+          // Held at rest by one at rest in its lane, close, with nothing else holding it.
+          const int j = lane.ahead;
+          bool held = j >= 0 && slow && lane.gap_ahead < 2.0f * veh_gap && v_veh < 0.02f &&
+                      v_lim_free > 0.04f && std::fabs(pd->peers[4 * j + 3]) < 0.03f;
+          if (held && stops) { // not one at rest on its goal: a crowd at a rally point waits
+            float mx, my;
+            middle(pd->peers + 4 * j, pd->outline + 3 * j, mx, my);
+            const float len_j = pd->outline[3 * j] + pd->outline[3 * j + 1];
+            const float to_goal = std::hypot(v.stop_at[2 * i] - mx, v.stop_at[2 * i + 1] - my);
+            held = to_goal >= len_j + 2.0f * veh_gap;
+          }
+          if (!held) {
+            gw.other = -1;
+            gw.t = 0.0f;
+          } else {
+            if (gw.other != j) {
+              gw.other = j;
+              gw.t = 0.0f;
+            }
+            gw.t += hdt;
+            if (gw.t >= 1.0f) {
+              // Its side: its right, as two meeting head on both swing right; else away from the
+              // side the other is on, or the way it is turning. The other side where the point it
+              // passes by is in a wall; neither, it waits on.
+              const float *pj = pd->peers + 4 * j, *oj = pd->outline + 3 * j;
+              float mx, my;
+              middle(pj, oj, mx, my);
+              const float rel = pj[2] - thi, cr = std::cos(rel);
+              const float across = -(mx - ox) * sh + (my - oy) * ch;
+              int side = -1;
+              if (cr > -0.5f) {
+                if (across < -0.1f * hw)
+                  side = 1;
+                else if (across <= 0.1f * hw && delta_want > 0.0f)
+                  side = 1;
+              }
+              // Beside it: its half extent across this lane and this one's lane.
+              const float ext = 0.5f * (oj[0] + oj[1]) * std::fabs(std::sin(rel)) +
+                                oj[2] * std::fabs(cr) + 1.25f * hw;
+              const auto clear = [&](int sd) {
+                const float sf = static_cast<float>(sd);
+                float phi, gnx, gny;
+                sample_unit(f, plane, mx - sf * ext * sh, my + sf * ext * ch, phi, gnx, gny);
+                return phi > 1.25f * hw;
+              };
+              if (!clear(side))
+                side = clear(-side) ? -side : 0;
+              gw.t = 0.0f;
+              if (side != 0) {
+                gw.side = static_cast<std::int8_t>(side);
+                gw.phase = back > 0.01f ? 1 : 2; // no room behind: straight to passing
+                if (turns)
+                  pd->backing[i] = 0;
+              }
+            }
+          }
+        } else if (gw.phase == 1) {
+          // Backing off, wheels the other way, until that one is a wheelbase and the gap ahead
+          // or out of its lane, there is no room behind, or for 4 s.
+          gw.t += hdt;
+          const bool clear_ahead = lane.ahead != gw.other || lane.gap_ahead >= L + veh_gap;
+          if (!pk) {
+            gw = give_way_state{};
+          } else if (clear_ahead || back <= 0.01f || gw.t >= 4.0f) {
+            gw.phase = 2;
+            gw.t = 0.0f;
+          }
+        } else {
+          // Passing it, until its middle is behind its rear axle, for 8 s, until that one drives
+          // away, or until it is held at rest again (past the shift into gear).
+          gw.t += hdt;
+          bool done = !pk || gw.t >= 8.0f;
+          if (!done) {
+            float mx, my;
+            middle(pk, ok, mx, my);
+            const float along_k = pk[3] * (std::cos(pk[2]) * ch + std::sin(pk[2]) * sh);
+            done = (mx - ox) * ch + (my - oy) * sh < 0.0f || along_k > 0.05f ||
+                   (gw.t > 2.0f && slow && std::min(v_lim_free, v_veh) < 0.02f);
+          }
+          if (done)
+            gw = give_way_state{};
+        }
+        if (gw.phase == 1) {
+          a_long = (-back - spi) / hdt;
+          delta = -static_cast<float>(gw.side) * dmax;
+          if (turns)
+            pd->backing[i] = 0;
+        } else if (gw.phase == 2) {
+          // Pure pursuit of the point beside it on its side.
+          const float *pp = pd->peers + 4 * gw.other, *op = pd->outline + 3 * gw.other;
+          float mx, my;
+          middle(pp, op, mx, my);
+          const float rel = pp[2] - thi;
+          const float ext = 0.5f * (op[0] + op[1]) * std::fabs(std::sin(rel)) +
+                            op[2] * std::fabs(std::cos(rel)) + 1.25f * hw;
+          const float sd = static_cast<float>(gw.side);
+          const float px = mx - sd * ext * sh - ox, py = my + sd * ext * ch - oy;
+          const float dist = std::max(std::sqrt(px * px + py * py), L);
+          const float a = std::atan2(py, px) - thi;
+          const float sa = std::sin(a), ca = std::cos(a);
+          delta = ca < 0.0f ? (sa >= 0.0f ? dmax : -dmax) : std::atan2(2.0f * L * sa, dist);
+          delta = std::min(std::max(delta, -dmax), dmax);
+          a_long = (0.15f - spi) / hdt;
+          if (turns)
+            pd->backing[i] = 0;
+        }
+        const bool waits = slow && lane.ahead >= 0 && v_veh < 0.04f && v_veh < v_lim_free;
+        gw.held = (gw.phase != 0 || waits) ? 1 : 0;
+      }
+      if (traffic) // backing up, it stops short of the vehicle behind it
+        a_long = std::max(a_long, (-v_veh_back - spi) / hdt);
       a_long = std::min(std::max(a_long, -a_max_e), a_max_e);
       a_long = std::min(a_long, (v_lim - spi) / hdt);
       // The plant arm may brake as hard as the vehicle can to keep under v_lim (its stopping
@@ -809,7 +1125,8 @@ void rollout_impl(const field_stack &f, float *o, float *th, float *sp, const fl
         // The acceleration the integration would apply: within [sp_min, vmax] at the tick's end,
         // so a vehicle never backs up where nav would not (allow_reverse) or speeds past vmax.
         pd->accel_cmd[i] = (sp_next - spi) / hdt;
-        pd->v_stop[i] = std::min(vmax, v_stop_dir); // the stopping speed the command respects
+        // The stopping speed the command respects (with the fleet's other vehicles, theirs too).
+        pd->v_stop[i] = std::min(vmax, traffic ? std::min(v_stop_dir, v_veh) : v_stop_dir);
         break;
       }
 

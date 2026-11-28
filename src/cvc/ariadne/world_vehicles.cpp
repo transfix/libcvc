@@ -1025,6 +1025,12 @@ struct WorldVehicles::impl {
     std::string sense, belief, seen_sense, seen_belief;
     bool collide = false; // its vehicles kept apart (collide:; the key switches it)
     std::string seen_collide;
+    // Whether its Jolt vehicles that lie on a side or the roof are set back on their wheels, and
+    // after how long (s) there (righting:; its keys switch them). Off: they stay down.
+    bool righting = false;
+    double righting_after = vehicle_start::kRighting;
+    std::string seen_righting, seen_righting_after;
+    double right_after() const { return righting ? righting_after : 0.0; }
     // Its policy: what is asked (trained, builtin, data:<entry> or a uri; the key switches it),
     // what drives (`model`, null: the built-in net) and that, said (`drives`). `loading` is the
     // data store's node of weights still on their way, `file` the .cvcnav in it.
@@ -1409,13 +1415,20 @@ struct WorldVehicles::impl {
       f->sim->set_thread_pool(&app->computePool());
     ph::nav_plant_options o;
     o.step_world = false; // the world steps on the clock; the plant commands and reads
-    o.plan_with_vehicle = !f->trained;
+    // A Jolt vehicle plans with its own envelope and size on either metric (the policy's
+    // coefficients are the trained net's all the same): the trainer's vehicle accelerates at
+    // 30 m/s^2, corners at 2 g and is a disc at the rear axle that misses a Humvee's nose, so on
+    // it a Jolt fleet ran its noses into the blocks and rolled over on the terrain's hills.
+    o.plan_with_vehicle = !f->trained || plant == "jolt";
     o.ground_bodies = ground;
     std::shared_ptr<const cvc::nav::world_grid> g = grid;
     std::shared_ptr<const cvc::height_field> t = terrain;
     o.ground_height = [g, t](double x, double y) { return ground_at(g.get(), t.get(), x, y); };
     const std::vector<ph::vehicle_desc> first{ph::vehicle_desc::humvee()};
     if (plant == "jolt") {
+      // A vehicle that rolled onto its side or roof is set back on its wheels when its fleet's
+      // righting: is on; otherwise, and in no fleet, it stays down.
+      o.right_after = group >= 0 ? groups[static_cast<std::size_t>(group)].right_after() : 0.0;
       f->jolt = std::make_unique<ph::nav_plant>(*world, first, std::move(o));
       f->sim->set_plant(f->jolt.get());
     } else if (plant == "dynamic") {
@@ -1744,6 +1757,13 @@ struct WorldVehicles::impl {
     // never were all at their goals at once.
     cfg.stop_at_goal = true;
     cfg.park_hold = true;
+    // A vehicle on a plant turns in a tight spot as a real one does, backing up with its wheels
+    // the other way: a Humvee on Jolt that met a block it had to turn along stood at it.
+    cfg.plant_turns = true;
+    // And it keeps from pushing into its fleet's other vehicles: it brakes for one in its lane, and
+    // backs off and passes one it is stuck at. A body cannot be moved as nav's de-overlap moves a
+    // kinematic box, so a Jolt fleet's Humvees stood nose to nose at full throttle.
+    cfg.plant_give_way = true;
     // Vehicles steer around each other: the nav demos' separation for the largest vehicle (the
     // other plants' vehicles join in as foreign agents at each tick, navigator_tick).
     if (avoid) {
@@ -2489,6 +2509,13 @@ struct WorldVehicles::impl {
             status = "entity " + std::to_string(e.id) + ": " + why;
     ++rev;
   }
+  // Fleet `gi`'s Jolt vehicles righted, or left down, as its righting says now, its navigators
+  // kept.
+  void apply_righting(std::size_t gi) {
+    for (const auto &[k, nav] : fleets)
+      if (nav && nav->group == static_cast<int>(gi) && nav->jolt)
+        nav->jolt->set_right_after(groups[gi].right_after());
+  }
   // Fleet `gi`'s vehicles kept apart, or not, now (collide), its navigators kept.
   void apply_collide(std::size_t gi) {
     const float gap = groups[gi].collide ? kCollideGap * cfg.veh.rr : 0.0f;
@@ -2690,6 +2717,30 @@ struct WorldVehicles::impl {
         if ((c == "1" || c == "0" || c == "true" || c == "false") && want != g.collide) {
           g.collide = want;
           apply_collide(gi);
+        }
+      }
+      // Righting on or off (1 or 0, as a checkbox writes; true or false), and after how long.
+      if (const std::string c = get(at + "righting"); c != g.seen_righting) {
+        g.seen_righting = c;
+        const bool on = c == "1" || c == "true" || c == "on";
+        if ((on || c == "0" || c == "false" || c == "off") && on != g.righting) {
+          g.righting = on;
+          apply_righting(gi);
+        }
+      }
+      if (const std::string c = get(at + "righting_after"); c != g.seen_righting_after) {
+        g.seen_righting_after = c; // seconds, > 0
+        double after = 0.0;
+        try {
+          std::size_t used = 0;
+          after = std::stod(c, &used);
+          if (used != c.size())
+            after = 0.0;
+        } catch (const std::exception &) {
+        }
+        if (after > 0.0 && std::isfinite(after) && after != g.righting_after) {
+          g.righting_after = after;
+          apply_righting(gi);
         }
       }
       const std::string s = get(at + "sense"), b = get(at + "belief");
@@ -3797,6 +3848,8 @@ std::size_t WorldVehicles::spawn_starts(const std::vector<vehicle_start> &starts
       g.sense = st.sense;
       g.belief = st.belief.empty() ? "shared" : st.belief;
       g.collide = st.collide;
+      g.righting = st.righting;
+      g.righting_after = st.righting_after;
       g.policy = !st.policy_data.empty() ? "data:" + st.policy_data
                  : st.policy.empty()     ? "trained"
                                          : st.policy;
@@ -3813,6 +3866,8 @@ std::size_t WorldVehicles::spawn_starts(const std::vector<vehicle_start> &starts
         d.put(at + "metric", g.metric);
         d.put(at + "plant", g.plants.empty() ? g.base_plant : g.plants.text());
         d.put(at + "collide", g.collide ? "1" : "0");
+        d.put(at + "righting", g.righting ? "1" : "0");
+        d.put(at + "righting_after", num(g.righting_after));
         d.put(at + "size", std::to_string(st.count));
       }
       g.seen_sense = d.get("fleets." + st.fleet + ".sense");
@@ -3821,6 +3876,8 @@ std::size_t WorldVehicles::spawn_starts(const std::vector<vehicle_start> &starts
       g.seen_metric = d.get("fleets." + st.fleet + ".metric");
       g.seen_plant = d.get("fleets." + st.fleet + ".plant");
       g.seen_collide = d.get("fleets." + st.fleet + ".collide");
+      g.seen_righting = d.get("fleets." + st.fleet + ".righting");
+      g.seen_righting_after = d.get("fleets." + st.fleet + ".righting_after");
       g.seen_size = d.get("fleets." + st.fleet + ".size");
       d.hold_placing = true;
       int got = 0;
