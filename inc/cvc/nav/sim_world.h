@@ -896,7 +896,8 @@ private:
   // each phase took since the last report, and the ticks (and sensed ticks) that covers.
   struct step_profile {
     bool on = false;
-    double sense = 0, rebuild = 0, sdf = 0, carrot = 0, sep = 0, gate = 0, drive = 0, total = 0;
+    double sense = 0, rebuild = 0, sdf = 0, carrot = 0, sep = 0, gate = 0, drive = 0, yield = 0,
+           overlap = 0, rest = 0, total = 0;
     long ticks = 0, sense_ticks = 0;
   };
   step_profile prof_;

@@ -641,8 +641,8 @@ void sim_world::step(int num_threads) {
   // steers AROUND itself instead of driving through. Reactive and per-agent, so
   // it works in every belief mode (the shared-plane scale path can't stamp peers
   // per agent). Off unless the host opts in (sep_gain > 0); the neighbour query
-  // is the same CGAL kd-tree the squad uses (grid_nav.h neighbors_within_radius). The foreign
-  // agents (set_foreign_agents) are peers here too, after the world's own in the tree.
+  // is the one the squad uses (grid_nav.h neighbors_within_radius, a nanoflann k-d tree). The
+  // foreign agents (set_foreign_agents) are peers here too, after the world's own in the tree.
   const int nf = static_cast<int>(foreign_.size() / 2);
   if (cfg_.sep_gain > 0.0f && cfg_.sep_radius > 0.0f && n_ > 0 && n_ + nf > 1) {
     // The pass-on-the-right look-ahead reaches further than the push (sep_side_radius).
@@ -658,6 +658,10 @@ void sim_world::step(int num_threads) {
     for (int i = 0; i < n_; ++i) {
       float sx = 0.0f, sy = 0.0f;
       float side = 0.0f; // the strongest pass-on-the-right weight a peer ahead asks for
+      // Its heading's cosine and sine, once: each peer's pass-on-the-right test reads them (a
+      // crowd at a rally point has dozens of peers each).
+      const float ch = Rs > 0.0f ? std::cos(th_[i]) : 0.0f;
+      const float sh = Rs > 0.0f ? std::sin(th_[i]) : 0.0f;
       for (int k = csr.offsets[i]; k < csr.offsets[i + 1]; ++k) {
         const int j = csr.indices[k];
         const float jx = static_cast<float>(pw[2 * j]), jy = static_cast<float>(pw[2 * j + 1]);
@@ -678,7 +682,6 @@ void sim_world::step(int num_threads) {
         // Passing on the right (sep_side): a peer ahead, within Rs and no further than R off this
         // agent's line, asks it to turn right. (dx, dy) point from the peer to this agent.
         if (Rs > 0.0f) {
-          const float ch = std::cos(th_[i]), sh = std::sin(th_[i]);
           const float ahead = -(dx * ch + dy * sh), across = std::fabs(dx * sh - dy * ch);
           if (ahead > 0.0f && across < R && d < Rs)
             side = std::max(side, (Rs - d) / Rs);
@@ -697,11 +700,13 @@ void sim_world::step(int num_threads) {
     }
   }
 
+  lap(prof_.sep);
+
   // ── YIELDING (optional): out of each other's way, from the intents each heard ──
   if (yield_cfg_.on() && n_ > 1)
     yield_tick(fs, num_threads);
 
-  lap(prof_.sep);
+  lap(prof_.yield);
 
   // ── MATERIAL GATE (optional): frame-wise witness per agent vs its own goal ──
   // The gate multiplies lam_soft ONLY; lam_hard is always on. Evaluated in
@@ -1139,10 +1144,21 @@ void sim_world::step(int num_threads) {
     };
     const bool all = cfg_.min_gap_parked; // the agents at rest too
     // The point each agent's gap is measured from: min_gap_ahead along its heading (a vehicle's
-    // middle, ahead of the rear axle its position is), 0: its position.
+    // middle, ahead of the rear axle its position is), 0: its position. The headings do not
+    // change here, so each agent's offset is taken once: the pairs below would otherwise take a
+    // cosine and a sine for each of their two agents, n^2 / 2 pairs a sweep (at 240 agents most
+    // of the tick, and the most of a frame in a browser).
     const double ahead = cfg_.min_gap_ahead;
-    auto ax = [&](int k) { return ahead != 0.0 ? ahead * std::cos(th_[k]) : 0.0; };
-    auto ay = [&](int k) { return ahead != 0.0 ? ahead * std::sin(th_[k]) : 0.0; };
+    std::vector<double> off;
+    if (ahead != 0.0) {
+      off.resize(static_cast<std::size_t>(2) * n_);
+      for (int k = 0; k < n_; ++k) {
+        off[2 * k] = ahead * std::cos(th_[k]);
+        off[2 * k + 1] = ahead * std::sin(th_[k]);
+      }
+    }
+    auto ax = [&](int k) { return ahead != 0.0 ? off[2 * k] : 0.0; };
+    auto ay = [&](int k) { return ahead != 0.0 ? off[2 * k + 1] : 0.0; };
     for (int it = 0; it < cfg_.min_gap_iters; ++it) {
       bool moved = false;
       for (int i = 0; i < n_; ++i) {
@@ -1198,6 +1214,7 @@ void sim_world::step(int num_threads) {
         break;
     }
   }
+  lap(prof_.overlap);
 
   // ── The telemetry's books against U (drive_telemetry): where the tick ends, what moved the
   // agents after the drive, and the context's change since last tick ──
@@ -1296,6 +1313,7 @@ void sim_world::step(int num_threads) {
   }
 
   if (prof_.on) {
+    lap(prof_.rest); // the telemetry's books, the terrain, the arrivals and the plant
     step_profile &p = prof_;
     p.total += std::chrono::duration<double, std::milli>(clk::now() - tstart).count();
     if (++p.ticks >= 120) {
@@ -1304,10 +1322,10 @@ void sim_world::step(int num_threads) {
       std::fprintf(stderr,
                    "CVC_NAV_PROFILE n=%d M=%d grid=%dx%d | per-tick ms avg over %ld ticks "
                    "(%ld sensed): total=%.3f | sense=%.3f rebuild=%.3f(%.3f/sense) sdf=%.3f "
-                   "carrot=%.3f sep=%.3f gate=%.3f drive=%.3f\n",
+                   "carrot=%.3f sep=%.3f yield=%.3f gate=%.3f drive=%.3f overlap=%.3f rest=%.3f\n",
                    n_, M_, rows_, cols_, p.ticks, p.sense_ticks, p.total / n, p.sense / n,
-                   p.rebuild / n, p.rebuild / sn, p.sdf / n, p.carrot / n, p.sep / n, p.gate / n,
-                   p.drive / n);
+                   p.rebuild / n, p.rebuild / sn, p.sdf / n, p.carrot / n, p.sep / n, p.yield / n,
+                   p.gate / n, p.drive / n, p.overlap / n, p.rest / n);
       std::fflush(stderr);
       p = step_profile{true};
     }
