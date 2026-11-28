@@ -37,6 +37,7 @@
 // without threads, as the http verbs do).
 
 #include <atomic>
+#include <cvc/ariadne/net_intrinsics.h> // NetAccess, NetAccessFor
 #include <memory>
 #include <string>
 #include <utility>
@@ -73,11 +74,15 @@ struct OidcFlows {
 };
 OidcFlows oidc_flows(cvc::app &app);
 
-// Turn sign-in on for documents run in `app` (only), with the host's policy and credential store
-// (enable_net calls it). Registers the verbs above as `app`'s action intrinsics.
-void enable_oidc(cvc::app &app, std::shared_ptr<const cvc::net::NetPolicy> policy,
-                 std::shared_ptr<cvc::net::CredentialStore> store, const OidcHostConfig &config,
-                 std::shared_ptr<const std::atomic<bool>> live);
+// Turn sign-in on for documents run in `app` (only), with each program's policy and credential
+// store: `for_scope(<its scope>)`, its principal's (docs/roadmap/ARIADNE_SHELL.md 4.12), or `base`
+// (the launcher's) when `for_scope` is null; `base.live` turns the verbs off (enable_net calls it).
+// A sign-in is kept under its program's principal: another principal's oidc-status, oidc-cancel
+// and oidc-sign-out of the same name reach a sign-in of their own, and only the launcher's own
+// principal's sign-ins are posted to "oidc#NAME". Registers the verbs above as `app`'s action
+// intrinsics.
+void enable_oidc(cvc::app &app, NetAccess base, NetAccessFor for_scope,
+                 const OidcHostConfig &config);
 // Turn `app`'s off: every flow in progress stops (a loopback listener closes), and the store
 // forgets the host's renewers. Tokens kept in a file stay there.
 void disable_oidc(cvc::app &app);

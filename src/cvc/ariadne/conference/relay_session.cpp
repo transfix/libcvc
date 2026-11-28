@@ -815,8 +815,11 @@ std::string relay_session::status() const {
   case impl::phase::backoff: {
     const auto left = std::chrono::duration_cast<std::chrono::seconds>(
         s.next_try - std::chrono::steady_clock::now());
-    return "lost; dialing again in " + std::to_string((std::max)(left.count(), std::int64_t(0))) +
-           " s" + (s.why.empty() ? "" : " (" + s.why + ")");
+    // The zero in the count's own type: seconds::rep is long long where std::int64_t is long
+    // (FreeBSD's libc++), and max deduces one type from both.
+    return "lost; dialing again in " +
+           std::to_string((std::max)(left.count(), decltype(left.count()){0})) + " s" +
+           (s.why.empty() ? "" : " (" + s.why + ")");
   }
   case impl::phase::idle:
     break;
