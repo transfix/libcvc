@@ -349,8 +349,8 @@ TEST(TightCoconeIntrinsicsAriadne, AnActionStartsItUnderTheDefaultLimits) {
   ASSERT_NE(v, nullptr) << "the result landed at job.result";
   EXPECT_EQ(std::get<std::int64_t>(se::field(*v, "triangles")->v),
             std::int64_t(cvc::tight_cocone(pts).surface.num_tris()));
-  std::cout << "[ T10 ] cocone.tight-start from an action: " << frames << " frames, "
-            << frames_busy << " while busy, " << progress_seen.size() << " progress values\n";
+  std::cout << "[ T10 ] cocone.tight-start from an action: " << frames << " frames, " << frames_busy
+            << " while busy, " << progress_seen.size() << " progress values\n";
 }
 
 // ---- the component --------------------------------------------------------------------------
@@ -416,8 +416,9 @@ TEST(TightCoconeComponent, RunsOnTheAppsPointsAndPutsTheSurfaceBack) {
   cvc::ariadne::register_data_generator(
       app, "tight_cocone_test_sphere", [](cvc::ariadne::DataDecode &d) {
         d.out("geometry").value(std::string("geometry"));
-        d.out("geometry").data(boost::any(std::shared_ptr<const cvc::geometry>(
-            std::make_shared<const cvc::geometry>(sphere(500)))));
+        d.out("geometry")
+            .data(boost::any(std::shared_ptr<const cvc::geometry>(
+                std::make_shared<const cvc::geometry>(sphere(500)))));
         return std::vector<cvc::archive::file>();
       });
   const cvc::tight_cocone_result expected = cvc::tight_cocone(sphere(500));

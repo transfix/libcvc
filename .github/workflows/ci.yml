@@ -2753,6 +2753,7 @@ jobs:
         state_exec_router_test state_exec_stress_test
         net_engine_test ariadne_host_test param_table_test result_job_test job_intrinsics_test tet_complex_test
         skeleton_test pocket_tunnel_test contour_stack_test point_classes_test planar_test
+        tight_cocone_test tight_cocone_intrinsics_test
         tiler_test
         tiler_legacy_test tiler_intrinsics_test segmentation_test segmentation_intrinsics_test
         gradient_vector_diffusion_test critical_points_test seed_generators_test

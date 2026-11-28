@@ -395,8 +395,8 @@ cocone::step_task pocket_tunnel_stepper::impl::run() {
   const pocket_tunnel_params &P = params;
 
   // ---- 1. the Delaunay triangulation ----
-  SK_RUN(triangulate<pocket_tunnel_error>(std::exchange(points, {}), "pocket_tunnel", triang,
-                                          *this, 0.0, 0.25, duplicates));
+  SK_RUN(triangulate<pocket_tunnel_error>(std::exchange(points, {}), "pocket_tunnel", triang, *this,
+                                          0.0, 0.25, duplicates));
   double at = 0.27;
   const std::size_t C = triang.num_cells(), V = triang.number_of_vertices();
 

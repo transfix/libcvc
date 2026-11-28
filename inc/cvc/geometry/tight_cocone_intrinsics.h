@@ -27,7 +27,8 @@
 //   "surface"                       a data object holding the surface's cvc::geometry; (data-put
 //                                   NAME "geometry" surface) makes it a dataset the scene draws
 //   "triangles", "surface_points"   its size
-//   "points", "duplicates", "robust_dropped", "cells", "inside_cells"   tight_cocone_result's counts
+//   "points", "duplicates", "robust_dropped", "cells", "inside_cells"
+//                                   tight_cocone_result's counts
 //   "warnings"                      a list of strings
 // A failure (too few points, all in one plane, a bad parameter) raises at the call.
 

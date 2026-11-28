@@ -24,9 +24,8 @@
 // skel.cpp's compute_secondary_structures() and buildAllGeometry() as one coroutine over the
 // cocone core, with the call's own context in place of the legacy Skel object.
 
-#include "secondary.h"
-
 #include "../cocone/triangulate.h"
+#include "secondary.h"
 
 #include <algorithm>
 #include <atomic>
@@ -39,7 +38,6 @@
 namespace cvc {
 
 namespace {
-
 
 std::string fmt_count(const char *what, std::size_t n) {
   char buf[256];

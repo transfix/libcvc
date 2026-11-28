@@ -1,0 +1,43 @@
+# The browser smoke test's Tight Cocone (src/arigl/web/test/arigl_web_smoke.mjs): the
+# examples/ariadne/documents/tight_cocone_lab.ari scene, smaller. The app makes a dataset of the
+# embedded bunny decimated to 2,000 triangles (cvcGL's `mesh` generator); the tight_cocone component
+# runs on its points, a slice at a time on the page's scheduler (the single-threaded page has no other
+# thread), and puts the surface back in the dataset, where the scene draws it. Once the surface is in
+# it prints one line the test waits for; a failed run prints why.
+meta: {min_libcvc: 4.0.0}
+import:
+  - cvc://components/mesh/tight_cocone.ari
+data:
+  points:
+    generate: mesh
+    params: { mesh: stanford.bunny, triangles: 2000, fit: { height: 100, up: y } }
+on_tick: |
+  (if (and (= (state-get "data.points.status") "ready") (!= (state-get "tc.started") "1"))
+      (begin (state-set "tc.started" "1")
+             (tight-cocone-run "tc" "points" "geometry"))
+      #f)
+  (tight-cocone-step "tc" "points")
+  (if (and (!= (state-get "tc.framed") "1") (!= (or (state-get "tc.info.triangles") "") ""))
+      (begin (state-set "viewers.main.camera.frame" "-170 -70 -5 80 70 110")
+             (state-set "tc.framed" "1"))
+      #f)
+  (if (and (!= (state-get "tc.reported") "1")
+           (or (!= (or (state-get "tc.info.triangles") "") "")
+               (string.starts-with (or (state-get "tc.status") "") "failed")))
+      (begin
+        (print (str-concat "tight_cocone: " (or (state-get "tc.info.triangles") "0")
+                           " triangles over " (or (state-get "tc.info.surface_points") "0")
+                           " points (" (state-get "tc.status") ")"))
+        (state-set "tc.reported" "1"))
+      #f)
+windows:
+  - include: tight_cocone
+    args: { job: tc }
+    pos: [16, 16]
+    size: [340, 420]
+scene:
+  chrome: false
+  nodes:
+    - node: surface
+      source: { data: points, item: surface }
+      material: { color: [0.85, 0.82, 0.88] }

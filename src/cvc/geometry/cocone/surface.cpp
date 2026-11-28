@@ -35,7 +35,8 @@ step_task extract_surface(const Triangulation &triang,
   std::vector<int> used(n, -1);
 
   // The flagged facets, each oriented by its inside cell: (a, b, c) when the inside cell's fourth
-  // vertex is on the negative side of (a, b, c), so the triangle faces away from it, else (b, a, c).
+  // vertex is on the negative side of (a, b, c), so that the triangle faces away from it, and
+  // (b, a, c) when not.
   for (FFI fit = triang.finite_facets_begin(); fit != triang.finite_facets_end(); ++fit) {
     SK_UNIT;
     Cell_handle c[2] = {(*fit).first, (*fit).first->neighbor((*fit).second)};
@@ -58,7 +59,7 @@ step_task extract_surface(const Triangulation &triang,
       // Both cells outside, the second the infinite one (the legacy read the infinite vertex's
       // unset point): face away from infinity, towards the first cell's fourth vertex.
       keep_order = cg::orientation(vh[0]->point(), vh[1]->point(), vh[2]->point(),
-                               c[0]->vertex(id[0])->point()) == cg::POSITIVE;
+                                   c[0]->vertex(id[0])->point()) == cg::POSITIVE;
     }
     std::array<int, 3> t = {vh[0]->tc, vh[1]->tc, vh[2]->tc};
     if (!keep_order)

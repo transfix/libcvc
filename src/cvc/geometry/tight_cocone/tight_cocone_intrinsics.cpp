@@ -40,8 +40,8 @@ job_op tight_cocone_op(sliced_threading threading) {
         // As a dataset holds a geometry (data.cpp's mesh decoder), so data-put can put it in one
         // and a scene node draw it from there.
         auto surface = std::make_shared<se::data_object>();
-        surface->payload = std::shared_ptr<const geometry>(
-            std::make_shared<const geometry>(std::move(r.surface)));
+        surface->payload =
+            std::shared_ptr<const geometry>(std::make_shared<const geometry>(std::move(r.surface)));
         surface->type_name = "cvc::geometry";
         return se::make_dict({
             {"surface", se::value_t(std::move(surface))},

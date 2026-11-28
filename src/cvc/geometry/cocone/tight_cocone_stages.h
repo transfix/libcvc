@@ -68,8 +68,8 @@ step_task tight_cocone_front(std::vector<std::array<double, 3>> pts, tight_cocon
   double at = lo;
   if (P.robust) {
     // 1. Robust Cocone on the triangulation of every point: the points on a smooth surface.
-    SK_RUN(triangulate<Error>(std::move(pts), who, triang, sp, at, at + 0.15 * f,
-                              counts.duplicates));
+    SK_RUN(
+        triangulate<Error>(std::move(pts), who, triang, sp, at, at + 0.15 * f, counts.duplicates));
     at += 0.17 * f;
     sp.stage("voronoi", at, at + 0.03 * f, triang.num_cells() + triang.number_of_vertices());
     SK_RUN(initialize(triang));
@@ -105,8 +105,7 @@ step_task tight_cocone_front(std::vector<std::array<double, 3>> pts, tight_cocon
 
   // 2. The Delaunay triangulation, the Voronoi vertices and the cell radii.
   const double tri_span = (P.robust ? 0.15 : 0.25) * f;
-  SK_RUN(triangulate<Error>(std::move(pts), who, triang, sp, at, at + tri_span,
-                            counts.duplicates));
+  SK_RUN(triangulate<Error>(std::move(pts), who, triang, sp, at, at + tri_span, counts.duplicates));
   at += tri_span + 0.02 * f;
   const std::size_t C = triang.num_cells(), V = triang.number_of_vertices();
   sp.stage("voronoi", at, at + 0.05 * f, C + V);

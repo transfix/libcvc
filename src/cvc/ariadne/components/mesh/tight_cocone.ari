@@ -136,7 +136,7 @@ units:
         tooltip: "a Delaunay ball is big when its squared radius is over this times a corner's mean squared nearest-neighbour distance"
       - slider_float: Deep with infinity
         bind: "{job}.params.theta_if"
-        def: 0.087266462599716474
+        def: 0.08726646259971647
         lo: 0.0
         hi: 1.5708
         fmt: "%.3f rad"
@@ -166,7 +166,7 @@ units:
         tooltip: "the normal deviation allowed between cocone neighbours of a flat point"
       - slider_float: Flatness ratio
         bind: "{job}.params.flatness_ratio"
-        def: 1.4399999999999999
+        def: 1.44
         lo: 1.0
         hi: 4.0
         fmt: "%.3f"

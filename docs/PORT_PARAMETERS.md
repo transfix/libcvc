@@ -8,7 +8,8 @@ properties, the CLI flags, the pycvc keywords and the DSL dict keys. The tables 
 declarations printed by `cvc::params_markdown<P>()`, the generator that ships with
 `cvc::param_table`. They are not written by hand.
 
-**Generated** on 2026-11-27 from transfix/libcvc master at fc507d7e0. Each table is the
+**Generated** on 2026-11-27 from transfix/libcvc master at fc507d7e0, and `tight_cocone_params`
+on 2026-11-28 with V1. Each table is the
 generator's output exactly; the headings and the "Read by" lines are not generated. To regenerate,
 compile a program against libcvc that prints `cvc::params_markdown<P>()` for each struct below
 (each struct's header is under "Header"), then paste its output over the tables:
@@ -44,6 +45,7 @@ state key take it. An empty string default prints as two backticks.
 | [`grid_contour_object`](#grid_contour_object) | [`volume_grid_contours.h`](../inc/cvc/volume/volume_grid_contours.h) | volume_grid's `grid.objects.<i>.*` rows, `grid-contours.object`, `pycvc.grid_contour_object` |
 | [`pocket_tunnel_params`](#pocket_tunnel_params) | [`pocket_tunnel_params.h`](../inc/cvc/geometry/pocket_tunnel_params.h) | `cvc::pocket_tunnel` and its job (C++ only) |
 | [`secondary_params`](#secondary_params) | [`secondary_structures_params.h`](../inc/cvc/geometry/secondary_structures_params.h) | `cvc::find_secondary_structures` and its job (C++ only) |
+| [`tight_cocone_params`](#tight_cocone_params) | [`tight_cocone_params.h`](../inc/cvc/geometry/tight_cocone_params.h) | `cvc::tight_cocone`, `cvc cocone`, `cocone.tight`, `pycvc.tight_cocone_params`, the tight_cocone component's `<job>.params.*` keys ([ARIADNE.md](ARIADNE.md) §6.5) |
 
 The shared types' tables (`contour_read_params`, `contour_component`, `point_class_read_params`,
 `point_class`) are in [PORT_SHARED_TYPES.md](PORT_SHARED_TYPES.md).
@@ -262,3 +264,18 @@ The shared types' tables (`contour_read_params`, `contour_component`, `point_cla
 | `sheet_max_width` | number | `3` |  | 0 .. 1e+300 | sheets: the thickest polygon drawn |
 | `sheet_min_area` | number | `10` |  | 0 .. 1e+300 | sheets: a component of polygons smaller than this is never a sheet |
 | `sheet_count` | int | `2` |  | 0 .. 1e+09 | sheets: how many of the largest components are the sheets |
+
+## Tight Cocone
+
+### tight_cocone_params
+
+| Key | Type | Default | Unit | Range | Description |
+|---|---|---|---|---|---|
+| `robust` | bool | `0` |  |  | filter a noisy sample with Robust Cocone first |
+| `big_ball_ratio` | number | `0.0625` |  | 0 .. 1e+300 | Robust Cocone: a Delaunay ball is big when its squared radius exceeds this times a corner's mean squared nearest-neighbour distance |
+| `theta_if` | number | `0.08726646259971647` | rad | 0 .. 1.5707963267948966 | Robust Cocone: the angle below which a big ball meets the infinite one deeply |
+| `theta_ff` | number | `0.17453292519943295` | rad | 0 .. 3.141592653589793 | Robust Cocone: the angle below which two big balls meet deeply |
+| `cocone_phi` | number | `0.39269908169872414` | rad | 0 .. 1.5707963267948966 | Tight Cocone: half the cocone's opening angle around the surface |
+| `sharp_phi` | number | `2.0943951023931953` | rad | 0 .. 3.141592653589793 | Tight Cocone: facets meeting at more than this dihedral angle make a sharp edge (a constant in the legacy library) |
+| `flat_phi` | number | `1.0471975511965976` | rad | 0 .. 1.5707963267948966 | Tight Cocone: the normal deviation allowed between cocone neighbours of a flat point |
+| `flatness_ratio` | number | `1.44` |  | 0 .. 1e+300 | Tight Cocone: the squared thinness factor of a flat point |

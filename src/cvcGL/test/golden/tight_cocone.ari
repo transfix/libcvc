@@ -1,0 +1,48 @@
+# tight_cocone.ari — golden: the tight_cocone component (cvc://components/mesh/tight_cocone.ari;
+# the demo is examples/ariadne/documents/tight_cocone_lab.ari) at a fixed size. The app holds the
+# points: a dataset of the Stanford bunny decimated to 4000 triangles (data/bunny_4k.off, written
+# once by cvc::simplify, so every platform runs on the same points; only its 2000-odd vertices are
+# read), stood up 100 high by cvcGL's `mesh` generator as the demo's is. Once the dataset is ready, on_tick starts the component's run as the Run button does, and
+# tight-cocone-step puts the surface in the dataset as its output `surface`, which the scene draws.
+# The harness waits for tc.info.triangles (cvcgl_ari_golden.cpp's kCases) before the capture. The
+# main view then frames the bunny right of the window. Its ears are thinner than the sample's
+# spacing there, so they come out ragged: Tight Cocone needs a denser sample (the demo's 8,000
+# points close them).
+
+meta:
+  name: golden tight cocone
+  min_libcvc: 4.0.0
+
+import:
+  - cvc://components/mesh/tight_cocone.ari
+
+data:
+  points:
+    generate: mesh
+    params: { mesh: data/bunny_4k.off, fit: { height: 100, up: y } }
+
+on_tick: |
+  (if (and (= (state-get "data.points.status") "ready") (!= (state-get "tc.started") "1"))
+      (begin (state-set "tc.started" "1")
+             (tight-cocone-run "tc" "points" "geometry"))
+      #f)
+  (tight-cocone-step "tc" "points")
+  (if (and (!= (state-get "tc.framed") "1") (!= (or (state-get "tc.info.triangles") "") ""))
+      (begin (state-set "viewers.main.camera.frame" "-190 -70 -5 75 70 110")
+             (state-set "tc.framed" "1"))
+      #f)
+
+windows:
+  - include: tight_cocone
+    args: { job: tc, title: Tight Cocone }
+    pos: [16, 16]
+    size: [400, 540]
+
+scene:
+  chrome: false
+  background: { top: [0.10, 0.12, 0.16], bottom: [0.02, 0.02, 0.03] }
+  nodes:
+    # The surface through the points, once the run has put it in the dataset.
+    - node: surface
+      source: { data: points, item: surface }
+      material: { color: [0.72, 0.70, 0.78], ambient: 0.22, diffuse: 0.9 }

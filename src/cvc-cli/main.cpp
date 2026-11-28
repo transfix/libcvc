@@ -710,9 +710,9 @@ static int cmd_cocone(cvc::app &app, int argc, char **argv) {
       "  cvc cocone scan.off -o surface.off --robust\n");
   desc.add_options()("help,h", "show help")("input,i", po::value<std::string>()->required(),
                                             "input geometry (only its points are read)")(
-      "output,o", po::value<std::string>()->required(), "output geometry for the surface")(
-      "seconds", po::value<double>()->default_value(0.0),
-      "report progress every this many seconds (0: never)");
+      "output,o", po::value<std::string>()->required(),
+      "output geometry for the surface")("seconds", po::value<double>()->default_value(0.0),
+                                         "report progress every this many seconds (0: never)");
   cvc::add_param_options<cvc::tight_cocone_params>(desc);
 
   std::vector<std::string> notes;

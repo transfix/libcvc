@@ -26,7 +26,10 @@
 // TightCocone, PocketTunnel and Curation each copied with 10-25 lines changed. The ports share
 // this one copy: the skeleton's stages are in ../skeleton (skeleton_stages.h), PocketTunnel's in
 // ../pocket_tunnel. PocketTunnel's copies of init.cpp and tcocone.cpp are this code; its util.cpp
-// adds only cell_volume, which is here.
+// adds only cell_volume, which is here. Every port's stepper triangulates its points with
+// triangulate.h's one step; tight_cocone_stages.h has TightCocone's front end (Robust Cocone, the
+// triangulation, Tight Cocone's marking) and its surface, for cvc::tight_cocone and the ports that
+// start from them (surface curation, super-secondary structures).
 //
 // What changed on the way in:
 //   - CGAL's triangulation is cvc::tet_complex behind datastruct.h's adapter; CGAL:: calls are

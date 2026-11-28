@@ -9,10 +9,10 @@
 */
 
 // cvc::tight_cocone (cvc/geometry/tight_cocone.h), the VolumeRover TightCocone port
-// (docs/roadmap/VOLROVER-TEXMOL-APPS-ROADMAP.md §2.4, V1): legacy parity (T1, tools/volrover-goldens),
-// known shapes (T3), invariants (T4), bad input (T5), no singletons (T6), resumable (T7), and the
-// parameter table and its keys on the state tree (T8). Runs natively and under node (the ports
-// lane).
+// (docs/roadmap/VOLROVER-TEXMOL-APPS-ROADMAP.md §2.4, V1): legacy parity (T1,
+// tools/volrover-goldens), known shapes (T3), invariants (T4), bad input (T5), no singletons (T6),
+// resumable (T7), and the parameter table and its keys on the state tree (T8). Runs natively and
+// under node (the ports lane).
 
 #include "resumable_harness.h"
 
@@ -299,8 +299,8 @@ parity compare_with_legacy(const std::string &name, cvc::tight_cocone_result *ou
   const std::string key = "\"input\":\"";
   const std::size_t at = json.find(key);
   EXPECT_NE(at, std::string::npos) << name;
-  const std::string input = json.substr(at + key.size(), json.find('"', at + key.size()) -
-                                                             at - key.size());
+  const std::string input =
+      json.substr(at + key.size(), json.find('"', at + key.size()) - at - key.size());
   const pts_t p = read_points(root + "/tools/volrover-goldens/inputs/" + input);
   const legacy_surface want = read_tc(gdir + name + ".tc.txt");
   EXPECT_EQ(want.points, p.size()) << name;
@@ -333,11 +333,11 @@ TEST_F(TightCocone, MatchesTheLegacyLibrary) {
       std::string(CVC_REPO_DIR) + "/src/cvc/tests/data/volrover-goldens/tightcocone/";
   if (!std::ifstream(gdir + "capsule.tc.txt"))
     GTEST_SKIP() << "goldens not found in " << gdir;
-  // The triangulation is CGAL's cell for cell, and the port's Tight Cocone is the legacy code. Where
-  // its peeling meets close choices, it takes them in the cells' order: CGAL's memory order in the
-  // legacy, tet_complex's insertion order in the port (PocketTunnel's A/B found the same). So on
-  // most cases the surface is the legacy's, triangle for triangle and facing the same way; on the
-  // others both are surfaces of the same topology and nearly the same size that share most of
+  // The triangulation is CGAL's cell for cell, and the port's Tight Cocone is the legacy code.
+  // Where its peeling meets close choices, it takes them in the cells' order: CGAL's memory order
+  // in the legacy, tet_complex's insertion order in the port (PocketTunnel's A/B found the same).
+  // So on most cases the surface is the legacy's, triangle for triangle and facing the same way; on
+  // the others both are surfaces of the same topology and nearly the same size that share most of
   // their triangles.
   // The robust cases also differ from one legacy run to the next on Windows, whose heap orders the
   // cells differently each run (five runs on noisy_sphere gave two surfaces 162 triangles apart).
@@ -345,9 +345,11 @@ TEST_F(TightCocone, MatchesTheLegacyLibrary) {
   const struct {
     const char *name;
     double share;
-  } cases[] = {{"capsule", 1.0},           {"dumbbell", 1.0},        {"box_grid", 1.0},
-               {"pocket", 1.0},            {"helices_and_sheet", 1.0}, {"dumbbell_narrow", 1.0},
-               {"capsule_robust", 1.0},    {"torus", 0.95},          {"outlier_sphere", 0.90},          {"1grl", 0.97},
+  } cases[] = {{"capsule", 1.0},           {"dumbbell", 1.0},
+               {"box_grid", 1.0},          {"pocket", 1.0},
+               {"helices_and_sheet", 1.0}, {"dumbbell_narrow", 1.0},
+               {"capsule_robust", 1.0},    {"torus", 0.95},
+               {"outlier_sphere", 0.90},   {"1grl", 0.97},
                {"noisy_sphere", 0.90}};
   for (const auto &c : cases) {
     SCOPED_TRACE(c.name);
@@ -503,7 +505,9 @@ TEST_F(TightCocone, RobustCoconeFiltersANoisySample) {
   EXPECT_GT(t.volume, 0.0);
   EXPECT_GT(r.surface.const_tris().size(), 0u);
   for (std::size_t i = 0; i < r.point_index.size(); ++i) {
-    EXPECT_EQ(r.surface.const_points()[i], (cvc::geometry::point_t{{p[r.point_index[i]][0], p[r.point_index[i]][1], p[r.point_index[i]][2]}}));
+    EXPECT_EQ(r.surface.const_points()[i],
+              (cvc::geometry::point_t{
+                  {p[r.point_index[i]][0], p[r.point_index[i]][1], p[r.point_index[i]][2]}}));
     if (i > 0)
       EXPECT_LT(r.point_index[i - 1], r.point_index[i]) << "the surface's points in input order";
   }

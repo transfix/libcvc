@@ -47,6 +47,7 @@
 #include <cvc/gl/VolRenNode.h>
 #include <cvc/gl/ariadne/AriRuntime.h>
 #include <cvc/gl/ariadne/scene_realize.h>
+#include <cvc/state/state.h>
 #include <filesystem>
 #include <string>
 #include <thread>
@@ -108,6 +109,11 @@ struct PointerStep {
 struct GoldenCase {
   const char *name;
   std::vector<PointerStep> pointer;
+  // A state key under the document's prefix that its own programs fill once the frame is final,
+  // for a document whose work runs where no node's pending_work probe sees it (a DSL job a
+  // component starts, its result put in a dataset from on_tick): the capture waits until the key
+  // holds a value, then kMinFrames more, as for a node's work.
+  const char *until = nullptr;
 };
 const GoldenCase kCases[] = {
     // Click "File" on the menu bar: the dropdown opens on the press and stays open.
@@ -118,6 +124,9 @@ const GoldenCase kCases[] = {
     // Right-click the card (button 1, ImGui's right): its menu opens on the release and stays open.
     {"context_menu",
      {{1, 60.0f, 109.0f, -1, false}, {2, 60.0f, 109.0f, 1, true}, {3, 60.0f, 109.0f, 1, false}}},
+    // The tight_cocone component's run (a cocone.tight job, its surface put in the dataset by
+    // tight-cocone-step): the document's on_tick fills tc.info.triangles once it is in.
+    {"tight_cocone", {}, "tc.info.triangles"},
 };
 
 const GoldenCase *findCase(const std::string &name) {
@@ -322,6 +331,21 @@ bool runDocument(const fs::path &doc, const fs::path &goldenDir, const fs::path 
   // request a finished job left) starts the count over. A slow machine only takes more frames
   // here; a document whose nodes register no probe takes none. The ceiling is a hang guard.
   int workFrames = 0;
+  if (gc && gc->until) {
+    const std::string key =
+        rt.prefix().empty() ? std::string(gc->until) : rt.prefix() + "." + gc->until;
+    const auto start = std::chrono::steady_clock::now();
+    while (cvc::state::instance(app)(key).value().empty() &&
+           std::chrono::steady_clock::now() - start < kSettleCeiling) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+      rt.step(kDt);
+      ++workFrames;
+    }
+    check(!cvc::state::instance(app)(key).value().empty(),
+          name + ": its document filled " + gc->until, std::to_string(workFrames) + " frames more");
+    for (int f = 0; f <= kMinFrames; ++f, ++workFrames)
+      rt.step(kDt);
+  }
   const cvc::gl::ariadne::RealizedScene *realized = rt.realized();
   if (realized && !realized->pending_work.empty()) {
     const auto busy = [&] {
