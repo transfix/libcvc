@@ -11,6 +11,7 @@
 
 set(CVC_PORT_TESTS
   param_table_test
+  port_parameters_doc_test
   result_job_test
   job_intrinsics_test
   tet_complex_test
@@ -96,4 +97,8 @@ target_compile_definitions(tiler_test PRIVATE
 target_compile_definitions(molecule_test PRIVATE
   CVC_REPO_DIR="${CMAKE_CURRENT_LIST_DIR}/../../..")
 target_compile_definitions(blur_test PRIVATE
+  CVC_REPO_DIR="${CMAKE_CURRENT_LIST_DIR}/../../..")
+
+# port_parameters_doc_test checks docs/PORT_PARAMETERS.md's tables against params_markdown<P>().
+target_compile_definitions(port_parameters_doc_test PRIVATE
   CVC_REPO_DIR="${CMAKE_CURRENT_LIST_DIR}/../../..")

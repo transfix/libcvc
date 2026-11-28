@@ -9,16 +9,14 @@ declarations printed by `cvc::params_markdown<P>()`, the generator that ships wi
 `cvc::param_table`. They are not written by hand.
 
 **Generated** on 2026-11-27 from transfix/libcvc master at fc507d7e0. Each table is the
-generator's output exactly; the headings and the "Read by" lines are not generated. To regenerate,
-compile a program against libcvc that prints `cvc::params_markdown<P>()` for each struct below
-(each struct's header is under "Header"), then paste its output over the tables:
-
-```cpp
-#include <cvc/geometry/skeleton_params.h>   // ... and the other headers named below
-#include <cstdio>
-template <class P> void emit() { std::printf("%s\n", cvc::params_markdown<P>().c_str()); }
-int main() { emit<cvc::skeleton_params>(); /* ... one line per struct */ }
-```
+generator's output exactly; the headings and the "Read by" lines are not generated.
+`port_parameters_doc_test` ([`src/cvc/tests/port_parameters_doc_test.cpp`](../src/cvc/tests/port_parameters_doc_test.cpp))
+keeps them current: it checks each `### <struct>` table against `cvc::params_markdown<P>()`, and
+when a param_table changes it fails and prints the table to paste over the old one. A table added
+here goes into the test's list too, and the test fails until both have it. The numbers are as
+`std::to_chars` prints them, so the tables are compared only where the standard library has
+floating `to_chars`. The wasm-mt build's libc++ has none, and there `format_double` spells some
+ranges longer (`1000000000` for `1e+09`).
 
 pycvc prints the same table for the structs it wraps: `pycvc.skeleton_params.markdown()`.
 

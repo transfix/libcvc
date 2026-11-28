@@ -46,8 +46,9 @@
 // grid.contours.xz and grid.contours.zy (the y and x planes'), grid.surfaces.<object> (each tiled
 // surface, a cvc::geometry; '.' and white space in a name are '_').
 //
-// CHILDREN: on each slice, `contours` (the curves on that plane, lines) and `contour_points` (their
-// control points, disks, and the selection's rings); in the grid's `surfaces` group, `contours`
+// CHILDREN: on each slice, `contours` (lines: the curves on that plane, the rings around the
+// selected control points and the active end, and the band) and `contour_points` (the control
+// points, disks); in the grid's `surfaces` group, `contours`
 // (every plane's curves, for the 3D view) and `tiles` (a surface per object tiled).
 #ifndef CVC_GL_VOLUMEGRIDCONTOURS_H
 #define CVC_GL_VOLUMEGRIDCONTOURS_H
