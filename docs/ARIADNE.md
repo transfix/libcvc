@@ -2858,6 +2858,17 @@ scene:
     `nearest_free` the first no vehicle is near. A point a vehicle sits on moves the new vehicle
     aside along the point's normal. With no point to take, a vehicle starts at a free point of
     the grid, on its medium.
+  - **Avatars** (ARISRV_SCENES SC1). `archetype: avatar`, or an avatar archetype's id, makes a
+    point an avatar's only, and an untagged point serves avatars too; a point tagged with a
+    vehicle is never an avatar's. The relay's holon (`holon::set_avatar_spawns`, which arisrv
+    calls with the document's spawns: the room itself carries none) starts each joiner at one by
+    the same policies (`nearest_free`: no other avatar within 1.5 m), facing its heading; with
+    none, on the 4 m ring round the origin. Either way its feet go on the first static surface
+    straight down (`holon::ground_at`: a terrain, a building, a floor, never something that
+    moves), so a joiner on a generated world or a city stands on it. One with no ground beneath
+    it comes back once `respawn_depth` (10 m) below where it last stood, or below
+    `respawn_below_z` (-10 m): at a spawn point, or where it joined when the world has none. One
+    over ground never respawns, however low the ground.
   - **Suggestions.** `spawns.suggest.request` samples points along the world's roads (a generated
     world's road mesh; a terrain or a flat ground has none): one per `suggest.spacing` metres
     square, at most `suggest.count`, free in the grid and out of water deeper than a ford, each
