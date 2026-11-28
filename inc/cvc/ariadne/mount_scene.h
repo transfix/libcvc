@@ -8,7 +8,7 @@
 // binds its datasets at the mount's sub-prefix as the mount opens; a host with a SceneAdapter
 // realizes its scene there (SceneAdapter::realize_mount), and the mount's scene window shows it.
 
-#include <cvc/ariadne/data.h>  // DataSpec
+#include <cvc/ariadne/data.h> // DataSpec
 #include <cvc/ariadne/scene.h> // Scene
 #include <string>
 #include <vector>
