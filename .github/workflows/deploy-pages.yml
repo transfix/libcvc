@@ -166,9 +166,9 @@ jobs:
             --prefix "$CVC_WASM_DEPS" \
             --platform any --config release --link shared \
             --no-fallback-to-source || echo "  (scene bundles absent — nav_scrub falls back to its generated world)"
-          # xterm.js for the ari pages, served beside them (src/ari/CMakeLists.txt); without it the
-          # configure downloads the same pinned npm packages.
-          cvcpkg install xterm-js xterm-js-addon-fit xterm-js-addon-webgl \
+          # xterm.js and its addons for the ari pages, served beside them (src/ari/CMakeLists.txt);
+          # without them the configure downloads the same pinned npm packages.
+          cvcpkg install xterm-js xterm-js-addon-fit xterm-js-addon-webgl xterm-js-addon-image \
             --prefix "$CVC_WASM_DEPS" \
             --platform any --config release --link shared \
             --no-fallback-to-source || echo "  (xterm-js packages absent — the configure downloads xterm.js)"

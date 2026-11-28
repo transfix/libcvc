@@ -1396,8 +1396,8 @@ jobs:
           cvcpkg install-deps cvcpkg/recipes/arigl-web --prefix "$WASM_DEPS" \
             --platform wasm --arch wasm32 --config release --link static --no-fallback-to-source
           # Noarch, so not resolvable from the recipe's (static) wasm deps: the recipe says why.
-          cvcpkg install xterm-js xterm-js-addon-fit xterm-js-addon-webgl --prefix "$WASM_DEPS" \
-            --platform any --config release --link shared --no-fallback-to-source
+          cvcpkg install xterm-js xterm-js-addon-fit xterm-js-addon-webgl xterm-js-addon-image \
+            --prefix "$WASM_DEPS" --platform any --config release --link shared --no-fallback-to-source
 
       - name: Build arigl-web (wasm, single-threaded) with the recipe's script
         if: steps.paths.outputs.run == 'true'
@@ -1409,6 +1409,9 @@ jobs:
           grep -q "ari: xterm.js for the browser page from $WASM_DEPS/share/xterm.js" \
             build-arigl-web/configure.log \
             || { echo "::error::ari's page did not take xterm.js from the prefix's xterm-js packages"; exit 1; }
+          grep -qF "ari: xterm.js's image addon for the browser page from $WASM_DEPS/share/xterm.js" \
+            build-arigl-web/configure.log \
+            || { echo "::error::ari's page did not take the image addon from the prefix's xterm-js-addon-image"; exit 1; }
 
       - name: Load a document set in headless Chrome
         if: steps.paths.outputs.run == 'true'

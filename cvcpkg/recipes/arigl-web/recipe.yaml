@@ -62,11 +62,13 @@ depends:
     - name: ftxui
     - name: tvision
       platforms: [wasm]
-    # xterm.js and its fit and WebGL addons (cvcpkg's xterm-js, xterm-js-addon-fit and
-    # xterm-js-addon-webgl, noarch, share/xterm.js/), which the ari pages serve beside them, are not
-    # listed: a wasm resolve is static, and cvcpkg (2.5.8) matches no static request to their noarch
-    # shared bundles. Install them into the deps prefix beside this list:
-    #   cvcpkg install xterm-js xterm-js-addon-fit xterm-js-addon-webgl --platform any --prefix <deps>
+    # xterm.js and its fit, WebGL and image addons (cvcpkg's xterm-js, xterm-js-addon-fit,
+    # xterm-js-addon-webgl and xterm-js-addon-image, noarch, share/xterm.js/), which the ari pages
+    # serve beside them, are not listed: a wasm resolve is static, and cvcpkg (2.5.8) matches no
+    # static request to their noarch shared bundles. Install them into the deps prefix beside this
+    # list:
+    #   cvcpkg install xterm-js xterm-js-addon-fit xterm-js-addon-webgl xterm-js-addon-image \
+    #     --platform any --prefix <deps>
     # src/ari/CMakeLists.txt takes them from there; without them it downloads the same pinned npm
     # packages.
     # cvcGL's conference video (mjpeg).
