@@ -1,6 +1,8 @@
 # VolumeRover and TexMol as Ariadne Applications — Roadmap (sketch)
 
-**Status:** sketch, 2026-11-27. Nothing in it is built. §9 lists the decisions for Joe.
+**Status:** 2026-11-28. Joe accepted every §9 recommendation, then moved PEDetection from "left
+behind" to a port, V11 (§9). CC1, PP1, V0, V1 and M0b have started, in parallel sessions; nothing
+of them has landed yet.
 
 **Asked for (Joe, 2026-11-27):** "surely we arent done with the porting. we need whatever is left
 in volrover and texmol that we havent ported, then we need new versions of both volrover and texmol
@@ -57,10 +59,11 @@ as ariadne applications and component collections".
   super-secondary structures, the HLS surface, MMHLS, the level-set segmentations, the virus-map
   segmentations, SecStruct's density-based secondary structure, and SweetMesh's hex meshes. SDF2D
   (V10) waits until someone wants it.
+- Sangmin Park's pulmonary-embolism detection (PEDetection) is V11. It starts with a feasibility
+  step, because it has never run in volrover's build.
 - ET Reconstruction is reserved by its authors ("All right are reserved") and links GPL FFTW, so it
   stays behind unless they relicense it.
-- Left behind: PEDetection, ContourFilter, SweetLBIE, the multi-tile server, the ray tracer and
-  SegServ (§2.3).
+- Left behind: ContourFilter, SweetLBIE, the multi-tile server, the ray tracer and SegServ (§2.3).
 
 **What is left of TexMol** (§3): M0 part 2 with the molecular scene nodes, T1 part 2, T2 (whose
 HLevelSet is the same port as VolumeRover's HLS surface), T3, T4, T5's CLI, pycvc and intrinsics,
@@ -162,7 +165,7 @@ SecondaryStructures.
 | Reconstruction | Iterative B-spline electron tomography (CIMOR) from SPIDER tilt series | 16.5k | "All right are reserved by The National Key Lab of Scientific and Engineering Computing, CAS" | FFTW3 (GPL), Qt3 APIs | ET Reconstruction | Only filtered back-projection (`vol_back_project`), a different algorithm |
 | SDF2D (in VolumeGridRover) | A 2D signed distance image of contour polygons | 762 | UT LGPL-2.1 | CGAL Spatial_searching and Partition_2 (GPL) | None (its callers are commented out) | No; `cvc::planar` and nanoflann are the parts it needs |
 | SweetLBIE | Experimental octree hex meshing | 485 | None | SweetMesh | None | No |
-| PEDetection | Pulmonary-embolism detection on CT: vessels, thinning, quantification | about 54k compiled (plus 9.6k of tables) | UT LGPL-2.1 | Pre-standard STL (`<map.h>`) | None | No |
+| PEDetection | Pulmonary-embolism detection on contrast CT (Sangmin Park, 2006): materials, lungs, heart, arteries, clots | about 54k compiled (plus 9.6k of tables) | UT LGPL-2.1 | Pre-standard STL (`<map.h>`) | None | No |
 | ContourFilter | Reconstruct `.ser` reading and spline smoothing by simulated annealing | 5.3k | None; an Eberly snippet is "All Rights Reserved" | STL | None directly | The `.ser` reader (`cvc/geometry/contours.h`) |
 
 **Already in libcvc,** so not in the table:
@@ -181,13 +184,22 @@ SecondaryStructures.
   licence, links GPL FFTW, and blocks on `getchar()` about 31 times. Its build is off and its
   `add_subdirectory` is misspelled (`src/CMakeLists.txt:166-170`). libcvc keeps filtered
   back-projection. §9 item 4.
-- **PEDetection.** No dialog uses it, its build is off ("doesn't work for most compilers"), and it
-  has about 245 `exit()` calls. A port would be a rewrite for a use no one has asked for. §9 item 5.
-- **ContourFilter,** as the VolumeRover plan's §8 already says: no licence, a singleton, an "All
-  Rights Reserved" snippet. The `.ser` reader is in libcvc; the smoothing comes back only if a
-  dataset needs it.
-- **SweetLBIE:** no licence, experimental, and it names constructors as types, which modern
-  compilers reject.
+- **ContourFilter,** as the VolumeRover plan's §8 already says.
+  - It is Justin Kinney's `reconstruct2contourtiler` (2009). It reads Reconstruct `.ser` series,
+    fits splines to each contour, smooths them by simulated annealing and writes the tiler's input.
+  - No VolumeRover2 dialog calls it; ContourTiler only includes one of its headers.
+  - Kinney's files carry no licence, and he is not a CVC author, so §9 item 3's precedent does not
+    cover them. It also keeps its settings in a `Controls::instance()` singleton and holds a
+    point-to-segment distance marked "All Rights Reserved" (Eberly, `parameter.cc:46-52`).
+  - libcvc already reads `.ser` (`cvc/geometry/contours.h`). If smoothing noisy traced contours is
+    wanted, it would be a clean implementation of the method in P10's Contours tab, not a port.
+- **SweetLBIE:** an unfinished start on Zhang and Bajaj's adaptive hex meshing, which LBIE, already
+  in libcvc, implements in full.
+  - `generateOctree` lays a uniform grid, and three of its four subdivision patterns
+    (`dividePattern_edge`, `_face` and `_all` in `meshGeneration.cpp`) are empty.
+  - VolumeRover2 includes its header but never calls it.
+  - It has no licence header (§9 item 3 would cover that), and it names constructors as types,
+    which modern compilers reject.
 - **The multi-tile server** (XML-RPC to a display wall, §1.10), **the ray tracer** (it writes
   `test.cnf` to the current directory; `volren` and "Save image" cover the need), **SegServ** (the
   XML-RPC front of the segmentations) and the **Slice Rendering** dialog (a stub).
@@ -279,6 +291,56 @@ continues from that plan's P11.
   nanoflann, as a `grid-contours.sdf` action in P10's Contours tab. Its legacy callers are commented
   out and contour curation never existed in volrover, so this is new function, not parity. It waits
   until someone needs it.
+- **V11 Pulmonary-embolism detection (L, behind a feasibility step).** Sangmin Park's PEDetection
+  (UT LGPL-2.1 on every file, 2006, advisor Bajaj). Joe, 2026-11-28: "it would be nice to get this
+  working if possible/practical".
+  - **What it does** (`src/PEDetection/main.cpp`, `Control.cpp`, `VesselSeg.cpp`):
+    1. anisotropic diffusion of the CT volume;
+    2. gradient vectors, and GVF seed points;
+    3. second derivatives;
+    4. EM classification into eight materials from the histogram, seeded by the GVF points;
+    5. `VesselExtraction`: the lungs, the heart, the pulmonary arteries traced by chains of maximal
+       spheres from the heart outward, seed-point vessel extraction and skeletonisation;
+    6. `PE_Detection` on the thickened vessel volume: clots are darker regions inside the
+       contrast-filled arteries.
+  - **What libcvc already has:** anisotropic diffusion, bilateral filtering, gradient vector
+    diffusion, critical points and seed generators, fast marching, the skeleton, marching cubes and
+    octrees.
+  - **Where the new code is.** 53.7k lines are compiled.
+    - The new algorithm is the EM classification (about 2k lines with its initialisation) and
+      `VesselSeg.cpp` (26.8k lines, 215 member functions).
+    - `TFGeneration.cpp` (7.8k) generates transfer functions for rendering, and `Control.cpp`
+      (4.3k) is mostly debug image writers.
+    - About 90k more lines of backups and alternatives (`VesselSeg_backup*.cpp`, `VesselSeg2D*.cpp`,
+      `Skeleton_Org.cpp` and others) are not compiled.
+  - **Why it needs a feasibility step:**
+    - it is off in volrover's build ("doesn't work for most compilers") and uses pre-standard
+      headers (`<map.h>`, `<iostream.h>`, `<fstream.h>`);
+    - its compiled code has 207 `exit()` calls, keeps every parameter in a global (`*_gi`, `*_gf`,
+      `VesselSeg_g`), picks its stages with `#define`s in `CompileOptions.h`, and writes
+      intermediate files beside the input;
+    - it reads the eight EM clusters by fixed index (lungs 1–2, soft tissue 3, muscle 4, vessels
+      5–6; `Control.cpp`, around line 1000), as tuned on the 2006 Houston scans (512×512×181,
+      clipped to `uchar`), so whether it generalises is unknown;
+    - those scans are not available here.
+  - **V11a, the feasibility step (S–M):**
+    - build the legacy library and a driver in a goldens tool, as `tools/texmol-goldens` and the
+      volrover goldens do, with only the fixes it needs to compile;
+    - run it on public CT pulmonary angiograms that have expert PE masks (FUMPE or CAD-PE; check
+      their licences before any is committed or fetched by CI);
+    - report whether its classification, lungs, artery tree and detections are sensible, and how its
+      detections compare with the masks.
+
+    It ends in a report and Joe's go or stop. Nothing is ported before then.
+  - **V11b–V11d, if it goes:**
+    - V11b: the EM material classification as a `cvc::volume` job, useful beyond CT, with each
+      cluster's role found from the data rather than by a fixed index;
+    - V11c: the lung, heart and artery segmentation and the detection, as resumable steppers whose
+      results are label volumes and a candidate list on the state tree, with an A/B against V11a's
+      outputs;
+    - V11d: `volume/pe_detection.ari` with a demo, and arirov's window for it. That window is new
+      function, since VolumeRover2 never had one.
+  - It is research code. Its component and docs say it is not for clinical use.
 
 ---
 
@@ -355,7 +417,7 @@ The TexMol plan's open decisions (its §9 items 1, 2, 3, 5 and 6, and T0) stay o
 
 | Collection | Moves into it | Comes from the ports |
 |---|---|---|
-| `volume/` | `volume_grid`, `volume_grid_segmentation`, `volren_controls`, `volslice_controls`, `transfer_function` | `volume_filters` (V0), `hls_surface` (V4), `level_set` (V6), `virus_segmentation` (V7), `multi_domain_mesh` (V5) |
+| `volume/` | `volume_grid`, `volume_grid_segmentation`, `volren_controls`, `volslice_controls`, `transfer_function` | `volume_filters` (V0), `hls_surface` (V4), `level_set` (V6), `virus_segmentation` (V7), `multi_domain_mesh` (V5), `pe_detection` (V11) |
 | `mesh/` | `mesh_tools` (with the skeleton), `fe_controls` (LBIE), `contour_tiler` | `tight_cocone` (V1), `curation` (V2), `super_secondary` (V3), `pocket_tunnel` and `secondary_structures` (T5, V8), hex meshes in `fe_controls` (V9) |
 | `mol/` | — | the molecule view and its styles (M0 part 2), surfaces (T1), pockets (T2), characteristics and interfaces (T3), curvature and colouring (T6), docking (F3, from aridock) |
 | `dev/` | `processes`, `py_console` | the state inspector and exec console (§7.3), `jobs` (J1, §7.5) |
@@ -579,6 +641,8 @@ Sizes as in the VolumeRover plan: S is a PR or two, M a few, L a short series.
 | V8 SecStruct | M | §2.4 | T5's component, §9 item 3 |
 | V9 Hex meshes | S–M | §2.4 | §9 item 3 |
 | V10 SDF2D | S | §2.4, when wanted | — |
+| V11a PEDetection feasibility | S–M | §2.4: the legacy build, runs on public CT angiograms, a report | — |
+| V11b–V11d PEDetection | L | §2.4 | V11a and Joe's go |
 | T5b | S | T5's CLI, pycvc, intrinsics, `mesh_lab` request and components | CC1 |
 | M0b | L | M0 part 2 with the molecular scene nodes | — |
 | T1b | M–L | T1 part 2 | — |
@@ -591,7 +655,7 @@ Sizes as in the VolumeRover plan: S is a PR or two, M a few, L a short series.
 | AM3 arimol in the shell, retirement | S–M | §6.3 | AM2, as AR3 |
 
 **Parallel tracks.**
-- CC1, PP1, SDK-7, SDK-4, V0, V1, V4, V6 and M0b share no files and can start at once.
+- CC1, PP1, SDK-7, SDK-4, V0, V1, V4, V6, V11a and M0b share no files and can start at once.
 - The V ports run as separate sessions, as P1–P10 did. V2 and V3 follow V1; V5 follows V4.
 - AR1 is the first app milestone. It mostly assembles what exists, so it shows the app shape early
   and makes every later port land as a window in a running app.
@@ -601,6 +665,10 @@ Sizes as in the VolumeRover plan: S is a PR or two, M a few, L a short series.
 ---
 
 ## 9. Decisions for Joe
+
+**Answered 2026-11-28.** Joe accepted every recommendation below ("Yes, all of them"). He then
+moved PEDetection out of item 5: "this was pulmonary embolism detection by sangmin park, it would be
+nice to get this working if possible/practical". It is V11 (§2.4).
 
 1. **Build the apps from component collections, not by conversion.**
    - cyconv's §7 and §8 build arirov and arimol by converting their Qt UIs with a probe and a
@@ -636,16 +704,15 @@ Sizes as in the VolumeRover plan: S is a PR or two, M a few, L a short series.
 4. **ET Reconstruction.** It is "All right are reserved" by CAS, with no licence, and links GPL FFTW.
    **Recommended:** leave it behind unless its authors relicense it. libcvc's filtered back-projection
    stays.
-5. **What else stays behind:** PEDetection, ContourFilter, SweetLBIE, the multi-tile server, the ray
-   tracer and SegServ (§2.3). **Recommended:** as listed. PEDetection is the one with a use (CT
-   vessel analysis) if anyone wants it later.
+5. **What else stays behind:** ContourFilter, SweetLBIE, the multi-tile server, the ray tracer and
+   SegServ (§2.3). **Recommended:** as listed. PEDetection was on this list; it is now V11.
 6. **The level-set segmentations' CUDA.** **Recommended:** a CPU stepper first, for wasm and the A/B,
    then the CUDA kernels as an option on the per-device cache.
 7. **The collections.** **Recommended:** domain collections (`volume/`, `mesh/`, `mol/`, `dev/`) that
    both apps assemble, with forwarders at the old paths. The alternative is one collection per app
    (`volrover/`, `texmol/`), which would split shared windows such as the volume grid between them.
 8. **Names:** arirov and arimol (from cyconv's D3); the collections `volume`, `mesh`, `mol` and
-   `dev`; `cvc::tight_cocone` and `cvc cocone`; the phase names CC1, PP1, V0–V10, AR1–AR3 and
+   `dev`; `cvc::tight_cocone` and `cvc cocone`; the phase names CC1, PP1, V0–V11, AR1–AR3 and
    AM1–AM3.
 9. **Where to start.** **Recommended:** CC1, PP1, V0, V1 and M0b first, in parallel sessions, then
    AR1 as soon as CC1, PP1 and the two widget phases land.

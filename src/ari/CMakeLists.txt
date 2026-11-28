@@ -450,7 +450,43 @@ if(EMSCRIPTEN)
   #   a download     the same pinned npm packages, checked by SHA-256, fetched once into the build
   #                  tree
   # All three are xterm.js 5.5.0, addon-fit 0.10.0 and addon-webgl 0.18.0: the files whose SRI
-  # hashes the page pinned when it loaded them from jsDelivr.
+  # hashes the page pinned when it loaded them from jsDelivr. The image addon (below) is looked for
+  # on its own, the same three ways.
+  #
+  # _ari_xterm_npm(SPEC): fetch a pinned @xterm npm package once into the build tree, checked by
+  # SHA-256, and copy the files wanted from its package/ into xterm/. SPEC is
+  # name|version|tarball SHA-256|from>to,from>to...
+  function(_ari_xterm_npm spec)
+    string(REPLACE "|" ";" spec "${spec}")
+    list(GET spec 0 _name)
+    list(GET spec 1 _ver)
+    list(GET spec 2 _sha)
+    list(GET spec 3 _files)
+    set(_tgz "${CMAKE_CURRENT_BINARY_DIR}/_xterm-dl/${_name}-${_ver}.tgz")
+    set(_unpacked "${CMAKE_CURRENT_BINARY_DIR}/_xterm-dl/${_name}-${_ver}")
+    if(NOT EXISTS "${_unpacked}/package")
+      file(DOWNLOAD "https://registry.npmjs.org/@xterm/${_name}/-/${_name}-${_ver}.tgz" "${_tgz}"
+           EXPECTED_HASH SHA256=${_sha} TLS_VERIFY ON STATUS _st)
+      list(GET _st 0 _code)
+      if(NOT _code EQUAL 0)
+        message(FATAL_ERROR "ari: could not download @xterm/${_name} ${_ver} for ari's page (${_st}); "
+                            "install cvcpkg's xterm-js packages in the prefix, or set CVC_XTERM_DIR")
+      endif()
+      file(MAKE_DIRECTORY "${_unpacked}")
+      execute_process(COMMAND "${CMAKE_COMMAND}" -E tar xzf "${_tgz}"
+                      WORKING_DIRECTORY "${_unpacked}" RESULT_VARIABLE _rc)
+      if(NOT _rc EQUAL 0)
+        message(FATAL_ERROR "ari: could not unpack ${_tgz}")
+      endif()
+    endif()
+    string(REPLACE "," ";" _files "${_files}")
+    foreach(_map IN LISTS _files)
+      string(REPLACE ">" ";" _map "${_map}")
+      list(GET _map 0 _from)
+      list(GET _map 1 _to)
+      configure_file("${_unpacked}/package/${_from}" "${_ari_xterm}/${_to}" COPYONLY)
+    endforeach()
+  endfunction()
   set(CVC_XTERM_DIR "" CACHE PATH
       "xterm.js 5.5.0 + addon-fit 0.10.0 + addon-webgl 0.18.0 for ari's page (empty: the prefix, else download)")
   set(_ari_xterm "${CMAKE_CURRENT_BINARY_DIR}/xterm")
@@ -500,37 +536,38 @@ if(EMSCRIPTEN)
         "addon-fit|0.10.0|917ac44972453d5eed52edc1e50260c76398ce48cf2290c2e60671102bba0b33|lib/addon-fit.js>addon-fit.js,LICENSE>LICENSE.addon-fit"
         "addon-webgl|0.18.0|6229e5c0b66a9de0e155602e90586605c53b91d6af657a6cbe2b8377d6019370|lib/addon-webgl.js>addon-webgl.js,LICENSE>LICENSE.addon-webgl")
     foreach(_pkg IN LISTS _ari_xterm_pkgs)
-      string(REPLACE "|" ";" _pkg "${_pkg}")
-      list(GET _pkg 0 _name)
-      list(GET _pkg 1 _ver)
-      list(GET _pkg 2 _sha)
-      list(GET _pkg 3 _files)
-      set(_tgz "${CMAKE_CURRENT_BINARY_DIR}/_xterm-dl/${_name}-${_ver}.tgz")
-      set(_unpacked "${CMAKE_CURRENT_BINARY_DIR}/_xterm-dl/${_name}-${_ver}")
-      if(NOT EXISTS "${_unpacked}/package")
-        file(DOWNLOAD "https://registry.npmjs.org/@xterm/${_name}/-/${_name}-${_ver}.tgz" "${_tgz}"
-             EXPECTED_HASH SHA256=${_sha} TLS_VERIFY ON STATUS _st)
-        list(GET _st 0 _code)
-        if(NOT _code EQUAL 0)
-          message(FATAL_ERROR "ari: could not download @xterm/${_name} ${_ver} for ari's page (${_st}); "
-                              "install cvcpkg's xterm-js packages in the prefix, or set CVC_XTERM_DIR")
-        endif()
-        file(MAKE_DIRECTORY "${_unpacked}")
-        execute_process(COMMAND "${CMAKE_COMMAND}" -E tar xzf "${_tgz}"
-                        WORKING_DIRECTORY "${_unpacked}" RESULT_VARIABLE _rc)
-        if(NOT _rc EQUAL 0)
-          message(FATAL_ERROR "ari: could not unpack ${_tgz}")
-        endif()
-      endif()
-      string(REPLACE "," ";" _files "${_files}")
-      foreach(_map IN LISTS _files)
-        string(REPLACE ">" ";" _map "${_map}")
-        list(GET _map 0 _from)
-        list(GET _map 1 _to)
-        configure_file("${_unpacked}/package/${_from}" "${_ari_xterm}/${_to}" COPYONLY)
-      endforeach()
+      _ari_xterm_npm("${_pkg}")
     endforeach()
     message(STATUS "ari: xterm.js for the browser page downloaded from registry.npmjs.org")
+  endif()
+  # xterm.js's image addon 0.8.0 (the release for xterm.js 5.5): Sixel and iTerm2 inline images,
+  # which ari draws a document's pictures with when the page config asks (--graphics sixel; see
+  # web/ari-web.js). From CVC_XTERM_DIR or a prefix's share/xterm.js (cvcpkg's
+  # xterm-js-addon-image) when it is there, else the pinned npm package.
+  set(_ari_image_from "")
+  set(_ari_image_dirs "${CVC_XTERM_DIR}")
+  foreach(_p IN LISTS CMAKE_PREFIX_PATH CMAKE_FIND_ROOT_PATH)
+    list(APPEND _ari_image_dirs "${_p}/share/xterm.js")
+  endforeach()
+  foreach(_d IN LISTS _ari_image_dirs)
+    if(_d AND EXISTS "${_d}/addon-image.js")
+      set(_ari_image_from "${_d}")
+      break()
+    endif()
+  endforeach()
+  if(_ari_image_from)
+    configure_file("${_ari_image_from}/addon-image.js" "${_ari_xterm}/addon-image.js" COPYONLY)
+    # A prefix keeps its licence in share/doc/xterm-js-addon-image/; CVC_XTERM_DIR's LICENSE*
+    # files were copied above.
+    get_filename_component(_root "${_ari_image_from}/../.." ABSOLUTE)
+    if(EXISTS "${_root}/share/doc/xterm-js-addon-image/LICENSE")
+      configure_file("${_root}/share/doc/xterm-js-addon-image/LICENSE"
+                     "${_ari_xterm}/LICENSE.addon-image" COPYONLY)
+    endif()
+    message(STATUS "ari: xterm.js's image addon for the browser page from ${_ari_image_from}")
+  else()
+    _ari_xterm_npm("addon-image|0.8.0|002f7492884300c0ed691bbe7381263d066b6b074d531b131466d8c774565fc0|lib/addon-image.js>addon-image.js,LICENSE>LICENSE.addon-image")
+    message(STATUS "ari: xterm.js's image addon for the browser page downloaded from registry.npmjs.org")
   endif()
   # The page goes next to <target>.js, with its names filled in by a plain replace (it has no
   # configure_file-style variables). Its loader and style sheet, and xterm/, go beside it; the

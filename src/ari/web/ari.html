@@ -5,8 +5,8 @@
   (src/ari/CMakeLists.txt, ari_wasm_page, which fills in the module, label, document name and
   default): ari.html for FTXUI's Emscripten screen, ari_tvision.html for the tvision desktop
   (tvision's browser console, from cvcpkg's wasm tvision). Beside it: ari-web.js (the loader,
-  which documents the wiring), ari-web.css, and xterm/ (xterm.js and its fit and WebGL addons,
-  the pinned npm packages, with their licenses). Serve that directory over http.
+  which documents the wiring), ari-web.css, and xterm/ (xterm.js and its fit, WebGL and image
+  addons, the pinned npm packages, with their licenses). Serve that directory over http.
 
   The document: with ?src=<url> (resolved against this page), or a page config naming one, ari
   runs that document: it fetches it and the files it imports before the load, from this page's
@@ -39,6 +39,7 @@
 <script src="xterm/xterm.js"></script>
 <script src="xterm/addon-fit.js"></script>
 <script src="xterm/addon-webgl.js"></script>
+<script src="xterm/addon-image.js"></script>
 <script src="ari-web.js"></script>
 </body>
 </html>

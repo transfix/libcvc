@@ -265,6 +265,26 @@ TEST(RoomAvatar, ThePolicyAndAReserveRoundTrip) {
   EXPECT_EQ(t, 77u);
 }
 
+// An avatar's motion (walker@2, OW9c): nothing while it has only walked, so a dry world's tree is
+// unchanged; then what it is doing in the water, back to walking once it was anything else.
+TEST(RoomAvatar, TheMotionIsPublishedOnceItLeavesTheLand) {
+  cvc::app app;
+  using cvc::ariadne::avatar_motion;
+  avatar_motion m = avatar_motion::swimming;
+  conf::write_avatar_motion(app, "r", "A", avatar_motion::walking);
+  EXPECT_FALSE(conf::read_avatar_motion(app, "r", "A", m)) << "only walked: nothing written";
+  conf::write_avatar_motion(app, "r", "A", avatar_motion::wading);
+  ASSERT_TRUE(conf::read_avatar_motion(app, "r", "A", m));
+  EXPECT_EQ(m, avatar_motion::wading);
+  conf::write_avatar_motion(app, "r", "A", avatar_motion::swimming);
+  ASSERT_TRUE(conf::read_avatar_motion(app, "r", "A", m));
+  EXPECT_EQ(m, avatar_motion::swimming);
+  conf::write_avatar_motion(app, "r", "A", avatar_motion::walking);
+  ASSERT_TRUE(conf::read_avatar_motion(app, "r", "A", m));
+  EXPECT_EQ(m, avatar_motion::walking) << "out of the water again";
+  EXPECT_FALSE(cvc::ariadne::avatar_motion_of("flying", m));
+}
+
 // Across the wire: the relay's catalog reaches a client, the client's choice reaches the relay and
 // the other client, and both clients resolve the chooser's look the same -- the chooser included.
 // The relay's write gate lets a participant write its own choice and nothing else.
@@ -360,7 +380,7 @@ TEST(RoomAvatar, ThePanelPublishesTheBudgetLedgerAndHistory) {
   EXPECT_EQ(get("ready"), "1");
   EXPECT_EQ(get("look.color"), "Teal");
   EXPECT_EQ(get("look.accessory"), "Cap");
-  EXPECT_EQ(get("controller"), "walker@1") << "the room's (its rules' default)";
+  EXPECT_EQ(get("controller"), "walker@2") << "the room's (its rules' default)";
   EXPECT_EQ(get("body"), "0.50 x 0.50 x 1.70 m box, 70 kg");
   EXPECT_EQ(get("policy.reserve"), "30.0 kJ");
   EXPECT_EQ(get("policy.sustains"), "2.2 m/s");

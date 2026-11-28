@@ -392,6 +392,9 @@ public:
   // With physics: PID's energy now (on a client, the local avatar's is its prediction). False
   // without physics or for a pid with no body.
   bool energy(const std::string &pid, avatar_energy &out) const;
+  // With physics: PID's motion as of its last drive (walker@2: walking, wading or swimming; always
+  // walking under walker@1). False without physics or for a pid with no body.
+  bool motion(const std::string &pid, avatar_motion &out) const;
   // CLIENT: the server's reserve for the local avatar PID as of SERVER_TICK. The prediction is
   // corrected by how far it was off at that tick (its log of what it predicted then), and the
   // inputs replayed since keep their spending on top; with no log entry for that tick it takes
@@ -715,8 +718,10 @@ private:
   void world_rules_for(std::uint64_t tick);
   // The veto's policy-free part (non-finite moves and yaws; set_intent keeps this), and its
   // policy part (the vertical and the speed cap; each step applies it under its tick's policy).
+  // DIVES (a walker@2 avatar with physics, OW9c): move.z without allow_vertical is a swimmer's
+  // dive or rise, kept from -1 to 1 rather than dropped.
   static avatar_intent finite_intent(const avatar_intent &in);
-  static avatar_intent veto(const avatar_intent &in, const avatar_policy &p);
+  static avatar_intent veto(const avatar_intent &in, const avatar_policy &p, bool dives = false);
   // Without physics: an avatar standing at `feet` under the rules at `tick` moves as `in` asks
   // plus its drift in the rules' wind (avatar_wind_drift), the same on the server and in a
   // client's prediction, at the tick's time.

@@ -352,8 +352,12 @@ void avatar_world::drive(const std::string &pid, const avatar_intent &in) {
   if (!a.dynamic)
     return;
   ph::body_state s = _world->state(bid(a.id));
-  drive_walker(a, s, in); // the only controller so far (§5k)
-  jump(a, s, in);
+  if (_swim.on) {
+    drive_walker2(a, s, in);
+  } else {
+    drive_walker(a, s, in.move.x, in.move.y, _energy.force_max, _energy.transport_cost);
+    jump(a, s, in);
+  }
   // Upright, facing the intent: a pushed box must not tip over.
   s.rotation = yaw_quat(in.yaw);
   s.angular_velocity = ph::vec3{0.0, 0.0, 0.0};
@@ -365,39 +369,159 @@ void avatar_world::jump(avatar &a, ph::body_state &s, const avatar_intent &in) c
   // Not while rising, nor while still falling onto the floor (it lands first).
   if (!in.jump || !(vj > 0.0) || s.linear_velocity.z > 0.5 * vj || s.linear_velocity.z < -1.0)
     return;
+  if (!standing(s))
+    return;
+  const double vz = std::max(0.0, s.linear_velocity.z);
+  if (!pay_work(a, 0.5 * a.mass * (vj * vj - vz * vz)))
+    return;
+  s.linear_velocity.z = vj;
+}
+
+bool avatar_world::standing(const ph::body_state &s) const {
   // Something under its feet: a ray from a hair below the box (so it misses the avatar's own body)
   // to kJumpReach under it, enough for the solver's resting gap.
   constexpr double kJumpReach = 0.08;
   const double feet = s.position.z - 0.5 * _body.height;
   const ph::vec3 from{s.position.x, s.position.y, feet - 0.002};
   const ph::vec3 to{s.position.x, s.position.y, feet - kJumpReach};
-  if (!_world->raycast(from, to))
-    return;
-  const double vz = std::max(0.0, s.linear_velocity.z);
-  if (_energy.enabled) {
-    const bool stopped =
-        _energy.empty == avatar_energy_policy::when_empty::stop && a.energy.exhausted;
-    const double cost = 0.5 * a.mass * (vj * vj - vz * vz);
-    if (stopped || cost > a.energy.reserve)
-      return;
-    a.energy.reserve -= cost;
-    a.energy.ledger.work += cost;
-    a.energy.power += cost / _dt;
-    a.energy.ledger.peak_power = std::max(a.energy.ledger.peak_power, a.energy.power);
-    if (a.energy.reserve <= 0.0)
-      a.energy.exhausted = true;
-  }
-  s.linear_velocity.z = vj;
+  return _world->raycast(from, to).has_value();
 }
 
-void avatar_world::drive_walker(avatar &a, ph::body_state &s, const avatar_intent &in) const {
+bool avatar_world::pay_work(avatar &a, double cost) const {
+  if (!_energy.enabled)
+    return true;
+  const bool stopped =
+      _energy.empty == avatar_energy_policy::when_empty::stop && a.energy.exhausted;
+  if (stopped || cost > a.energy.reserve)
+    return false;
+  a.energy.reserve -= cost;
+  a.energy.ledger.work += cost;
+  a.energy.power += cost / _dt;
+  a.energy.ledger.peak_power = std::max(a.energy.ledger.peak_power, a.energy.power);
+  if (a.energy.reserve <= 0.0)
+    a.energy.exhausted = true;
+  return true;
+}
+
+void avatar_world::drive_walker2(avatar &a, ph::body_state &s, const avatar_intent &in) const {
+  const avatar_swim &w = _swim;
+  const double half = 0.5 * _body.height;
+  const double feet = s.position.z - half;
+  // The water at its feet, or, where the fluid's box stops above them, at its centre: the
+  // depth of water over the feet and the water's velocity, less the avatar's own wake.
+  const ph::body_id me = bid(a.id);
+  ph::water_sample water = _world->water_at(ph::vec3{s.position.x, s.position.y, feet}, me);
+  double depth = water.wet ? water.depth : 0.0;
+  if (!water.wet) {
+    water = _world->water_at(s.position, me);
+    depth = water.wet ? water.depth + half : 0.0;
+  }
+  const bool on_bed = standing(s);
+  avatar_motion m = avatar_motion::walking;
+  if (depth > w.swim_depth || (!on_bed && depth > 0.5 * w.swim_depth))
+    m = avatar_motion::swimming;
+  else if (on_bed && depth >= w.wade_depth)
+    m = avatar_motion::wading;
+  a.motion = m;
+
+  if (m == avatar_motion::walking) {
+    drive_walker(a, s, in.move.x, in.move.y, _energy.force_max, _energy.transport_cost);
+    jump(a, s, in);
+    return;
+  }
+  if (m == avatar_motion::wading) {
+    const double span = w.swim_depth - w.wade_depth;
+    const double into = span > 0.0 ? std::clamp((depth - w.wade_depth) / span, 0.0, 1.0) : 1.0;
+    const double k = 1.0 - w.wade_slow * into;
+    drive_walker(a, s, k * in.move.x, k * in.move.y, _energy.force_max, _energy.transport_cost);
+    if (depth <= 0.5 * w.swim_depth)
+      jump(a, s, in);
+    return;
+  }
+
+  // Swimming: across through the water (its velocity is the frame), then up or down.
+  const double cx = water.velocity.x, cy = water.velocity.y;
+  ph::body_state rel = s;
+  rel.linear_velocity.x -= cx;
+  rel.linear_velocity.y -= cy;
+  double tx = rel.linear_velocity.x, ty = rel.linear_velocity.y, cost = 0.0; // no move: coast
+  const double asked = std::sqrt(in.move.x * in.move.x + in.move.y * in.move.y);
+  if (asked > 0.0 && w.walk_speed > 0.0) {
+    const double pace = std::min(asked / w.walk_speed * w.swim_speed, w.swim_sprint);
+    tx = in.move.x / asked * pace;
+    ty = in.move.y / asked * pace;
+    cost = w.swim_cost;
+  }
+  avatar_ledger &book = a.energy.ledger;
+  const double paid_before = book.work + book.carried, swum_before = book.distance;
+  drive_walker(a, rel, tx, ty, w.swim_force, cost);
+  s.linear_velocity.x = rel.linear_velocity.x + cx;
+  s.linear_velocity.y = rel.linear_velocity.y + cy;
+  const double surface = feet + depth;
+  if (in.jump) {
+    if (!climb_out(a, s, in, surface))
+      swim_vertical(a, s, w.dive_speed); // a stroke up: surfacing
+  } else if (in.move.z != 0.0 && std::isfinite(in.move.z)) {
+    swim_vertical(a, s, std::clamp(in.move.z, -1.0, 1.0) * w.dive_speed);
+  }
+  book.swam += book.work + book.carried - paid_before;
+  book.swam_distance += book.distance - swum_before;
+}
+
+void avatar_world::swim_vertical(avatar &a, ph::body_state &s, double vz) const {
+  const double v0 = s.linear_velocity.z;
+  const double cap = _swim.swim_force / a.mass * _dt;
+  const double v1 = v0 + std::clamp(vz - v0, -cap, cap);
+  if (!pay_work(a, std::max(0.0, 0.5 * a.mass * (v1 * v1 - v0 * v0))))
+    return;
+  s.linear_velocity.z = v1;
+}
+
+bool avatar_world::climb_out(avatar &a, ph::body_state &s, const avatar_intent &in,
+                             double surface) const {
+  // In front: toward the intent's move, else its facing.
+  double dx = std::cos(in.yaw), dy = std::sin(in.yaw);
+  const double asked = std::sqrt(in.move.x * in.move.x + in.move.y * in.move.y);
+  if (asked > 0.0)
+    dx = in.move.x / asked, dy = in.move.y / asked;
+  if (!std::isfinite(dx) || !std::isfinite(dy))
+    return false;
+  // A flat top a stride beyond the box, from climb_height above the surface to just under it,
+  // with the body's height clear above it.
+  const double reach = 0.5 * _body.width + 0.3;
+  const double px = s.position.x + dx * reach, py = s.position.y + dy * reach;
+  const auto top = _world->raycast(ph::vec3{px, py, surface + _swim.climb_height + 0.01},
+                                   ph::vec3{px, py, surface - 0.1});
+  if (!top || top->normal.z < 0.7)
+    return false;
+  const double edge = top->point.z;
+  if (_world->raycast(ph::vec3{px, py, edge + 0.02}, ph::vec3{px, py, edge + _body.height}))
+    return false; // no room to stand
+  const double feet = s.position.z - 0.5 * _body.height;
+  const double g = std::sqrt(ph::dot(_gravity, _gravity));
+  if (!pay_work(a, a.mass * g * std::max(0.0, edge - feet)))
+    return false;
+  // Half a body further on where the top goes on (the probe may be just past the edge), so it
+  // stands wholly on it.
+  double qx = px + dx * 0.5 * _body.width, qy = py + dy * 0.5 * _body.width;
+  const auto on = _world->raycast(ph::vec3{qx, qy, edge + 0.1}, ph::vec3{qx, qy, edge - 0.1});
+  if (!on || on->normal.z < 0.7)
+    qx = px, qy = py;
+  s.position = ph::vec3{qx, qy, edge + 0.5 * _body.height + 0.005};
+  s.linear_velocity = ph::vec3{0.0, 0.0, 0.0};
+  a.motion = avatar_motion::walking;
+  return true;
+}
+
+void avatar_world::drive_walker(avatar &a, ph::body_state &s, double tx0, double ty0, double force,
+                                double cost) const {
   // Horizontal only: gravity (and whatever the solver does) keeps the vertical.
   const double m = a.mass, dt = _dt;
   const double v0x = s.linear_velocity.x, v0y = s.linear_velocity.y;
   const auto capped_change = [&](double tx, double ty, double &dx, double &dy) {
     // From v0 toward (TX, TY), pushed with at most force_max: the same push for every mass.
     dx = tx - v0x, dy = ty - v0y;
-    const double dv = std::sqrt(dx * dx + dy * dy), cap = _energy.force_max / m * dt;
+    const double dv = std::sqrt(dx * dx + dy * dy), cap = force / m * dt;
     if (dv > cap && dv > 0.0)
       dx *= cap / dv, dy *= cap / dv;
   };
@@ -405,7 +529,7 @@ void avatar_world::drive_walker(avatar &a, ph::body_state &s, const avatar_inten
   avatar_energy &e = a.energy;
   avatar_ledger &book = e.ledger;
   if (!_energy.enabled) {
-    capped_change(in.move.x, in.move.y, dvx, dvy);
+    capped_change(tx0, ty0, dvx, dvy);
     s.linear_velocity.x += dvx, s.linear_velocity.y += dvy;
     // No budget: nothing is spent, and the reserve stays full (any change booked as a correction).
     book.corrections += _energy.reserve_max - e.reserve;
@@ -425,8 +549,8 @@ void avatar_world::drive_walker(avatar &a, ph::body_state &s, const avatar_inten
   const bool stopped = _energy.empty == avatar_energy_policy::when_empty::stop && e.exhausted;
   const double spend = stopped ? refill : std::min(_energy.power_max * dt, e.reserve + refill);
   // The fastest it can afford to carry itself along (no limit without a transport cost).
-  const double carry = _energy.transport_cost * m * g;
-  double tx = in.move.x, ty = in.move.y;
+  const double carry = cost * m * g;
+  double tx = tx0, ty = ty0;
   if (carry > 0.0) {
     const double v_afford = stopped ? 0.0 : spend / (carry * dt);
     const double t = std::sqrt(tx * tx + ty * ty);
@@ -485,6 +609,47 @@ void avatar_world::set_energy_policy(const avatar_energy_policy &p) {
 }
 
 avatar_energy avatar_world::energy(const std::string &pid) const { return _avatars.at(pid).energy; }
+
+avatar_motion avatar_world::motion(const std::string &pid) const { return _avatars.at(pid).motion; }
+
+const char *avatar_motion_name(avatar_motion m) {
+  switch (m) {
+  case avatar_motion::wading:
+    return "wading";
+  case avatar_motion::swimming:
+    return "swimming";
+  case avatar_motion::walking:
+    break;
+  }
+  return "walking";
+}
+
+bool avatar_motion_of(const std::string &name, avatar_motion &out) {
+  for (const avatar_motion m :
+       {avatar_motion::walking, avatar_motion::wading, avatar_motion::swimming})
+    if (name == avatar_motion_name(m)) {
+      out = m;
+      return true;
+    }
+  return false;
+}
+
+avatar_swim avatar_swim_of(const std::map<std::string, double> &params) {
+  avatar_swim w;
+  w.on = true;
+  const std::pair<const char *, double avatar_swim::*> knobs[] = {
+      {"walk_speed", &avatar_swim::walk_speed},     {"wade_depth", &avatar_swim::wade_depth},
+      {"swim_depth", &avatar_swim::swim_depth},     {"wade_slow", &avatar_swim::wade_slow},
+      {"swim_speed", &avatar_swim::swim_speed},     {"swim_sprint", &avatar_swim::swim_sprint},
+      {"swim_force", &avatar_swim::swim_force},     {"dive_speed", &avatar_swim::dive_speed},
+      {"climb_height", &avatar_swim::climb_height}, {"swim_cost", &avatar_swim::swim_cost}};
+  for (const auto &[key, field] : knobs) {
+    const auto it = params.find(key);
+    if (it != params.end() && std::isfinite(it->second))
+      w.*field = it->second;
+  }
+  return w;
+}
 
 void avatar_world::set_reserve(const std::string &pid, double joules) {
   avatar &a = _avatars.at(pid);
