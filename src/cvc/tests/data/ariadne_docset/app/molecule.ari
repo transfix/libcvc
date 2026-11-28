@@ -5,7 +5,8 @@
 #     triangles and takes the skeleton of what is left, a slice at a time on the page's scheduler;
 #   - the `molecule` node type on the same file loaded as app data (data:): its cartoon, and its
 #     ball-and-stick (impostor spheres, or tessellated ones where impostors can't run on the page),
-#     each built as a sliced job.
+#     each built as a sliced job, the ball-and-stick set up in the molecule_view component's window
+#     (components/mol, embedded in the page).
 # Once each is drawn it prints one line the test waits for; a failed run prints why.
 meta: {min_libcvc: 4.0.0}
 customs:
@@ -13,6 +14,8 @@ customs:
     required: true
   - node: molecule
     required: true
+import:
+  - cvc://components/mol/molecule_view.ari
 data:
   grl: ../data/molecules/1grl.pdb
 init: (begin (state-set "graphics.root.children.mesh.mesh_ops.request" "decimate skeleton")
@@ -80,6 +83,8 @@ windows:
         chrome: false
         width: 320
         height: 240
+  - include: molecule_view
+    args: { node: atoms, title: Atoms, id: atoms_view }
 scene:
   chrome: false
   main_view: { hide: [atoms] }

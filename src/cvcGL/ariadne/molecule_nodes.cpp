@@ -113,6 +113,7 @@ struct live {
   int pid = -1;
   std::string owner; // the scheduler owner tag of its builds
   std::string running_sig, drawn_sig;
+  bool running_bonds = false; // the build running finds bonds (ball_and_stick, sticks)
   std::shared_ptr<const molecule> running_mol, drawn_mol;
   bool fallback = false; // impostors failed here: tessellated spheres from now on
   std::string params_error;
@@ -149,6 +150,8 @@ struct live {
     for (std::size_t i = 0; i < ids.size(); ++i) {
       const std::string at = "chains." + std::to_string(i);
       put(n.getState(at + ".id"), ids[i] == ' ' ? std::string() : std::string(1, ids[i]));
+      put(n.getState(at + ".label"),
+          ids[i] == ' ' ? std::string("(none)") : std::string(1, ids[i]));
       put(n.getState(at + ".visible"), visible[i]);
       put(n.getState(at + ".atoms"), std::to_string(atoms[i]));
       const cvc::mol::rgb8 c = cvc::mol::chain_color(i);
@@ -232,6 +235,8 @@ struct live {
       cvc::cancel_sliced_job(*app, pid); // a newer build replaces it; what is drawn stays
     job = cvc::mol::build_view_job(*app, mol, p);
     running_sig = sig;
+    running_bonds =
+        p.style == cvc::mol::view_style::ball_and_stick || p.style == cvc::mol::view_style::sticks;
     running_mol = mol;
     keys->started("building...");
     cvc::sliced_task_options o;
@@ -266,7 +271,7 @@ struct live {
       drawn_sig = running_sig;
       drawn_mol = running_mol;
       put(n.getState("info.drawn"), std::to_string(v->atoms_drawn));
-      put(n.getState("info.bonds"), std::to_string(v->bonds.size()));
+      put(n.getState("info.bonds"), running_bonds ? std::to_string(v->bonds.size()) : "-");
       put(n.getState("info.residues"), std::to_string(v->residues));
       // The bounds as a camera's frame request takes them, so a program can frame any view.
       const bool drew = v->bounds[3] > v->bounds[0] || v->bounds[4] > v->bounds[1];
