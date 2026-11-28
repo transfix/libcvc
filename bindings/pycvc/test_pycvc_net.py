@@ -7,13 +7,23 @@ loopback:
   * the asyncio waker: on_accept (and its refusal, sync and async), on_frames (one call a batch a
     listener, each connection once), on_writable, on_close (reason, and message with a third
     parameter), callbacks on the loop's thread only;
+  * TLS (N3), where this pycvc has it: tls_options as listener_options.tls, detect_tls, the
+    keyprint against Python's own hash of the certificate's DER, conn_info's tls_* (version, cipher,
+    SNI, the client certificate's SHA-256) with Python's ssl as the client, detection with a TLS
+    and a waiting plain client, reload_tls (its OSError, its tls_reloaded event, on_tls_reload on
+    the loop), and an asyncio TLS client greeted from on_accept;
   * pycvc.ariadne: pycvc.ariadne.net is pycvc's own names, and Host.net under plain python is an
     engine of the Host's own, attached to host.loop and stopped (its closes delivered) at shutdown.
 """
 
 import asyncio
+import base64
 import gc
+import hashlib
+import os
 import socket
+import ssl
+import tempfile
 import sys
 import threading
 import time
@@ -38,7 +48,7 @@ if not pycvc.net_engine.available():
     sys.exit(0)
 
 from pycvc import (engine_options, framing, inbound_limits, listener_options,  # noqa: E402
-                   net_batch, net_engine, net_event)
+                   net_batch, net_engine, net_event, tls_options)
 
 
 def connect(port):
@@ -326,6 +336,156 @@ async def waker_test():
 
 asyncio.run(waker_test())
 
+# -- TLS (N3) ----------------------------------------------------------------------------------
+
+TLS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "src", "arisrv",
+                       "tests", "tls")
+CERT, KEY = os.path.join(TLS_DIR, "localhost.pem"), os.path.join(TLS_DIR, "localhost.key")
+with open(CERT) as f:
+    DER = ssl.PEM_cert_to_DER_cert(f.read())
+KEYPRINT = "SHA256/" + base64.b32encode(hashlib.sha256(DER).digest()).decode().rstrip("=")
+
+
+def tls_client_context(with_cert=False):
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE  # checked by its digest below
+    if with_cert:
+        ctx.load_cert_chain(CERT, KEY)
+    return ctx
+
+
+check(pycvc.close_reason_name(pycvc.close_reason_tls_handshake) == "tls_handshake",
+      "the tls_handshake reason")
+to = tls_options(certificate_file=CERT, key_file=KEY, handshake_timeout=2000)
+check(to.min_version == pycvc.tls_protocol_tls1_2 and to.request_peer_certificate
+      and to.watch == 0 and to.enabled(), "tls_options: keywords and the C++ defaults")
+lo_tls = listener_options(address="127.0.0.1", port=0, frames=framing.delimited(b"|"), tls=to,
+                          detect_tls=300)
+check(lo_tls.tls.certificate_file == CERT and lo_tls.tls.handshake_timeout == 2000
+      and lo_tls.detect_tls == 300 and not listener_options().tls.enabled(),
+      "listener_options.tls (a value) and detect_tls (ms)")
+
+if not net_engine.tls_available():
+    print("note test_pycvc_net: this pycvc has no TLS; its TLS checks are skipped")
+else:
+    et = net_engine(engine_options(io_threads=2))
+    lt = et.listen(lo_tls)
+    check(lt.keyprint == KEYPRINT and et.tls_keyprint(lt) == KEYPRINT,
+          f"the keyprint is KEYP's: {lt.keyprint} {KEYPRINT}")
+    try:
+        et.listen(address="127.0.0.1", port=0, detect_tls=100)
+        check(False, "detect_tls without a certificate is refused")
+    except OSError as exc:
+        check("detect_tls" in str(exc), f"detect_tls without a certificate: {exc}")
+
+    # TLS 1.3 with SNI and a client certificate (the same pair serves).
+    ctx = tls_client_context(with_cert=True)
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_3
+    tc = ctx.wrap_socket(connect(lt.port), server_hostname="hub.example")
+    check(tc.version() == "TLSv1.3" and tc.getpeercert(binary_form=True) == DER,
+          "Python's ssl sees the listener's certificate")
+    tc.sendall(b"$Key k|")
+    ev = collect(et, lambda evs: of(evs, net_event.type_frames))
+    acc = of(ev, net_event.type_accepted)[0]
+    info = acc.info
+    check(info.tls() and info.tls_version == "TLSv1.3" and info.tls_cipher.startswith("TLS_")
+          and info.tls_sni == "hub.example", f"conn_info's TLS: {info.tls_version} "
+          f"{info.tls_cipher} {info.tls_sni}")
+    check(info.tls_peer_sha256 == hashlib.sha256(DER).hexdigest()
+          and info.tls_peer_keyprint == KEYPRINT, "the client certificate's SHA-256 and keyprint")
+    check(bytes(of(ev, net_event.type_frames)[0].frames[0]) == b"$Key k|", "a frame over TLS")
+    et.send(acc.conn, b"$Lock x|")
+    check(recv_exactly(tc, 8) == b"$Lock x|", "a send over TLS")
+
+    # A plain client waiting for the server: plain once the 300 ms are over.
+    t0 = time.monotonic()
+    pc = connect(lt.port)
+    ev = collect(et, lambda evs: of(evs, net_event.type_accepted))
+    pacc = of(ev, net_event.type_accepted)[0]
+    check(time.monotonic() - t0 >= 0.25 and not pacc.info.tls() and pacc.info.tls_version == "",
+          "detection: a silent client is plain after the wait")
+    et.send(pacc.conn, b"$Lock y|")
+    check(recv_exactly(pc, 8) == b"$Lock y|", "greeted in plain")
+
+    # Reloads: a file that does not load raises and keeps the certificate; one that does posts
+    # tls_reloaded with the keyprint.
+    tmp = tempfile.mkdtemp()
+    bad = os.path.join(tmp, "bad.pem")
+    with open(bad, "w") as f:
+        f.write("not a certificate")
+    try:
+        et.reload_tls(lt, tls_options(certificate_file=bad, key_file=KEY))
+        check(False, "a bad reload raises")
+    except OSError as exc:
+        check("bad.pem" in str(exc), f"a bad reload raises OSError: {exc}")
+    check(lt.keyprint == KEYPRINT, "the certificate in use stays")
+    lt.reload_tls()
+    ev = collect(et, lambda evs: of(evs, net_event.type_tls_reloaded))
+    rl = of(ev, net_event.type_tls_reloaded)[0]
+    check(rl.message == KEYPRINT and rl.listener == lt, "tls_reloaded and its keyprint")
+    os.remove(bad)
+    os.rmdir(tmp)
+    try:
+        e_plain = net_engine(engine_options(io_threads=1))
+        e_plain.reload_tls(e_plain.listen(address="127.0.0.1", port=0))
+        check(False, "a plain listener has nothing to reload")
+    except OSError as exc:
+        check("no TLS" in str(exc), f"a plain listener's reload: {exc}")
+    e_plain.stop()
+
+    # Old clients are refused before the program hears of them.
+    lt13 = et.listen(address="127.0.0.1", port=0, tls=tls_options(
+        certificate_file=CERT, key_file=KEY, min_version=pycvc.tls_protocol_tls1_3))
+    old = tls_client_context()
+    old.maximum_version = ssl.TLSVersion.TLSv1_2
+    try:
+        old.wrap_socket(connect(lt13.port)).close()
+        check(False, "TLS 1.2 is refused by a 1.3 listener")
+    except (ssl.SSLError, OSError):
+        check(True, "TLS 1.2 is refused by a 1.3 listener")
+    deadline = time.monotonic() + 5
+    while et.stats().engine.closed["tls_handshake"] < 1 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    st = et.stats()
+    check(st.engine.closed["tls_handshake"] == 1 and st.engine.tls_accepted == 1,
+          f"counted, unseen: {st.engine.closed} {st.engine.tls_accepted}")
+    tc.close()
+    pc.close()
+    et.stop()
+
+    async def tls_waker_test():
+        eng = net_engine(engine_options(io_threads=1))
+        lst = eng.listen(address="127.0.0.1", port=0, frames=framing.delimited(b"|"),
+                         tls=tls_options(certificate_file=CERT, key_file=KEY))
+        reloaded = asyncio.get_running_loop().create_future()
+        infos = []
+
+        @lst.on_tls_reload
+        def on_reload(keyprint):
+            reloaded.set_result((keyprint, threading.get_ident()))
+
+        @lst.on_accept
+        def on_accept(conn, info):
+            infos.append(info)
+            eng.send(conn, b"$Lock EXTENDEDPROTOCOL|")
+
+        lst.reload_tls()
+        keyprint, thread = await asyncio.wait_for(reloaded, 5)
+        check(keyprint == KEYPRINT and thread == threading.get_ident(),
+              "on_tls_reload on the loop, with the keyprint")
+        reader, writer = await asyncio.open_connection("127.0.0.1", lst.port,
+                                                       ssl=tls_client_context(),
+                                                       server_hostname="localhost")
+        check(await asyncio.wait_for(reader.readuntil(b"|"), 5) == b"$Lock EXTENDEDPROTOCOL|",
+              "an asyncio TLS client greeted from on_accept")
+        check(infos and infos[0].tls() and infos[0].tls_sni == "localhost", "its conn_info")
+        writer.close()
+        eng.stop()
+        eng.detach_loop()
+
+    asyncio.run(tls_waker_test())
+
 # -- pycvc.ariadne: pycvc.ariadne.net and Host.net ---------------------------------------------
 
 if hasattr(pycvc, "ariadne"):
@@ -335,6 +495,9 @@ if hasattr(pycvc, "ariadne"):
     check(ariadne_net.net_engine is pycvc.net_engine and ariadne_net.framing is pycvc.framing,
           "pycvc.ariadne.net is pycvc's own names")
     from pycvc.ariadne.net import close_reason_peer_closed  # noqa: F401
+    from pycvc.ariadne.net import tls_options as ariadne_tls_options, tls_protocol_tls1_3
+    check(ariadne_tls_options is pycvc.tls_options
+          and tls_protocol_tls1_3 == pycvc.tls_protocol_tls1_3, "and N3's TLS names")
 
     host = Host(net_threads=1)
     net = host.net

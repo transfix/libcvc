@@ -10,6 +10,7 @@
 #define CVC_STATE_EXEC_PROCESS_H
 
 #include <algorithm>
+#include <atomic>
 #include <boost/shared_ptr.hpp>
 #include <chrono>
 #include <climits>
@@ -57,6 +58,59 @@ process_status parse_process_status(const std::string &s);
 namespace detail {
 struct process_locks; // detail/lock_home.h: a process's mirror of its holds, and its ticket
 } // namespace detail
+
+/// A share of each frame that several processes draw on together: the steps and the seconds of
+/// evaluation they may use between two frame boundaries, and the memory they may hold. An Ariadne
+/// mount's budget (docs/roadmap/ARIADNE_SHELL.md 4.11) is one, given to every process whose scope
+/// is under the mount (execute_options::account; a spawned or forked child keeps its parent's).
+///
+/// An async_scheduler charges a process's steps and their seconds to its account as it runs them.
+/// Once the account is spent (spent()), each of its processes parks at its next pick, or ends its
+/// run, until the next frame boundary, as (await) parks it (process::awaiting_frame), and is never
+/// killed for it. wake_awaiting(), once a frame, starts a new frame on every account the scheduler
+/// has seen (new_frame()) before it readies them. `memory` is not counted by the scheduler: the
+/// host writes it (an Ariadne Runtime sums its processes' bytes once a frame); past max_memory the
+/// account is spent until it comes back under. The limits may be changed at any time, from any
+/// thread; the counts are written by the thread that pumps the processes and read by any.
+struct frame_account {
+  std::atomic<std::uint64_t> max_steps{0};  // steps a frame; 0: no limit
+  std::atomic<double> max_seconds{0.0};     // seconds of evaluation a frame; 0: no limit
+  std::atomic<std::uint64_t> max_memory{0}; // bytes held; 0: no limit
+  // This frame's use, and the memory held as the host last summed it.
+  std::atomic<std::uint64_t> steps{0};
+  std::atomic<double> seconds{0.0};
+  std::atomic<std::uint64_t> memory{0};
+  // The last whole frame's use, kept by new_frame() for a view, and whether a process waited for
+  // the account in it.
+  std::atomic<std::uint64_t> last_steps{0};
+  std::atomic<double> last_seconds{0.0};
+  std::atomic<bool> held{false};        // a process parked for the account this frame
+  std::atomic<bool> last_held{false};   // ... in the last whole frame
+  std::atomic<std::uint64_t> holds{0};  // parks for the account since it was made
+  std::atomic<std::uint64_t> frames{0}; // frame boundaries it has seen
+
+  /// Whether this frame's steps or seconds are used up, or its memory is past its cap.
+  bool spent() const noexcept {
+    const std::uint64_t ms = max_steps.load(std::memory_order_relaxed);
+    const double mt = max_seconds.load(std::memory_order_relaxed);
+    const std::uint64_t mm = max_memory.load(std::memory_order_relaxed);
+    return (ms > 0 && steps.load(std::memory_order_relaxed) >= ms) ||
+           (mt > 0.0 && seconds.load(std::memory_order_relaxed) >= mt) ||
+           (mm > 0 && memory.load(std::memory_order_relaxed) > mm);
+  }
+  /// Charge `n` steps and `secs` seconds (the pumping thread).
+  void charge(std::uint64_t n, double secs) noexcept {
+    steps.store(steps.load(std::memory_order_relaxed) + n, std::memory_order_relaxed);
+    seconds.store(seconds.load(std::memory_order_relaxed) + secs, std::memory_order_relaxed);
+  }
+  /// A frame boundary: this frame's use becomes the last frame's, and the new one starts at zero.
+  void new_frame() noexcept {
+    last_steps.store(steps.exchange(0, std::memory_order_relaxed), std::memory_order_relaxed);
+    last_seconds.store(seconds.exchange(0.0, std::memory_order_relaxed), std::memory_order_relaxed);
+    last_held.store(held.exchange(false, std::memory_order_relaxed), std::memory_order_relaxed);
+    frames.fetch_add(1, std::memory_order_relaxed);
+  }
+};
 
 /// A managed process in the scheduler.
 struct process {
@@ -232,6 +286,14 @@ struct process {
   /// What the process holds for its life (a spawned child's intrinsics context, td 4.15):
   /// freed with the process object, not by release_state(), since frames point into it.
   std::shared_ptr<void> keep_alive;
+  /// The frame budget it shares with others (an Ariadne mount's), or null: see frame_account.
+  /// A host's, not the process's state: not snapshotted.
+  std::shared_ptr<frame_account> account;
+  /// Whether its heap share is measured (heap.h): it has a memory limit of its own, or shares an
+  /// account with one, whose host sums its processes' shares. Only its own limit kills it.
+  bool measures_heap() const {
+    return max_memory > 0 || (account && account->max_memory.load(std::memory_order_relaxed) > 0);
+  }
 
   /// Elapsed running time (only while status == running).
   double elapsed_time() const;

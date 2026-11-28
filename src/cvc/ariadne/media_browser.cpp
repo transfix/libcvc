@@ -537,7 +537,8 @@ std::unique_ptr<Player> make_browser_player(const PlayerSource &src) {
   const bool http = src.uri.rfind("http://", 0) == 0 || src.uri.rfind("https://", 0) == 0;
   std::string token, bytes;
   if (http) {
-    const std::optional<NetAccess> access = net_host_access(*src.app);
+    // The widget's principal's allowlist and credentials (docs/roadmap/ARIADNE_SHELL.md 4.12).
+    const std::optional<NetAccess> access = net_host_access(*src.app, src.scope);
     if (!access)
       return std::make_unique<FailedPlayer>("the host has the network off");
     std::string why;

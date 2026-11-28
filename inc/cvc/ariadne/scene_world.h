@@ -235,8 +235,9 @@ public:
   // That world as the navigator sees it (cvc::nav::world_grid): `cell` m samples over its terrain,
   // or a square `half` m either side of the terrain's centre. A terrain node's grid is its height
   // field's; a node with a body of its own is a flat ground: an open walled grid over its
-  // footprint. Made once per world revision, cell and half, and kept until the next. Null when the
-  // node has no world yet, no body, or its world has no terrain (it warns).
+  // footprint (the world's grid, scene.world.grid and the vehicles', also blocks what stands on it:
+  // the world's other static nodes). Made once per world revision, cell and half, and kept until
+  // the next. Null when the node has no world yet, no body, or its world has no terrain (it warns).
   std::shared_ptr<const cvc::nav::world_grid> grid(const std::string &id, double cell,
                                                    double half = 0.0,
                                                    std::vector<std::string> *warnings = nullptr);
@@ -406,6 +407,11 @@ private:
   // vehicles take them.
   void ground_of_world_on(std::shared_ptr<const cvc::nav::world_grid> &grid,
                           std::shared_ptr<const cvc::world::world_geometry> &made);
+  // The world on's grid, as the navigator sees it: its first node's that has one (grid()). A flat
+  // ground's has the world's other static nodes over it blocked: each sample under one's footprint
+  // that its top stands 0.5 m or more over. Kept while that ground's grid is the same.
+  std::shared_ptr<const cvc::nav::world_grid> grid_of_world_on(double cell,
+                                                               std::vector<std::string> *warnings);
   // The scene.world keys, when the world on changed since the last time (or `force`).
   void publish_worlds(bool force);
   // The wind's field after the scene wind's keys (bind_wind) and the weathers' storms.

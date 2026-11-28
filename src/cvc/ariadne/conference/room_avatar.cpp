@@ -447,6 +447,19 @@ bool read_avatar_reserve(cvc::app &app, const std::string &room_id, const std::s
   return true;
 }
 
+void write_avatar_motion(cvc::app &app, const std::string &room_id, const std::string &pid,
+                         avatar_motion motion) {
+  const std::string path = sub(room_participant_path(room_id, pid), {"motion"});
+  if (motion == avatar_motion::walking && get_s(app, path).empty())
+    return; // only ever walked: nothing to say
+  set_changed(app, path, avatar_motion_name(motion));
+}
+
+bool read_avatar_motion(cvc::app &app, const std::string &room_id, const std::string &pid,
+                        avatar_motion &out) {
+  return avatar_motion_of(get_s(app, sub(room_participant_path(room_id, pid), {"motion"})), out);
+}
+
 bool avatar_part_fits(const avatar_part &part) {
   float half[3];
   if (part.shape == "sphere") {

@@ -429,6 +429,54 @@ TEST(AriSchema, SeveralAppsCheckApart) {
   EXPECT_EQ(failures, 0);
 }
 
+// A window's groups written inline, `groups` of them around a text with an unknown key: 6 + 2 *
+// groups levels of YAML (the document, windows:, the window, its children:, each group and its
+// children:, then the text and its values).
+std::string groups_doc(std::size_t groups) {
+  std::string doc = "windows:\n  - window: W\n    children: ";
+  for (std::size_t i = 0; i < groups; ++i)
+    doc += "[{type: group, children: ";
+  doc += "[{text: deepest, bnd: x}]";
+  for (std::size_t i = 0; i < groups; ++i)
+    doc += "}]";
+  return doc + "\n";
+}
+
+// docs/ARIADNE.md §6.7: the check goes kMaxSchemaDepth levels of YAML deep. A document that deep is
+// checked; one deeper is not, and its one issue, at its first value past the limit, says so (a
+// load warns it, as any issue, and goes on).
+TEST(AriSchema, TheCheckGoesAtMostkMaxSchemaDepthLevels) {
+  SKIP_WITHOUT_VALIDATOR();
+  ASSERT_EQ(kMaxSchemaDepth % 2, 0u);
+  const std::size_t groups = (kMaxSchemaDepth - 6) / 2;
+  cvc::app app;
+  const ValidationResult checked = validate_string(app, groups_doc(groups));
+  ASSERT_TRUE(checked.checked) << checked.error;
+  ASSERT_EQ(checked.issues.size(), 1u) << all_issues(checked.issues);
+  EXPECT_EQ(checked.issues[0].message, "unknown key 'bnd'");
+
+  const std::string doc = groups_doc(groups + 1);
+  const ValidationResult v = validate_string(app, doc);
+  ASSERT_TRUE(v.checked) << v.error;
+  EXPECT_FALSE(v.ok());
+  ASSERT_EQ(v.issues.size(), 1u) << all_issues(v.issues);
+  const SchemaIssue &i = v.issues[0];
+  std::string pointer = "/windows/0/children/0";
+  for (std::size_t g = 0; g <= groups; ++g)
+    pointer += "/children/0";
+  EXPECT_EQ(i.pointer, pointer) << "the text, a level past the limit";
+  EXPECT_EQ(i.line, 3);
+  EXPECT_EQ(i.column, 1 + static_cast<int>(doc.substr(doc.find("    children:")).find("{text:")));
+  EXPECT_EQ(i.message, "nested more than " + std::to_string(kMaxSchemaDepth) +
+                           " levels of YAML deep, the most the schema check goes "
+                           "(docs/ARIADNE.md §6.7): this document is not checked");
+  const LoadResult r = load_string(app, doc);
+  ASSERT_TRUE(r.ok) << r.error;
+  ASSERT_EQ(r.schema_issues.size(), 1u) << all_issues(r.schema_issues);
+  EXPECT_TRUE(std::any_of(r.warnings.begin(), r.warnings.end(),
+                          [&](const std::string &w) { return w == "ari: schema: " + i.text(); }));
+}
+
 TEST(AriSchema, WithoutTheValidatorNothingIsChecked) {
   if (have_jsonschema())
     GTEST_SKIP() << "this build has the validator";

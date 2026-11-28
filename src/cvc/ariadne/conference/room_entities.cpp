@@ -279,10 +279,19 @@ std::vector<room_entity> room_entities_of(const WorldVehicles &vehicles) {
         e.wheels = {d.wheelbase(), d.track(), d.axles.empty() ? 0.0 : d.axles.front().wheel_radius};
         if (info.posed) // placed by an outside simulation: its model hangs its stand height below
           e.base_z = -stand_height(d);
-        if (vehicle_plant_floats(info.plant)) { // a boat's model spans its overall length
+        if (vehicle_plant_floats(info.plant)) {
+          // A boat's model spans its overall length, its keel on its hull's bottom (hull-body z),
+          // as the boat node and a scene's own entity view fit it: not the ground (the bed) under
+          // its water.
           const physics::dyn_boat_desc b = boat_desc_of(a, info.spec.mass, info.spec.max_speed);
           if (b.length_overall > 0.0)
             e.fit_length = b.length_overall;
+          if (b.boat.hull.hull && !b.boat.hull.hull->vertices.empty()) {
+            double keel = b.boat.hull.hull->vertices.front().z;
+            for (const physics::vec3 &p : b.boat.hull.hull->vertices)
+              keel = std::min(keel, p.z);
+            e.base_z = keel;
+          }
         }
       } catch (const std::exception &) {
       }

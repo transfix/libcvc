@@ -2,8 +2,9 @@
 
 Status: N1 (the C++ engine) is built: `inc/cvc/net/net_engine.h`, `src/cvc/net/net_engine.cpp`,
 `net_engine_test`. N2 (pycvc and arisrvx) is built: `bindings/pycvc/pycvc_net.i`, `host.net`,
-`test_pycvc_net.py`, `bench_pycvc_net.py`. N3-N6 and the registry tie-in are designs. What building
-N1 and N2 changed in this design is marked *(N1)* and *(N2)* below.
+`test_pycvc_net.py`, `bench_pycvc_net.py`. N3 (TLS) is built, in the same files and tests. N4-N6
+and the registry tie-in are designs. What building N1, N2 and N3 changed in this design is marked
+*(N1)*, *(N2)* and *(N3)* below.
 
 This adds one native component to libcvc: a **connection engine** that owns raw TCP and TLS
 connections on I/O threads of its own. It accepts connections and makes them, splits their bytes
@@ -47,7 +48,7 @@ The alternatives were weighed on 2026-11-16 (Joe chose this engine):
 
 | Piece | Where | What it gives |
 |---|---|---|
-| Boost.Asio, Beast, OpenSSL | `state_transport_ws.cpp`, `utility.cpp`; `SetupBoost` | The I/O and TLS libraries the engine is built on. No new dependency. |
+| Boost.Asio, Beast, OpenSSL | `state_transport_ws.cpp`, `utility.cpp`; `SetupBoost` | The I/O and TLS libraries the engine is built on. No new dependency. *(N3)* Not quite: libcvc linked only OpenSSL's libcrypto (device keys), and its TLS client was libcurl's. N3 links libssl too (cvcpkg's openssl, already in libcvc's recipe), optionally: without it `tls_available()` is false. |
 | Fan-out without copies | `cvc/ariadne/stream/stream_channel.h` | One producer's `frame_ptr` (a `shared_ptr`) to N bounded subscriber queues by refcount. |
 | Relay to Python | `src/ariadne_python/server_link.h` | Events posted from any thread, taken by the script's waker thread without the GIL and handed to the asyncio loop. |
 | The client registry | `client_registry.{h,cpp}` (ID1, #1293) | A record per client id: username, device, first and last seen, a connection log, admin, limits. |
@@ -64,7 +65,7 @@ The alternatives were weighed on 2026-11-16 (Joe chose this engine):
 - **A listener:** an address, a port, a framing, optional TLS, a backlog (1024 by default; asyncio's
   100 lost logins in sublevels' soak) and limits.
 - **A connection:** a 64-bit id that is never reused within a run. It records the peer and local
-  addresses, the listener, and TLS (version, cipher, SNI) if any.
+  addresses, the listener, and TLS (version, cipher, SNI, the client certificate's SHA-256) if any.
 - **A group:** a name and a set of connections, kept by the program (`join`, `leave`). A
   connection is in any number of groups. Closing a connection leaves all of them.
 
@@ -150,6 +151,61 @@ it (NMDC's `$ADCSND` and the file's bytes come in one write). So:
   optional pin (`SHA256/<base32>` of the certificate, as ADC's KEYP).
 - The connection's info tells the program the TLS version and the SHA-256 of the peer's
   certificate if it sent one.
+
+*(N3)* What was built:
+
+- **Options.** `listener_options.tls` is a `tls_options`: `certificate_file` (PEM, the chain after
+  the leaf) and `key_file`, `min_version` (`tls_protocol::tls1_2` by default, or `tls1_3`; the
+  maximum is the highest the OpenSSL has), `ciphers` and `ciphersuites` (OpenSSL's defaults when
+  empty), `request_peer_certificate` (on), `handshake_timeout` (10 s) and `watch`. A certificate
+  file makes the listener TLS; `listener_options.detect_tls` (ms, beside it) makes it both. A
+  listener whose files do not load, or with `detect_tls` and no certificate, fails to listen.
+- **The layer.** Asio's `ssl::stream` was not used: it needs a read buffer a connection and its
+  own async operations, and the engine reads into one buffer a thread and writes without waiting
+  (§2.3, §2.4). Each TLS connection has an OpenSSL session over a BIO of the engine's own: the
+  records read go into a string the session takes from, and the records it makes come out in one
+  the connection writes, through the same readiness waits and lingering close as plain output.
+  `ssl::context` loads the files. Each session is a server's; N4's client connections start the
+  same layer as a client (SNI, verification, a pin), which is the seam left for it.
+- **Output.** The queue still holds the program's bytes, one refcounted buffer for every receiver
+  of a broadcast; each TLS connection encrypts as it writes, packing small sends into one record
+  (up to 16 KiB) and taking a large one straight from its buffer. `max_queued`, `slow_reader` and
+  `want_writable` count those bytes, before encryption. A flushing close sends the queue, then
+  close_notify, then ends as a plain one does. `bytes_in` counts the decrypted bytes, `bytes_out`
+  the records written.
+- **The start.** `accepted` is posted when the handshake completes, with `conn_info.tls_version`,
+  `tls_cipher`, `tls_sni`, `tls_peer_sha256` (64 hex digits) and `tls_peer_keyprint`. A client may
+  send any certificate or none: the engine asks for one and accepts what comes, since DC clients'
+  certificates are self-signed and the program judges the digest. A handshake that fails or
+  passes `handshake_timeout` closes with the new reason `tls_handshake`, which is counted but never
+  posted: the program never heard of that connection, so no `closed` comes for it either (the same
+  holds for a client that leaves during detection). `inbound_limits.first_frame_timeout` now counts
+  from `accepted`. `net_counters.tls_accepted` counts completed handshakes; `accepted` stays TCP's.
+- **Detection.** With `detect_tls`, the connection waits that long for its first byte. 0x16 starts
+  the handshake (whose own timeout starts then); any other byte makes it plain at once, and that
+  byte is its first input; nothing in time makes it plain. Only then is `accepted` posted. A TLS
+  client slower than the wait meets a plain server's greeting and fails its handshake.
+- **Reload.** `reload_tls(listener)` reads the same files again, `reload_tls(listener, tls)` new
+  options. Either loads on the caller's thread and swaps the listener's context for new
+  connections; each open session keeps a reference to the context it began with. A reload that
+  fails returns false (OSError in Python) and keeps the context in use; one that works posts the
+  new event `tls_reloaded`, whose `message` is the new keyprint. `tls_options.watch` checks the two
+  files' modification times on the acceptor's thread. A change is loaded once both files have kept
+  their times for one more interval, so a certificate and its key written one after the other are
+  read together; a load that fails posts the listener's `error` once and waits for the next
+  change.
+- **Keyprint.** `tls_keyprint(listener)` is `SHA256/` and the unpadded RFC 4648 base32 of the
+  SHA-256 of the certificate's DER, [ADC-EXT] KEYP's form (DC++'s `X509_digest` with SHA-256), for
+  sublevels to publish beside its `nmdcs://` address. The ctest checks it against the openssl
+  command's `x509 -outform DER | dgst -sha256`, and the Python test against `hashlib` over
+  `ssl.PEM_cert_to_DER_cert`.
+- **Sessions.** Renegotiation and compression are off, and so is the server's session cache, which
+  would hold a session for each connection; TLS 1.3 tickets resume without it. Idle sessions free
+  their record buffers (`SSL_MODE_RELEASE_BUFFERS`), and the BIO's two strings keep at most 4 KiB
+  when empty.
+- **Python.** `tls_options` and `tls_protocol_*` in pycvc and `pycvc.ariadne.net`;
+  `net_engine.tls_available()`, `reload_tls(listener, tls=None)`, `tls_keyprint(listener)`;
+  `net_listener.keyprint`, `.reload_tls()` and `.on_tls_reload(keyprint)` on the loop.
 
 ### 2.6 Identity: the client registry
 
@@ -272,6 +328,8 @@ not a wrapper over it (Joe, 2026-11-20: "we want the full C++ api in python"). S
 Programs publish them as they like; sublevels' analytics (its roadmap D14) draws them.
 *(N1)* `messages_out` counts buffers queued to connections (one a receiver), `bytes_out` bytes
 written; the per-thread counters are each thread's own, summed by `stats()`.
+*(N3)* `tls_accepted` counts completed TLS handshakes, and `closed["tls_handshake"]` the ones that
+failed or timed out. On TLS, `bytes_in` is decrypted bytes and `bytes_out` records.
 
 ## 3. Parts
 
@@ -279,7 +337,7 @@ written; the per-thread counters are each thread's own, summed by `stats()`.
 |---|---|---|
 | N1 | The engine in C++: I/O threads, listeners, framing, output queues, groups, broadcast, limits, counters; ctest with TSan | `inc/cvc/net/net_engine.h`, `src/cvc/net/net_engine.cpp` (new) |
 | N2 | pycvc binding and arisrvx wiring: `host.net`, batches through a ServerLink-shaped queue, plain-python mode | `src/ariadne_python/*`, `ariadne_server.py` |
-| N3 | TLS: listener certificates, reload, detection on a plain port | `net_engine.*` |
+| N3 | TLS: listener certificates, reload, detection on a plain port | `net_engine.*`; `pycvc_net.i`; libssl (optional) |
 | N4 | Client connections and UDP: connect with SNI, verification and pins; UDP bind and send | `net_engine.*` |
 | N5 | Document verbs and `--net-allow` for `ari` and `arigl` | the verb tables, host flags |
 | N6 | Stream-channel binding and guest imports | `net_engine.*`, `src/ariadne_wasm/*` |
@@ -349,6 +407,25 @@ sessions' builds running (load 10 on 32 cores), run twice, interleaved with N1's
 - Input: 6000 receivers each send a line; all 6000 reach `on_frames` on an asyncio loop in
   116-122 ms, in 2 `on_frames` calls, and the loop thread spends 1.3-1.4 µs a frame (the waker's
   hand-off, the memoryviews, the callback).
+
+*(N3, measured.)* `net_engine_test`'s `NetEngineTlsFanOut` sends the same 113-byte line to a group
+of TLS receivers (TLS 1.3, TLS_AES_256_GCM_SHA384, the test certificate's RSA-2048) and to a plain
+group of the same size on the same engine, rounds interleaved, 2 I/O threads, prettyhatemachine
+at load 7, two runs of 1000 receivers a group:
+
+| | TLS receiver | plain receiver |
+|---|---|---|
+| I/O CPU a receiver, one broadcast | 25.0, 26.2 µs | 17.3, 17.8 µs |
+| burst of 10: I/O CPU a receiver a message | 2.3, 2.7 µs | 1.4, 2.3 µs |
+
+- A TLS receiver costs about 8 µs more a message than a plain one: one record's encryption and
+  OpenSSL's write path, on top of the same write. Ten broadcasts in a turn go in one record, so a
+  burst costs about 1 µs more a message.
+- `SSL_MODE_RELEASE_BUFFERS` (idle sessions hold no record buffers) made no measurable difference
+  to these numbers, so it stays on.
+- A hub with all 6000 users on TLS would spend about 0.15 s of I/O CPU on a lone message to all
+  (0.10 s plain), spread over the I/O threads; the loop's side is the same one call. sublevels'
+  soak through NMDCS is the check.
 
 ## 5. Open questions
 

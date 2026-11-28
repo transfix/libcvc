@@ -747,25 +747,30 @@ city_bundle load_city_bundle_v2(app &ctx, const city_bundle_reader &read, const 
 // ── A generated world as a bundle ────────────────────────────────────────────────────────────────
 
 std::string generated_world_params_json(const generated_world_params &p) {
-  return jobj({{"seed", juint(p.seed)},
-               {"half_m", jnum(p.half_m)},
-               {"trees", jint(p.trees)},
-               {"rocks", jint(p.rocks)},
-               {"buildings", jint(p.buildings)},
-               {"tree_gen", jint(p.tree_gen)},
-               {"amp_m", jnum(p.amp_m)},
-               {"water_level_m", jnum(p.water_level_m)},
-               {"preset", jint(p.preset)},
-               {"ontology", jint(p.ontology)},
-               {"cell_m", jnum(p.cell_m)},
-               {"max_terrain_n", jint(p.max_terrain_n)},
-               {"raster_n", jint(p.raster_n)},
-               {"waterline_sliver_m", jnum(p.waterline_sliver_m)},
-               {"terrain", jstr(p.terrain)},
-               {"city", jstr(p.city)},
-               {"terrain_file", jstr(p.terrain_file)},
-               {"edge", jint(p.edge)}},
-              "  ");
+  std::vector<std::pair<std::string, std::string>> kv = {
+      {"seed", juint(p.seed)},
+      {"half_m", jnum(p.half_m)},
+      {"trees", jint(p.trees)},
+      {"rocks", jint(p.rocks)},
+      {"buildings", jint(p.buildings)},
+      {"tree_gen", jint(p.tree_gen)},
+      {"amp_m", jnum(p.amp_m)},
+      {"water_level_m", jnum(p.water_level_m)},
+      {"preset", jint(p.preset)},
+      {"ontology", jint(p.ontology)},
+      {"cell_m", jnum(p.cell_m)},
+      {"max_terrain_n", jint(p.max_terrain_n)},
+      {"raster_n", jint(p.raster_n)},
+      {"waterline_sliver_m", jnum(p.waterline_sliver_m)},
+      {"terrain", jstr(p.terrain)},
+      {"city", jstr(p.city)},
+      {"terrain_file", jstr(p.terrain_file)},
+      {"edge", jint(p.edge)}};
+  // A theme only when there is one: a world without keeps the JSON (and its bundle's hash) it had
+  // before themes.
+  if (!p.theme.empty())
+    kv.push_back({"theme", jstr(p.theme)});
+  return jobj(kv, "  ");
 }
 
 generated_world_params generated_world_params_from_json(const std::string &text) {
@@ -794,6 +799,7 @@ generated_world_params generated_world_params_from_json(const std::string &text,
   p.city = j.get<std::string>("city", p.city);
   p.terrain_file = j.get<std::string>("terrain_file", p.terrain_file);
   p.edge = j.get<int>("edge", p.edge);
+  p.theme = j.get<std::string>("theme", p.theme);
   return p;
 }
 
@@ -829,6 +835,65 @@ std::string props_json(const generated_world &w) {
     o += (i ? ",\n    " : "\n    ") + jarr(v);
   }
   return o + (w.prop_cells.empty() ? "]\n}\n" : "\n  ]\n}\n");
+}
+
+// models.json: the theme's models (generated_world::model_assets, models): each asset as its
+// sidecar (model_asset_json, without its directory: a reader finds the files by name), and each
+// instance as [asset, x, y, z, yaw, scale].
+std::string models_json(const generated_world &w) {
+  std::string assets = "[", rows = "[";
+  for (std::size_t i = 0; i < w.model_assets.size(); ++i) {
+    std::string a = model_asset_json(w.model_assets[i]);
+    while (!a.empty() && (a.back() == '\n' || a.back() == ' '))
+      a.pop_back();
+    assets += (i ? ",\n" : "\n") + a;
+  }
+  assets += w.model_assets.empty() ? "]" : "\n  ]";
+  for (std::size_t i = 0; i < w.models.size(); ++i) {
+    const generated_world::model_instance &m = w.models[i];
+    rows += (i ? ",\n    " : "\n    ") +
+            jarr({jint(m.asset), jnum(m.x), jnum(m.y), jnum(m.z), jnum(m.yaw), jnum(m.scale)});
+  }
+  rows += w.models.empty() ? "]" : "\n  ]";
+  return jobj({{"buildings", juint(w.model_buildings)},
+               {"trees", juint(w.model_trees)},
+               {"fields",
+                jarr({jstr("asset"), jstr("x"), jstr("y"), jstr("z"), jstr("yaw"), jstr("scale")})},
+               {"assets", assets},
+               {"instances", rows}},
+              "  ") +
+         "\n";
+}
+
+void read_models(const std::string &text, generated_world &w) {
+  const ptree j = parse_json(text, "models.json");
+  w.model_buildings = j.get<std::size_t>("buildings", 0);
+  w.model_trees = j.get<std::size_t>("trees", 0);
+  if (const auto as = j.get_child_optional("assets"))
+    for (const auto &e : *as) {
+      std::ostringstream o;
+      boost::property_tree::write_json(o, e.second, false);
+      // write_json writes every value as a string; the sidecar reader reads them back as numbers.
+      w.model_assets.push_back(parse_model_asset(o.str(), std::string(), "models.json: an asset"));
+    }
+  if (const auto rs = j.get_child_optional("instances"))
+    for (const auto &e : *rs) {
+      std::vector<double> v;
+      for (const auto &c : e.second)
+        v.push_back(c.second.get_value<double>());
+      if (v.size() != 6)
+        throw std::runtime_error("models.json: an instance is not [asset, x, y, z, yaw, scale]");
+      generated_world::model_instance m;
+      m.asset = int(v[0]);
+      if (m.asset < 0 || m.asset >= int(w.model_assets.size()) || v[0] != double(m.asset))
+        throw std::runtime_error("models.json: an instance's asset is not in assets");
+      m.x = v[1];
+      m.y = v[2];
+      m.z = v[3];
+      m.yaw = v[4];
+      m.scale = v[5];
+      w.models.push_back(m);
+    }
 }
 
 // streets.json: the street network and the city's counts.
@@ -1062,6 +1127,8 @@ city_bundle_files generated_world_bundle(app &ctx, const generated_world &w,
   if (!w.prop_cells.empty())
     info.extra["props.json"] = bytes_of(props_json(w));
   info.extra["streets.json"] = bytes_of(streets_json(w));
+  if (!w.models.empty())
+    info.extra["models.json"] = bytes_of(models_json(w));
   world_ground painted;
   if ((!ground || ground->empty()) && !w.raster.klass.empty()) {
     painted.width = painted.height = world_ground_size_for(w);
@@ -1139,6 +1206,8 @@ bundle_world world_from_bundle(app &ctx, const city_bundle &b, const city_bundle
       read_streets(*s, *w);
     if (const auto p = read("props.json"))
       read_props(*p, *w);
+    if (const auto m = read("models.json"))
+      read_models(*m, *w);
   } catch (const boost::property_tree::ptree_error &e) {
     throw std::runtime_error(std::string("world_from_bundle: ") + e.what());
   } catch (const std::logic_error &e) { // a number that does not parse (stoi, stod)

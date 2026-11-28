@@ -73,6 +73,14 @@ build:
         MACOSX_DEPLOYMENT_TARGET: "13.0"
     - platform: windows
       script: build.ps1
+    # The BSDs build on the cvcpkg.org fleet from the release tag's tarball, against the fleet's
+    # libcvc (see the libcvc recipe's matrix).
+    - platform: freebsd
+      script: build.sh
+    - platform: openbsd
+      script: build.sh
+    - platform: netbsd
+      script: build.sh
 
 package:
   # Just the `arigl` executable (bin/arigl, bin/arigl.exe on Windows). No cmake package config —
