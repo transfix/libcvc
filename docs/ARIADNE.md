@@ -7983,14 +7983,16 @@ on_tick: |
   world:
     avatars:
       archetypes:                  # every avatar has the first, for now
-        person: { body: { mass: 70, width: 0.5, height: 1.7, density: 985 }, controllers: [walker@1] }
+        person: { body: { mass: 70, width: 0.5, height: 1.7, density: 985 }, controllers: [walker@2] }
       policy:
         max_speed: 4.0             # the veto: the fastest an intent may ask for (m/s)
         allow_vertical: false
         energy: { enabled: true, force_max: 840, power_max: 1200, power_rest: 300,
                   reserve_max: 30000, transport_cost: 0.2, empty: rest, recover_fraction: 0.25 }
-    controllers:                   # walker@1 is the one kernel this build runs
-      walker@1: { kernel: walker, version: 1, params: { walk_speed: 2.0 } }
+    controllers:                   # walker@2: walker@1 on land, wading and swimming in water
+      walker@2: { kernel: walker, version: 2, params: { walk_speed: 2.0, wade_depth: 0.3,
+                  swim_depth: 1.2, wade_slow: 0.6, swim_speed: 1.0, swim_sprint: 1.8,
+                  swim_force: 300, dive_speed: 0.8, climb_height: 0.6, swim_cost: 0.8 } }
   ```
 
   - **Each key left out keeps the default**, which is the block above. Archetypes, when given,
