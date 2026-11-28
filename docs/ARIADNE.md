@@ -902,7 +902,9 @@ Three backends ship:
     cell size need not be known. `Auto` picks it, after Kitty and Sixel, when
     `$TERM_PROGRAM` names such a terminal (`gfx::iterm_terminal`: WezTerm, iTerm2, mintty)
     and stdout is a tty, off Windows. A page with xterm.js's image addon asks for it
-    (`--graphics iterm`), as arigl_term's does.
+    (`--graphics iterm`), as arigl_term's does; `ari.html` has the addon, and its page config's
+    flags ask (docs/CVCGL_WASM.md, "Pictures in pixels"). There `--graphics sixel` works too:
+    the page measures the cell size and passes `--cell-size`.
   - **Detection.** `run()` asks the terminal before FTXUI takes it over, because FTXUI's
     input parser has no APC case and a late kitty reply would arrive as typed text: on
     `/dev/tty` in raw mode it sends a kitty query, `CSI 16 t` (the cell size in pixels)
@@ -1262,7 +1264,8 @@ types behind one call, `register_cvcgl_extensions`
 `AriRuntime` (so pycvc hosts) make: `forest_trees`, `wave_sea`, `cloud_sky`,
 `generated_world` (terrain_lab's world, [`world_nodes.h`](../inc/cvc/gl/ariadne/world_nodes.h)),
 `volume_slice` (one axis-aligned plane of a volume, below), `volume_grid` (VolumeGridRover: three
-such planes with point classes, below), `water` (its sea, lakes and ponds as the
+such planes with point classes, below), `contour_lab` (planar contours and the surfaces the contour
+tiler builds through them, below), `water` (its sea, lakes and ponds as the
 GPU FFT ocean, below), `weather` (the scene's storms, below), `ribbon` and `draped_link` (lines
 drawn from data, below), `nav_swarm` and `swarm_layer` (a swarm of navigating vehicles and
 what of it is drawn, below), and — on a libcvc built with `CVC_ENABLE_LIBIGL` — `mesh_lab` and
@@ -3015,9 +3018,9 @@ down), centres it in x and y, sits it on z = 0 and scales its largest extent to 
 | `geodesic.source` | source vertex for `geodesic` (clamped to #V-1; -1 is the highest vertex) | `geodesic_source` |
 | `modes.index` | the Laplace–Beltrami eigenfunction `modes` shows (`fem::laplacian_eigenmodes` on the surface; 1 is the first non-constant, up to 50) | `mode` |
 | `color.min`, `color.max` | the colour range used: the field colours' explicit domain, else the values' (2-98% percentiles for curvature) | — |
-| `skeleton.<field>` | `cvc::skeleton_params`' table ([`skeleton_params.h`](../inc/cvc/geometry/skeleton_params.h)): `robust`, `big_ball_ratio`, `theta_if`, `theta_ff`, `cocone_phi`, `sharp_phi`, `flat_phi`, `flatness_ratio`, `medial_theta`, `medial_ratio`, `discard_small`, `threshold`, `sheet_count`, `helix_window`; each key carries its `doc`, `unit`, `min`, `max` and `default` properties. Read when a `skeleton` run starts | `skeleton: { <field>: <value>, ... }` (else the defaults) |
+| `skeleton.<field>` | `cvc::skeleton_params`' table ([`skeleton_params.h`](../inc/cvc/geometry/skeleton_params.h)): `robust`, `big_ball_ratio`, `theta_if`, `theta_ff`, `cocone_phi`, `sharp_phi`, `flat_phi`, `flatness_ratio`, `medial_theta`, `medial_ratio`, `discard_small`, `threshold`, `sheet_count`, `helix_window` ([PORT_PARAMETERS.md](PORT_PARAMETERS.md)); each key carries its `doc`, `unit`, `min`, `max` and `default` properties. Read when a `skeleton` run starts | `skeleton: { <field>: <value>, ... }` (else the defaults) |
 | `skeleton.busy`, `.stoppable`, `.status`, `.progress`, `.phase`, `.stats.work_ms`, `.pid` | published by the run, as fe_lab's job keys | — |
-| `skeleton.info.points`, `.info.strands`, `.info.sheets`, `.info.clusters`, `.info.lines`, `.info.triangles`, `skeleton.warnings` | published: the input's vertices; the strands (polylines), the sheets, the planar clusters found, the strands' segments and the sheets' triangles; the warnings, one per line. `-` before a skeleton | — |
+| `skeleton.info.points`, `.info.strands`, `.info.sheets`, `.info.clusters`, `.info.lines`, `.info.triangles`, `skeleton.warnings` | published: the input's vertices; the strands (polylines), the sheets, the planar clusters found, the strands' segments and the sheets' triangles; the warnings, one per line. The `info.*` keys are `-` before a skeleton, and `warnings` is empty | — |
 | `skeleton.view.strands`, `skeleton.view.sheets` | 1 shows that part of the skeleton — followed live | — |
 
 **Field colours (both node types).** The values a node shows are coloured through a transfer
@@ -3181,9 +3184,10 @@ running tet-mesh or Poisson solve to finish.
 textured quad coloured through the node's transfer function, as VolumeGridRover's slice views and
 the classic three-plane orthoslicer show a volume. It cuts the volume the app holds
 (`source: { data: NAME }`, `{ state: KEY }` or `{ node: ID }`), its voxels shared, and follows it,
-as a `volren` does (§5.17, Scene nodes); it publishes it as `<node>.volume`. It still reads
-`source: { file }` or `{ sdf }` (with `fit:`) itself, until those become `data:` entries
-(docs/roadmap/DATA_FROM_STATE_TREE.md, D6).
+as a `volren` does (§5.17, Scene nodes); it publishes that volume as `<node>.volume` (empty while
+the volume is read plane by plane). It still reads `source: { file }` or `{ sdf }` (with `fit:`)
+itself, until those become `data:` entries (docs/roadmap/DATA_FROM_STATE_TREE.md, D6); a node that
+reads its own volume, and a `volume_of:` plane (below), publish no `<node>.volume`.
 
 ```yaml
 - node: ct_z
@@ -3209,19 +3213,22 @@ colour. Its keys live under the node's own state:
 | `slice.opaque` | `1` (the default): every voxel in its colour at full opacity; `0`: the transfer function's opacity, so the plane blends | `opaque` |
 | `slice.overlay_offset` | how far back in depth the plane draws (polygon-offset units, 2 by default), so the overlays in its plane stay on top | `overlay_offset` |
 | `slice.count`, `slice.position` | published: how many planes the axis has, and where this one lies along it | — |
-| `slice.status` | published: `""`, or what is wrong (a key that does not parse, a failed read) | — |
+| `slice.status` | published: `""`, or what is wrong (a key that does not parse, a transfer function that does not parse, a failed read) | — |
+| `source.volume`, `source.status` | with a `data:`, `state:` or `node:` source: the key the node follows (editing it follows the new key) and what it waits for (§5.17) | `source:` |
 | `info.dims`, `info.min`, `info.max`, `info.span`, `info.box`, `info.file` | published: the volume's dimensions, data range, voxel spacing, bounding box and file | — |
 | `transfer_function` | the `cvc::tf::model` the voxels are coloured through, over the volume's data range unless its domain is explicit; a `tf_editor` edits it and shows the volume's histogram | `transfer_function:` — `preset:` (grayscale by default) and the model's own keys (`color`, `alpha`, `isocontours`, `domain`, `opacity_cubed`, `resolution`), each replacing the preset's |
 
 The keys carry `cvc::volume_slice_params`' parameter table
-([`volume_slice.h`](../inc/cvc/volume/volume_slice.h)): `doc`, `unit`, `min`, `max` and `choices`
+([`volume_slice.h`](../inc/cvc/volume/volume_slice.h), [PORT_PARAMETERS.md](PORT_PARAMETERS.md)): `doc`, `unit`, `min`, `max` and `choices`
 as properties. Each change of plane, axis or transfer function colours the plane on the CPU and
 uploads one 2D texture; a new plane the same size as the last is written into the same texture.
-So stepping through a large volume never puts the volume on the GPU. `region_reads: auto` (the
-default) reads a file of more than 64 Mi voxels one plane at a time (`cvc::slice_source`, the
-last eight planes kept), so a volume larger than memory can be scrubbed; `true` always reads that
-way, `false` never. Read plane by plane, the editor's histogram is the first plane's, over the
-file's range. **Overlays** are the node's children: point glyphs, polylines, crosshairs. The plane
+So stepping through a large volume never puts the volume on the GPU. With `source: { file }`,
+`region_reads: auto` (the default) reads a file of more than 64 Mi voxels one plane at a time
+(`cvc::slice_source`, the last eight planes kept), so a volume larger than memory can be scrubbed;
+`true` always reads that way, `false` never. Other sources ignore `region_reads:` (a `data:`,
+`state:` or `node:` source warns): a host gives a large volume read plane by plane as a
+`slice_source` on the volume's key instead. Read plane by plane, the editor's histogram is one
+plane's (the starting index's, or the middle one), over the file's range. **Overlays** are the node's children: point glyphs, polylines, crosshairs. The plane
 is pushed back by `slice.overlay_offset`, so anything drawn in its plane shows on top of it in
 every view. `VolumeSliceNode::pickRay` meets a world ray with the plane exactly and names the
 voxel and its value (`cvcgl_volume_slice`, and `volume_slice_test` for the slicing itself).
@@ -3289,16 +3296,17 @@ seeds its key only while the key is empty:
 
 | key | meaning |
 |---|---|
-| `view`, `tool`, `slice.{x,y,z}` | `cvc::volume_grid_params`: the switch's view, what a click in a slice view does, the planes. A slice key's `min` and `max` properties are 0 and its last plane, so a slider with `range: key` (§5.3) spans the volume |
+| `view`, `tool`, `slice.{x,y,z}` | `cvc::volume_grid_params`: the switch's view, what a click in a slice view does, the planes. A slice key's `min` and `max` properties are 0 and its last plane, so a slider with `range: key` (§4) spans the volume |
 | `display.*`, `source.*` | `cvc::volume_grid_display_params` (`point_scale`, `show_points`, `crosshairs`, `grey`, and `render`: what draws the volume in the 3D view) and `cvc::volume_grid_source_params`: `volume`, `points` and `session`, the state keys the node follows (relative to the document; seeded from `source:`, `points:` and `session:`, and editing one follows the new key), and `var` and `time` |
 | `volumes` | published: the volumes `source.volume` may name, one per line, as it names them: each output of the document's `data:` entries that holds a volume (`data.<name>.<output>`), then the key `source.volume` names when it is not one of them; empty while it names none (a host that calls `setSource`). The component's Source combo picks from it, writing `source.volume` |
 | `classes`, `classes.<i>.{name,color,radius,variable,timestep,points}`, `classes.current` | the point classes as rows a `list:` binds (`color` is `r,g,b`; `points` is written). Editing, adding or removing a row edits the classes; `current` is the class a click marks |
 | `pick.*`, `pointer.*` | written by slice views (a viewport's `pick:` and `pointer:`, §5.18): each new pick is a step of a gesture under `tool`, the pointer fills the probe |
 | `cursor.{i,j,k,x,y,z,value,inside}`, `selection.count`, `status`, `info.*` | published: the probe, the selection's size, what the last request or gesture did (or that it waits for a volume), the volume's dims, range, spacing and `source` (the key it is at) |
 | `request` | one command, consumed: `delete_selected`, `select_all`, `select_none`, `undo`, `step <n>` (the shown view's plane), `segment` (the Segmentation tab's run, below), `stop` (ends what runs: a segmentation, keeping the last result, and a tile); the contours': `tile`, `stop_tile`, `close_curve`, `new_curve`, `delete_curve`, `clear_object`, `trace <iso> [first last [step]]`. With the `contours` tool the first four act on the contours |
-| `busy`, `stoppable`, `progress`, `phase`, `status`, `stats.work_ms`, `pid` | §1.9's job keys ([`job_keys.h`](../inc/cvc/core/job_keys.h)), while a `segment` runs (a tile's are under `tile.*`) |
-| `segment.*`, `segment.mesh.*` | the Segmentation tab's parameters: `cvc::seeded_segmentation_params` (`t_low`, `t_high`, `gamma`, `automatic`, ...; `variable` and `timestep` written as `source.var` and `time` when a run starts), `cvc::volume_grid_segment_view_params` (`show`, `opacity`, `show_surfaces`, `surface_opacity`, `make_surfaces`, `live`) and `cvc::class_surface_params` under `mesh` (`smoothing`, `close`, ...). `t_low`'s and `t_high`'s `min` and `max` properties are the volume's range |
+| `busy`, `stoppable`, `progress`, `phase`, `status`, `stats.work_ms`, `pid` | the job keys ([`job_keys.h`](../inc/cvc/core/job_keys.h); [VOLROVER-LIBRARY-PORTS-ROADMAP.md](roadmap/VOLROVER-LIBRARY-PORTS-ROADMAP.md) §1.9), while a `segment` runs (a tile's are under `tile.*`) |
+| `segment.*`, `segment.mesh.*` | the Segmentation tab's parameters: `cvc::seeded_segmentation_params` (`t_low`, `t_high`, `gamma`, `automatic`, ...; `variable` and `timestep` written as `source.var` and `time` when a run starts), `cvc::volume_grid_segment_view_params` (`show`, `opacity`, `show_surfaces`, `surface_opacity`, `make_surfaces`, `live`) and `cvc::class_surface_params` under `mesh` (`smoothing`, `close`, ...); every field in [PORT_PARAMETERS.md](PORT_PARAMETERS.md). `t_low`'s and `t_high`'s `min` and `max` properties are the volume's range, or 0 and 255 with `normalized_thresholds` |
 | `segment.rows`, `segment.rows.<i>.{name,color,visible,voxels,triangles}`, `segment.info.*`, `segment.warnings` | the last result's classes as rows (editing `color` or `visible` recolours or hides that class's labels and surface), and what it labelled |
+| `files.segments` | seeded `segments.rawv`: the file the Segmentation tab's Save classes writes (the component keeps its other file names, `files.classes`, `files.session` and `files.contours`, beside it) |
 | `objects`, `objects.<i>.{name,color,interpolation,samples,visible,curves,points,triangles}`, `objects.current` | the contour objects as rows a `list:` binds (`interpolation` is `linear` or `spline`, `samples` a spline's points per span; `curves`, `points` and `triangles` are written); `current` is the object a click draws |
 | `contour.*`, `contour.{selected,info,active}` | `cvc::volume_grid_contour_params`: `show`, `control_points`, `point_size` (voxels), `line_width`, `snap`, `show_3d`, `show_surfaces`, `surface_opacity`, `auto_tile` and `source` (a key whose data channel holds a `contour_stack` or a `grid_contours`, followed); published: how many control points are selected, a summary, the curve being drawn |
 | `tile.*` | `cvc::tile_params` (lengths in object units) and the tile job's keys (`busy`, `stoppable`, `status`, `progress`, `phase`, `stats.work_ms`, `pid`, `label`, `warnings`): under `tile`, so a tile runs beside the segmentation's job |
@@ -3312,11 +3320,13 @@ replaces the classes. The app saves them: `(data-save "graphics.root.children.gr
 "seeds.vgr")`, and `grid.session` the same way. The component's Save and Load buttons do this, and
 load with `(data-load ...)`, pointing `source.points` or `source.session` at what they loaded.
 `<node>.transfer_function` colours all three planes, with the volume's histogram; `display.grey`
-draws them in grey instead.
+draws them through `<node>.grey_transfer_function` (a grayscale model the node seeds) instead. A
+`region_reads:` prop is ignored with a warning: the node reads no file.
 
 In a slice view with the `points` tool, a click marks a point of the current class (or unmarks the
-one under the pointer), a drag selects with a rubber band (Shift adds, Ctrl or Alt takes away),
-and Shift+Ctrl drags the selection; with `navigate`, a click moves the other two planes to the
+one under the pointer), a click with Shift, Ctrl or Alt selects or deselects the point under the
+pointer, a drag selects with a rubber band (Shift adds, Ctrl or Alt takes away), and Shift+Ctrl or
+Shift+Alt drags the selection; with `navigate`, a click or a drag moves the other two planes to the
 voxel. Every edit is one undo step. The planes are the node's children `slice_xy`, `slice_xz` and
 `slice_zy`, realized as `<id>_slice_xy` ... and tagged with the node's id and their names, so a
 view with `show: [<id>]` shows this grid alone and a slice view its own plane; each plane's
@@ -3339,16 +3349,17 @@ pycvc (`volume_grid_test`, `cvcgl_volume_grid`, `cvcgl_ariadne_volume_grid`,
 **Segmentation** ([`VolumeGridSegmentation.h`](../inc/cvc/gl/VolumeGridSegmentation.h), the
 component's Segmentation tab, roadmap §5). `request: segment` segments the grid's volume, seeded by
 its point classes of the shown variable and timestep (`cvc::segment_seeded`, GenSeg's fast
-marching), then makes each class's surface (`cvc::class_surfaces`), as one sliced task on the app's
+marching), then (with `segment.make_surfaces`) makes each class's surface (`cvc::class_surfaces`), as one sliced task on the app's
 scheduler: the views stay live, the job keys show its progress, and `stop` ends it keeping the last
 result. The labels draw on each plane as a see-through `labels` layer in the classes' colours (the
 point classes' at the run), while the fronts advance (`segment.live`) and then for good; each
 class's surface draws in a `segments` group under `<id>_surfaces`, so a view with
-`show: [surfaces]` shows the classes alone. The result is on the data channel:
-`grid.segment.labels` (a UChar `cvc::volume`, 255 none), `grid.segment.classes` (a
-`std::shared_ptr<const std::vector<cvc::volume>>`, each class's voxels named after it),
-`grid.segment.border` (`cvc::point_classes`) and `grid.segment.surfaces.<n>` (class n's
-`cvc::geometry`). The app saves them: `(data-save "graphics.root.children.grid.grid.segment.classes"
+`show: [surfaces]` shows the classes, beside whatever else that group holds (the volume's renderer,
+the contours' curves and surfaces); `segments` has no tag of its own. The result is on the data
+channel: `grid.segment.labels` (a `std::shared_ptr<const cvc::volume>`, UChar, 255 none),
+`grid.segment.classes` (a `std::shared_ptr<const std::vector<cvc::volume>>`, each class's voxels
+named after it), `grid.segment.border` (a `std::shared_ptr<const cvc::point_classes>` with one
+class, `border`) and `grid.segment.surfaces.<n>` (class n's `cvc::geometry`). The app saves them: `(data-save "graphics.root.children.grid.grid.segment.classes"
 "segments.rawv" "volume")` writes the classes as one file's variables (VolumeGridRover's
 `SegTmp.rawv`), as the tab's Save classes does. A new volume clears the result. The data side is
 core libcvc ([`volume_grid_segment.h`](../inc/cvc/volume/volume_grid_segment.h),
@@ -3359,10 +3370,13 @@ the bones of VolRover's Visible Human CT.
 
 **Contours** ([`VolumeGridContours.h`](../inc/cvc/gl/VolumeGridContours.h), P10). With the
 `contours` tool a click adds a point to the current object's curve on that plane: at the end being
-drawn, else at the nearer end of its open curve there, else as a new curve (Shift+click always
-starts one). A click on the first point of the curve being drawn closes it; a drag from a control
+drawn, else at the nearer end of its open curve there, else as a new curve (Shift+click away from a
+control point always starts one); a click past the volume's edge adds nothing. A click on the other
+end of the curve being drawn closes it (at three points or more). A click on any other control
+point selects it and makes its object current, and at an open curve's end makes that the end being
+drawn; with Shift, Ctrl or Alt it selects or deselects the point instead. A drag from a control
 point moves it (the selection, when the point is in it); a drag elsewhere selects control points
-with a rubber band. Every edit is one undo step. Each object draws its curves straight or as a
+with a rubber band (Shift adds, Ctrl or Alt takes away). Every edit is one undo step. Each object draws its curves straight or as a
 spline through the points (a centripetal Catmull-Rom, `samples` points per span). The curves are
 on the data channel at `grid.curves` (`std::shared_ptr<const cvc::grid_contours>`, every curve as
 drawn; a write from outside replaces them), and the closed ones as contour stacks at
@@ -3370,11 +3384,13 @@ drawn; a write from outside replaces them), and the closed ones as contour stack
 `tiler.tile` and the contour formats take), `grid.contours.xz` and `grid.contours.zy`. `trace`
 adds the curves where the shown view's planes cross an isovalue (VolumeGridRover's isocontouring:
 marching squares, simplified to half a voxel). `tile` runs the contour tiler on every object's
-closed curves as a sliced task (each plane orientation a stack, in voxel units so its tolerances
-hold for any volume) and puts a surface per object in the 3D view in the object's colour, at
-`grid.surfaces.<object>` on the data channel; `contour.auto_tile` tiles whenever the contours are
-replaced or traced. Each plane's overlays draw its curves (`contours`) and their control points
-(`contour_points`, the selection's rings, the drawn end's amber ring); the `surfaces` group holds
+closed curves as a sliced task (each plane orientation a stack, in units of the volume's smallest
+voxel spacing so its tolerances hold for any volume) and puts a surface per object in the 3D view
+in the object's colour (or `tile.color`, one colour for all), at `grid.surfaces.<object>` on the
+data channel (a `.` or white space in the name is `_` in the key); `contour.auto_tile` tiles
+whenever the contours are replaced or traced. Each plane's overlays draw its curves, the
+selection's rings, the drawn end's amber ring and a rubber band being dragged (`contours`), and the
+control points as disks (`contour_points`); the `surfaces` group holds
 every plane's curves (`contours`) and the surfaces (`tiles`). The session keeps the contours. The
 editing is core libcvc ([`volume_grid_contours.h`](../inc/cvc/volume/volume_grid_contours.h):
 `cvc::grid_contour_editor`, `cvc::grid_contour_gestures`, `cvc::trace_slice`,
@@ -3383,6 +3399,63 @@ editing is core libcvc ([`volume_grid_contours.h`](../inc/cvc/volume/volume_grid
 pycvc (`volume_grid_contours_test`, `volume_grid_contour_intrinsics_test`,
 `cvcgl_volume_grid_contours`, `test_pycvc_volume_grid_contours.py`).
 `examples/ariadne/documents/volume_grid_contours.ari` is the demo.
+
+**`type: contour_lab`** ([`contour_lab_nodes.h`](../inc/cvc/gl/ariadne/contour_lab_nodes.h),
+roadmap P4) is a stack of planar contours on parallel slices, drawn as polylines, and the surfaces
+the contour tiler (`cvc::tile_contours`, [`tiler.h`](../inc/cvc/geometry/tiler.h), VolumeRover's
+ContourTiler) builds through them, one per component:
+
+```yaml
+- node: axons
+  type: contour_lab
+  source: { file: series.ser }       # any contour format the app reads (.ser, .config, .contour, .cvcc)
+  # source: { node: grid }           # or another node's contour_stack: a volume_grid's grid.contours,
+  #                                  #   another contour_lab's tiler.contours (key: names another)
+  # source: { state: demo.stack }    # or the contour_stack on a state key's data channel
+  read: { first: 1, last: 40 }       # how a file is read (cvc::contour_read_params' fields)
+  tiler: { curation_delta: 0.005 }   # the tiler's parameters (cvc::tile_params' fields)
+  auto_tile: true                    # tile once the contours load, and after every load
+  components:                        # per component: its colour, shown, tiled
+    ax010: { color: [0.4, 0.6, 1.0], visible: true, tile: true }
+  line_width: 1                      # the contours' polylines (show_contours: false hides them)
+  opacity: 0.55                      # the surfaces' (show_tiles: false hides them)
+```
+
+The node reads a file itself, whole, when the scene is realized and at each `load`; a relative path
+resolves against the document's directory, else the working directory. A node source names a
+top-level scene node realized before this one (or a state path, with a `.`) and takes its
+`grid.contours` or else its `tiler.contours`, unless `key:` names another; node and state sources
+are followed, so new contours there load again (and tile, with `auto_tile`). Its keys live under
+`<node>.tiler`:
+
+| key | meaning | seeded from prop |
+|---|---|---|
+| `request` | `load`, `tile` or `stop` (§5.5); several separated by spaces run in turn. `load` reads the `source.*` keys again; `tile` starts the tiler as a sliced task on the app's scheduler; `stop` ends it at its next step and keeps the surfaces the node had | — |
+| `auto` | 1: tile after every load | `auto_tile` |
+| `source.file`, `source.node`, `source.key`, `source.state` | the source; a change applies at the next `load` | `source:` |
+| `read.*` | `cvc::contour_read_params` (`first`, `last`, `include`, `exclude`, `min_points`, `z_spacing`, `apply_transforms`, `keep_open`; [PORT_SHARED_TYPES.md](PORT_SHARED_TYPES.md)), for a file | `read:` |
+| `<field>` of `cvc::tile_params` | `collinear_epsilon`, `curation_delta`, `remove_intersections`, `correspondence_overlap`, `include`, `exclude`, `z_first`, `z_last`, `cap_ends`, `color` ([PORT_PARAMETERS.md](PORT_PARAMETERS.md)); read when a tile starts. A `color` of three values draws every surface in it | `tiler:` |
+| `components`, `components.<i>.{name,color,visible,tile,triangles}` | the stack's components as rows a `list:` binds (`color` is `r,g,b` in [0, 1]; `triangles` is written, `-` before a tile). Unticking `tile` leaves the component out of the next tile. A name already listed keeps its row across a load; a new one takes its `components:` entry, else the stack's colour | `components:` |
+| `view.contours`, `view.tiles`, `view.opacity`, `view.line_width` | the polylines and the surfaces shown, the surfaces' opacity, the polylines' width (0.5 to 20) — followed live | `show_contours`, `show_tiles`, `opacity`, `line_width` |
+| `info.slices`, `.first`, `.last`, `.contours`, `.vertices`, `.components`, `.z_spacing`, `.surfaces`, `.triangles` | published: the stack's slices, its first and last slice index, its polygons, vertices and components, the slice spacing; the last tile's surfaces and triangles | — |
+| `warnings`, `warnings.<i>` | published: how many warnings the last tile gave, and each one | — |
+| `label` | published: the slice pair being tiled (`slices 3 - 4`), `""` otherwise | — |
+| `busy`, `stoppable`, `status`, `progress`, `phase`, `stats.work_ms`, `pid` | the job keys ([`job_keys.h`](../inc/cvc/core/job_keys.h)); `phase` names the slice pair while it tiles (`tiling slices 3 - 4 42%`), and `status` says what a load read or why it failed | — |
+
+Every parameter key carries its table's `doc`, `unit`, `min`, `max` and `default` properties. A
+parameter that does not parse is reported in `status` and the tile does not start; a failed load
+says why and keeps what the node had, and so does a failed or stopped tile. The stack is on the
+data channel at `<node>.tiler.contours` (a `std::shared_ptr<const cvc::contour_stack>`, which
+another `contour_lab`, `tiler.tile` or a program reads) and each surface at
+`<node>.tiler.surfaces.<component>` (a `cvc::geometry`; a `.` or white space in the name is `_` in
+the key). The node's children are `<id>_contours` (tag `contours`, a polyline node per component)
+and `<id>_tiles` (tag `tiles`, a surface per component tiled), so a viewport's `show:` or `hide:`
+picks either. Without `cvc::planar` (`CVC_WITH_PLANAR`) the tiler throws and `status` reports it.
+The `contour_tiler` component (§6.5) is its panel; the scene has work pending while a tile runs or
+a request waits. `examples/ariadne/documents/contour_tiler.ari` is the demo: two axons, a branching
+third and two mitochondria traced through 72 sections of a Reconstruct series of mouse hippocampus
+(`examples/data/contours/kuwajima2019`, CC0), tiled into see-through surfaces (`cvcgl_contour_lab`,
+and the `contour_tiler` golden).
 
 **`type: volume_render`** ([`volume_render_nodes.h`](../inc/cvc/gl/ariadne/volume_render_nodes.h),
 [`VolumeRenderNode.h`](../inc/cvc/gl/VolumeRenderNode.h)) is one volume the app holds, drawn by the
@@ -6415,6 +6488,7 @@ copy (a libcvc checkout's `src/cvc/ariadne`). Each binds state keys a C++ object
 | `wind_controls` | the scene's one wind (`wind.speed`, `wind.dir`, `wind.gustiness`; §5.4 "Wind") |
 | `mesh_tools` | a `mesh_lab` node (§5.4; arg `node`, default `mesh`) |
 | `fe_controls` | an `fe_lab` node (§5.4; arg `node`, default `domain`) |
+| `contour_tiler` | a `contour_lab` node (§5.4; args `node`, default `contours`, `title`, `id` and `slices`, the slice range's slider end): the component picker, the slice range, the tiler's parameters, Tile, Stop and Load, and a progress bar naming the slice pair |
 | `scene_view` | a window holding a view of the scene (the `viewport` widget, §5.18), from a camera of its own or a named one (args `view`, `scene`, `show`, `hide`, `mode`, `camera`, `chrome`, `shadows`, `caption`, `width`, `height`, `title`, `id`) |
 | `card` | a card in a list: avatar / title / subtitle / timestamp header, body, `media` and `actions` slots; its args are state keys, so a `repeat:` includes one per item (not a window: embed it) |
 | `transfer_function`, `transfer_function_editor` | any node's `transfer_function` model (args `node`, `id`): the ColorTable2 editor with histogram / contour spectrum / contour tree layers — see [`TRANSFER_FUNCTIONS.md`](TRANSFER_FUNCTIONS.md) |
@@ -7991,14 +8065,16 @@ on_tick: |
   world:
     avatars:
       archetypes:                  # every avatar has the first, for now
-        person: { body: { mass: 70, width: 0.5, height: 1.7, density: 985 }, controllers: [walker@1] }
+        person: { body: { mass: 70, width: 0.5, height: 1.7, density: 985 }, controllers: [walker@2] }
       policy:
         max_speed: 4.0             # the veto: the fastest an intent may ask for (m/s)
         allow_vertical: false
         energy: { enabled: true, force_max: 840, power_max: 1200, power_rest: 300,
                   reserve_max: 30000, transport_cost: 0.2, empty: rest, recover_fraction: 0.25 }
-    controllers:                   # walker@1 is the one kernel this build runs
-      walker@1: { kernel: walker, version: 1, params: { walk_speed: 2.0 } }
+    controllers:                   # walker@2: walker@1 on land, wading and swimming in water
+      walker@2: { kernel: walker, version: 2, params: { walk_speed: 2.0, wade_depth: 0.3,
+                  swim_depth: 1.2, wade_slow: 0.6, swim_speed: 1.0, swim_sprint: 1.8,
+                  swim_force: 300, dive_speed: 0.8, climb_height: 0.6, swim_cost: 0.8 } }
   ```
 
   - **Each key left out keeps the default**, which is the block above. Archetypes, when given,

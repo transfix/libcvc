@@ -45,7 +45,8 @@ struct Value;
 //
 // Every avatar has the first archetype and moves with the first controller it allows (WD2; a
 // participant's own pick comes with WD4 and WD6). default_world_rules() is what the conference
-// had compiled in before: a 70 kg, 0.5 x 0.5 x 1.7 m person, walker@1, a 4 m/s cap.
+// had compiled in before: a 70 kg, 0.5 x 0.5 x 1.7 m person, a 4 m/s cap, and the walker, now
+// walker@2 (walker@1 on land; wading and swimming in water, OW9c).
 
 struct world_physics {
   cvc::physics::vec3 gravity{0.0, 0.0, -9.80665}; // m/s^2
@@ -63,7 +64,7 @@ struct world_physics {
 struct avatar_archetype {
   std::string id = "person";
   avatar_body body;
-  std::vector<std::string> controllers{"walker@1"}; // controller ids; the first is the avatar's
+  std::vector<std::string> controllers{"walker@2"}; // controller ids; the first is the avatar's
   // An avatar that is a vehicle (ARIADNE_WORLDS.md section 18.6, OW6c): the id of one of the
   // world's vehicle archetypes (world: vehicles: archetypes:). A participant with this archetype
   // has no body of its own: the server spawns that vehicle for it and it drives it for good. ""
@@ -73,12 +74,17 @@ struct avatar_archetype {
 };
 
 struct avatar_controller {
-  std::string id = "walker@1";
+  std::string id = "walker@2";
   std::string kernel = "walker";
-  int version = 1;
-  // The kernel's knobs. walker@1's walk_speed (m/s) is what a client's walk keys ask for; the run
-  // a client may add is capped by the policy's max_speed.
-  std::map<std::string, double> params{{"walk_speed", 2.0}};
+  int version = 2;
+  // The kernel's knobs. The walker's walk_speed (m/s) is what a client's walk keys ask for; the
+  // run a client may add is capped by the policy's max_speed. walker@2's swimming knobs
+  // (avatar_swim, avatar_physics.h; ARIADNE_WORLDS.md section 18.10.2) are walker@1's walker in
+  // the water; walker@1 has only walk_speed (and jump_speed, 4 when left out).
+  std::map<std::string, double> params{
+      {"walk_speed", 2.0},   {"wade_depth", 0.3},  {"swim_depth", 1.2},   {"wade_slow", 0.6},
+      {"swim_speed", 1.0},   {"swim_sprint", 1.8}, {"swim_force", 300.0}, {"dive_speed", 0.8},
+      {"climb_height", 0.6}, {"swim_cost", 0.8}};
   double param(const std::string &name, double def) const;
   bool operator==(const avatar_controller &) const = default;
 };
@@ -349,7 +355,10 @@ struct world_rules {
   world_physics physics;
   std::vector<avatar_archetype> archetypes{avatar_archetype{}};
   avatar_policy policy;
-  std::vector<avatar_controller> controllers{avatar_controller{}};
+  // walker@1 stays defined beside walker@2 (OW9c), first as it always was, so a document whose
+  // archetype names walker@1 still runs; the default person allows walker@2.
+  std::vector<avatar_controller> controllers{
+      avatar_controller{"walker@1", "walker", 1, {{"walk_speed", 2.0}}}, avatar_controller{}};
   // The vehicles a world offers (world: vehicles: archetypes:), none by default. The relay does
   // not read them yet; a local world runtime (SceneWorld) spawns them.
   std::vector<vehicle_archetype> vehicles;
@@ -365,7 +374,7 @@ struct world_rules {
   // Where they start (world: spawns:).
   spawn_rules spawns;
   // What avatar() and controller() give when the lists above are empty: the default person and
-  // walker@1. Left as they are.
+  // walker@2. Left as they are.
   avatar_archetype fallback_avatar{};
   avatar_controller fallback_controller{};
   bool operator==(const world_rules &) const = default;
@@ -378,19 +387,22 @@ struct world_rules {
   // An archetype by id; null for none.
   const avatar_archetype *find_avatar(const std::string &id) const;
   // The avatar's controller: the first its archetype allows, as `controllers` defines it (the
-  // default walker@1 when that is missing).
+  // default walker@2 when that is missing).
   const avatar_controller &controller() const;
   const avatar_controller *find_controller(const std::string &id) const;
 };
 
 world_rules default_world_rules();
 
-// Whether this build runs KERNEL@VERSION: walker@1 so far (WD4 brings a catalog).
+// Whether this build runs KERNEL@VERSION: walker@1 and walker@2 so far (WD4 brings a catalog). A
+// client never checks: an older build predicts walker@2 as walker@1 (the same on land) and is
+// corrected in water.
 bool controller_kernel_known(const std::string &kernel, int version);
 
 // "" or what is wrong with RULES: an archetype's body that is not finite and positive, an id
 // repeated or not a name, an archetype allowing no controller or one `controllers` does not define,
-// a kernel this build does not run, a policy limit that is negative or not finite.
+// a kernel this build does not run, walker@2's knobs out of range (each >= 0, wade_slow at most 1,
+// wade_depth below swim_depth), a policy limit that is negative or not finite.
 std::string check_world_rules(const world_rules &rules);
 
 // The world: block (ARIADNE_WORLDS.md §2), on top of RULES:
@@ -399,14 +411,16 @@ std::string check_world_rules(const world_rules &rules);
 //     avatars:
 //       archetypes:                 # replaces the default list; the first is every avatar's
 //         person: { body: { mass: 70, width: 0.5, height: 1.7, density: 985 },
-//                   controllers: [walker@1] }
+//                   controllers: [walker@2] }
 //       policy:                     # each key given replaces the default
 //         max_speed: 4.0
 //         allow_vertical: false
 //         energy: { enabled: true, force_max: 840, power_max: 1200, power_rest: 300,
 //                   reserve_max: 30000, transport_cost: 0.2, empty: rest, recover_fraction: 0.25 }
-//     controllers:                  # added to (or replacing, by id) the default walker@1
-//       walker@1: { kernel: walker, version: 1, params: { walk_speed: 2.0 } }
+//     controllers:                  # added to (or replacing, by id) the defaults walker@1, @2
+//       walker@2: { kernel: walker, version: 2, params: { walk_speed: 2.0, wade_depth: 0.3,
+//                   swim_depth: 1.2, wade_slow: 0.6, swim_speed: 1.0, swim_sprint: 1.8,
+//                   swim_force: 300, dive_speed: 0.8, climb_height: 0.6, swim_cost: 0.8 } }
 //     vehicles:
 //       archetypes:                 # the vehicles a spawn may pick, in this order
 //         humvee:
