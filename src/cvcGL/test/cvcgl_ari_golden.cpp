@@ -10,12 +10,13 @@
 // least 500 px on its short side, so the small-screen rule never closes them), ImGui's frame delta
 // pinned, and several frames at a fixed dt before the capture, so new windows have finished
 // appearing; where a custom node has work in flight (RealizedScene::pending_work: a contour_lab's
-// tile, a mesh_lab skeleton, a colour job), more frames until it is done, then those again for the
-// UI to show what it published; where the scene has volren nodes, more frames until each shows a
-// finished raycast (they raycast on a worker thread). The test then renders one frame more and
-// requires it to be identical to the capture. When ImGui drew exactly the same UI in both and only
-// the rasterizer moved (the Apple Software Renderer, in a process's first frames), it renders up
-// to kRasterSettleFrames more until two agree.
+// tile, a mesh_lab skeleton, a colour job), or the document says it has (its golden.wait key is 1:
+// a DSL job it started, such as volume_filters' filter), more frames until it is done, then those
+// again for the UI to show what it published; where the scene has volren nodes, more frames until
+// each shows a finished raycast (they raycast on a worker thread). The test then renders one frame
+// more and requires it to be identical to the capture. When ImGui drew exactly the same UI in both
+// and only the rasterizer moved (the Apple Software Renderer, in a process's first frames), it
+// renders up to kRasterSettleFrames more until two agree.
 //
 // Goldens are made under Mesa llvmpipe, the rasterizer of the Linux and Windows CI jobs. Other
 // rasterizers, and other Mesa versions, draw anti-aliased edges and shading a little differently,
@@ -39,6 +40,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cvc/ariadne/app_runtime.h>
 #include <cvc/core/app.h>
 #include <cvc/gl/CameraController.h>
 #include <cvc/gl/ImGuiOverlay.h>
@@ -47,7 +49,6 @@
 #include <cvc/gl/VolRenNode.h>
 #include <cvc/gl/ariadne/AriRuntime.h>
 #include <cvc/gl/ariadne/scene_realize.h>
-#include <cvc/state/state.h>
 #include <filesystem>
 #include <string>
 #include <thread>
@@ -109,11 +110,6 @@ struct PointerStep {
 struct GoldenCase {
   const char *name;
   std::vector<PointerStep> pointer;
-  // A state key under the document's prefix that its own programs fill once the frame is final,
-  // for a document whose work runs where no node's pending_work probe sees it (a DSL job a
-  // component starts, its result put in a dataset from on_tick): the capture waits until the key
-  // holds a value, then kMinFrames more, as for a node's work.
-  const char *until = nullptr;
 };
 const GoldenCase kCases[] = {
     // Click "File" on the menu bar: the dropdown opens on the press and stays open.
@@ -124,9 +120,6 @@ const GoldenCase kCases[] = {
     // Right-click the card (button 1, ImGui's right): its menu opens on the release and stays open.
     {"context_menu",
      {{1, 60.0f, 109.0f, -1, false}, {2, 60.0f, 109.0f, 1, true}, {3, 60.0f, 109.0f, 1, false}}},
-    // The tight_cocone component's run (a cocone.tight job, its surface put in the dataset by
-    // tight-cocone-step): the document's on_tick fills tc.info.triangles once it is in.
-    {"tight_cocone", {}, "tc.info.triangles"},
 };
 
 const GoldenCase *findCase(const std::string &name) {
@@ -330,28 +323,21 @@ bool runDocument(const fs::path &doc, const fs::path &goldenDir, const fs::path 
   // the one it went idle on, so the windows show the keys it published; a probe busy again (a
   // request a finished job left) starts the count over. A slow machine only takes more frames
   // here; a document whose nodes register no probe takes none. The ceiling is a hang guard.
+  // Work no node knows of (a DSL job a document started with a -start form, a dataset loading
+  // before it) is the document's to declare: while its golden.wait key is 1, it is in flight too.
   int workFrames = 0;
-  if (gc && gc->until) {
-    const std::string key =
-        rt.prefix().empty() ? std::string(gc->until) : rt.prefix() + "." + gc->until;
-    const auto start = std::chrono::steady_clock::now();
-    while (cvc::state::instance(app)(key).value().empty() &&
-           std::chrono::steady_clock::now() - start < kSettleCeiling) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(5));
-      rt.step(kDt);
-      ++workFrames;
-    }
-    check(!cvc::state::instance(app)(key).value().empty(),
-          name + ": its document filled " + gc->until, std::to_string(workFrames) + " frames more");
-    for (int f = 0; f <= kMinFrames; ++f, ++workFrames)
-      rt.step(kDt);
-  }
   const cvc::gl::ariadne::RealizedScene *realized = rt.realized();
-  if (realized && !realized->pending_work.empty()) {
+  cvc::state &docWait = rt.app_runtime().app().root()(
+      rt.prefix().empty() ? std::string("golden.wait") : rt.prefix() + ".golden.wait");
+  const auto docBusy = [&] { return docWait.value() == "1"; };
+  if ((realized && !realized->pending_work.empty()) || docBusy()) {
     const auto busy = [&] {
-      for (const auto &probe : realized->pending_work)
-        if (probe && probe())
-          return true;
+      if (docBusy())
+        return true;
+      if (realized)
+        for (const auto &probe : realized->pending_work)
+          if (probe && probe())
+            return true;
       return false;
     };
     const auto start = std::chrono::steady_clock::now();
