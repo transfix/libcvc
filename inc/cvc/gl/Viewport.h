@@ -173,9 +173,11 @@ private:
   // controller and no ".viewers.<name>.layout" state at construction; camera()
   // lazily builds the controller only if something asks for it. HostStyle
   // (the SceneRenderer facade) uses bare so its state footprint matches the
-  // classic single-view renderer, which writes no such state.
+  // classic single-view renderer, which writes no such state. `viewer` names its layout state
+  // (".viewers.<viewer>.layout"); empty: `name` does.
   Viewport(cvc::app &app, SceneGraph &scene, const std::string &cameraStatePath,
-           const std::string &name, bool mirror, bool managed = true);
+           const std::string &name, bool mirror, bool managed = true,
+           const std::string &viewer = std::string());
   void setMirrorSource(vtkRenderer *src); // manager-only, at addMirrorViewport
   void setMirrorLive(bool on);            // manager-only, at addMirrorViewport
 

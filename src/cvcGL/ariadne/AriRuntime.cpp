@@ -13,6 +13,8 @@
 #include <cvc/ariadne/stream/stream_registry.h> // stream_registry::for_app / lookup
 #include <cvc/ariadne/stream_intrinsics.h>      // register_stream_intrinsics: streams by default
 #include <cvc/core/app.h>                       // cvc::app
+#include <cvc/core/scene_clocks.h> // a mounted scene's own world clock (ARIADNE_SHELL.md 4.4)
+#include <cvc/core/sim_tick.h>     // sim_quantum: a mounted scene's clock: hz
 #include <cvc/gl/CameraController.h>            // cam.update / frameBounds
 #include <cvc/gl/GeometryNode.h>                // GeometryNode (gl-bind-stream target)
 #include <cvc/gl/ImGuiOverlay.h>                // overlay draw callback
@@ -106,7 +108,10 @@ bool apply_background(vtkRenderer *r, const ari::Scene &scene) {
 class GlSceneAdapter : public ari::SceneAdapter, public StreamBindingSink {
 public:
   GlSceneAdapter(SceneRenderer &view, CameraController &cam) : view_(&view), cam_(&cam) {}
-  ~GlSceneAdapter() override { clear_scenes(); }
+  ~GlSceneAdapter() override {
+    clear_mounts();
+    clear_scenes();
+  }
 
   // A `scenes:` entry: a SceneGraph of its own (its nodes, lights, shadows, background) attached
   // to a viewport of its own, `anchor`, which the views of it mirror. The anchor is not shown; it
@@ -121,6 +126,156 @@ public:
       if (s->id == id)
         return s.get();
     return nullptr;
+  }
+
+  // ARIADNE_SHELL.md 4.3 a mounted document's scene: a SceneGraph of its own at the mount's
+  // sub-prefix, attached to a viewport of its own, `anchor`, whose camera is
+  // <sub>.viewers.main.camera. Its scene window draws that viewport into the window's texture (the
+  // scene's own renderer, with its lights, background and shadows); its other views mirror it. Its
+  // world steps on a clock of its own (cvc::scene_clock at the sub-prefix). Its scenes: entries are
+  // scenes of its own, as a document's are.
+  struct MountedScene {
+    std::string id, anchor;
+    std::unique_ptr<SceneGraph> sg;
+    RealizedScene realized; // after sg: it goes first (a rig's lights leave the graph)
+    std::vector<std::unique_ptr<OtherScene>> scenes;
+    SceneAssetCache assets;
+    bool hold = false; // its world holds while no view draws it (hold_mount)
+  };
+  const MountedScene *mounted(const std::string &id) const {
+    const auto it = mounts_.find(id);
+    return it == mounts_.end() ? nullptr : it->second.get();
+  }
+  // The mount whose scene the widgets at `scope` see as their document's: the deepest realized
+  // mount at or above it ("" none).
+  std::string mount_at(const std::string &scope) const {
+    std::string best;
+    for (const auto &[id, m] : mounts_)
+      if (id.size() > best.size() &&
+          (scope == id || (scope.size() > id.size() && scope.compare(0, id.size(), id) == 0 &&
+                           scope[id.size()] == '.')))
+        best = id;
+    return best;
+  }
+  // What the views say: whether a view of scene `key` was drawn last frame (a mount's hold), and
+  // what to do before a mount's viewports go (its views go first: a mirror's source cannot be
+  // removed under it). AriRuntime sets both to its SceneViews'.
+  void set_view_hooks(std::function<bool(const std::string &)> drawn,
+                      std::function<void(const std::string &)> drop) {
+    drawn_ = std::move(drawn);
+    drop_views_ = std::move(drop);
+  }
+
+  bool realize_mount(const std::string &id, const ari::Scene &scene,
+                     const std::vector<ari::Scene> &scenes, const std::string &sub_prefix,
+                     std::vector<std::string> *warns) override {
+    clear_mount(id);
+    if (view_->isClosed())
+      return false;
+    ViewportManager &vm = view_->viewportManager();
+    auto m = std::make_unique<MountedScene>();
+    m->id = id;
+    m->anchor = "mount:" + id;
+    if (vm.hasViewport(m->anchor)) {
+      if (warns)
+        warns->push_back("ari: the host already has a viewport named '" + m->anchor +
+                         "': the mounted scene is not drawn");
+      return false;
+    }
+    cvc::app &app = view_->scene().appContext();
+    // Its world's clock, before its world is made (a physics step is whole quanta of it): at its
+    // own rate (clock: hz), else at the rate of the clock above it, the shell's.
+    const double quantum = scene.clock.hz > 0.0 ? cvc::sim_quantum(scene.clock.hz)
+                                                : cvc::scene_clock(app, sub_prefix).fixed_dt();
+    cvc::add_scene_clock(app, sub_prefix, quantum);
+    m->sg = std::make_unique<SceneGraph>(app, sub_prefix);
+    const double none[4] = {0.0, 0.0, 0.0, 0.0};
+    Viewport &vp = vm.addSceneViewport(m->anchor, *m->sg, none, 1, "main");
+    vp.setVisible(false); // shown by its scene window (SceneViews)
+    vp.setInputEnabled(false);
+    if (!apply_background(vp.renderer(), scene))
+      copy_main_background(vp.renderer());
+    // Its scene window shows this viewport whole, so it clears its texture to its background (a
+    // viewport over the main one keeps what is under it unless it is opaque).
+    vp.renderer()->SetPreserveColorBuffer(0);
+    RealizeOptions options;
+    options.assets = &m->assets;
+    options.count = [this](const std::string &expr) { return count(expr); };
+    m->realized = realize_scene(*m->sg, scene, sub_prefix, warns, options);
+    m->realized.clock.present = true; // every mounted scene has a world clock (4.4)
+    // Its camera framed on its scene, and on its cameras: main, as the main view is for a
+    // document alone.
+    const cvc::bounding_box bb = m->sg->computeGraphicsBounds();
+    if (!bb.isNull()) {
+      vp.camera().frameBounds(bb.minx, bb.miny, bb.minz, bb.maxx, bb.maxy, bb.maxz);
+      for (const ari::SceneCamera &c : scene.cameras)
+        if (c.id == "main") {
+          const double b[6] = {bb.minx, bb.maxx, bb.miny, bb.maxy, bb.minz, bb.maxz};
+          frame_scene_camera(vp.camera(), b, c, *m->sg);
+        }
+    }
+    for (const ari::Scene &sc : scenes) {
+      auto s = std::make_unique<OtherScene>();
+      s->id = sc.id;
+      s->anchor = m->anchor + "|scene." + sc.id;
+      if (vm.hasViewport(s->anchor)) {
+        if (warns)
+          warns->push_back("ari: scenes: '" + sc.id + "' is declared twice; the first is used");
+        continue;
+      }
+      s->sg = std::make_unique<SceneGraph>(app, sub_prefix + ".scenes." + sc.id);
+      s->sg->setDiagnosticChromeVisible(false);
+      Viewport &sv = vm.addSceneViewport(s->anchor, *s->sg, none, 1);
+      sv.setVisible(false);
+      sv.setInputEnabled(false);
+      if (!apply_background(sv.renderer(), sc))
+        copy_background(vp.renderer(), sv.renderer());
+      RealizeOptions o;
+      o.assets = &m->assets;
+      o.count = [this](const std::string &expr) { return count(expr); };
+      o.physics_key = "scenes." + sc.id + ".physics";
+      s->realized = realize_scene(*s->sg, sc, sub_prefix, warns, o);
+      s->realized.clock.present = false; // the mount's scene drives the clock they share
+      m->scenes.push_back(std::move(s));
+    }
+    mounts_[id] = std::move(m);
+    return true;
+  }
+
+  void clear_mount(const std::string &id) override {
+    const auto it = mounts_.find(id);
+    if (it == mounts_.end())
+      return;
+    if (drop_views_)
+      drop_views_("mount:" + id); // its views first: a mirror's source cannot go under it
+    MountedScene &m = *it->second;
+    if (!view_->isClosed()) {
+      ViewportManager &vm = view_->viewportManager();
+      for (auto &s : m.scenes)
+        if (vm.hasViewport(s->anchor))
+          vm.removeViewport(s->anchor);
+      if (vm.hasViewport(m.anchor))
+        vm.removeViewport(m.anchor);
+    }
+    cvc::app &app = view_->scene().appContext();
+    mounts_.erase(it); // its graphs, nodes and world, which step on its clock: before the clock
+    cvc::remove_scene_clock(app, id);
+  }
+
+  void hold_mount(const std::string &id, bool hold) override {
+    const auto it = mounts_.find(id);
+    if (it != mounts_.end())
+      it->second->hold = hold;
+  }
+
+  std::vector<const RealizedScene *> mounted_scenes() const {
+    std::vector<const RealizedScene *> out;
+    for (const auto &[id, m] : mounts_) {
+      out.push_back(&m->realized);
+      for (const auto &s : m->scenes)
+        out.push_back(&s->realized);
+    }
+    return out;
   }
 
   // Required scene-node customs (cvcGL's registry) before realizing; a missing one skips the scene.
@@ -194,14 +349,7 @@ public:
       vp.setInputEnabled(false);
       // The main view's background unless the scene sets its own.
       if (!apply_background(vp.renderer(), scene))
-        if (vtkRenderer *main = view_->renderer()) {
-          double bg[3], bg2[3];
-          main->GetBackground(bg);
-          main->GetBackground2(bg2);
-          vp.renderer()->SetBackground(bg);
-          vp.renderer()->SetBackground2(bg2);
-          vp.renderer()->SetGradientBackground(main->GetGradientBackground());
-        }
+        copy_main_background(vp.renderer());
       RealizeOptions options;
       options.assets = &assets_;
       options.count = [this](const std::string &expr) { return count(expr); };
@@ -217,6 +365,7 @@ public:
   void clear() override {
     stop_world_thread(); // the world's worker goes before the world does
     verb_bindings_.clear();
+    clear_mounts();
     clear_scenes();
     assets_ = SceneAssetCache{};
     if (chromeHidden_) { // no_scene() hid the host's chrome: the next document starts with it again
@@ -304,6 +453,11 @@ public:
       ari::sync_scene_visibility(app, realized_.visibility); // bound visible: -> node .visible
     for (auto &s : scenes_)
       ari::sync_scene_visibility(app, s->realized.visibility);
+    for (auto &[id, m] : mounts_) {
+      ari::sync_scene_visibility(app, m->realized.visibility);
+      for (auto &s : m->scenes)
+        ari::sync_scene_visibility(app, s->realized.visibility);
+    }
   }
 
   bool restart(std::vector<std::string> *warns) override {
@@ -322,6 +476,20 @@ public:
       for (auto &s : scenes_)
         if (vm.hasViewport(s->anchor))
           tick_scene(s->realized, vm.viewport(s->anchor).renderer(), tick_dt_);
+    }
+    // ARIADNE_SHELL.md 4.4 each mount's world steps on its own clock, in the background too,
+    // unless it holds while no view drew its scene last frame.
+    if (!mounts_.empty() && !view_->isClosed()) {
+      ViewportManager &vm = view_->viewportManager();
+      for (auto &[id, m] : mounts_) {
+        if (!vm.hasViewport(m->anchor))
+          continue;
+        m->realized.held = m->hold && !(drawn_ && drawn_("mount:" + id));
+        tick_scene(m->realized, vm.viewport(m->anchor).renderer(), tick_dt_);
+        for (auto &s : m->scenes)
+          if (vm.hasViewport(s->anchor))
+            tick_scene(s->realized, vm.viewport(s->anchor).renderer(), tick_dt_);
+      }
     }
     // Service the imperative (gl-bind-stream) bindings here, on the render thread, right after the
     // declarative ones. They are NOT in realized_.custom_ticks (that vector is rebuilt wholesale on
@@ -372,6 +540,26 @@ public:
   }
 
 private:
+  // The main view's background (a solid colour or a gradient) on renderer r.
+  void copy_main_background(vtkRenderer *r) {
+    if (vtkRenderer *main = view_->renderer())
+      copy_background(main, r);
+  }
+  static void copy_background(vtkRenderer *from, vtkRenderer *to) {
+    if (!from || !to)
+      return;
+    double bg[3], bg2[3];
+    from->GetBackground(bg);
+    from->GetBackground2(bg2);
+    to->SetBackground(bg);
+    to->SetBackground2(bg2);
+    to->SetGradientBackground(from->GetGradientBackground());
+  }
+  // Every mount's scene comes down (a new document, the adapter going).
+  void clear_mounts() {
+    while (!mounts_.empty())
+      clear_mount(mounts_.begin()->first);
+  }
   // The document's other scenes come down: their viewports (the views of them are gone first:
   // AriRuntime::load clears its SceneViews before the load), then their graphs.
   void clear_scenes() {
@@ -406,6 +594,9 @@ private:
   std::vector<std::string> lights_; // the realized free (non-rig) lights, which clear() removes
   SceneAssetCache assets_;          // the document's assets, read once for all its scenes
   std::vector<std::unique_ptr<OtherScene>> scenes_; // the document's scenes: entries
+  std::map<std::string, std::unique_ptr<MountedScene>> mounts_; // by id (the sub-prefix)
+  std::function<bool(const std::string &)> drawn_;              // set_view_hooks
+  std::function<void(const std::string &)> drop_views_;
   // D3: the main scene's world on a worker (set_world_thread), declared after realized_ so it goes
   // first; realize() and clear() stop it before they replace the scene.
   bool world_thread_ = false, world_thread_tried_ = false;
@@ -468,9 +659,34 @@ AriRuntime::AriRuntime(SceneRenderer &view, CameraController &cam, ImGuiOverlay 
 
   // `type: viewport`: a view of the scene in a window. The draw callback hides, once the walk is
   // done, any view whose widget was not drawn this frame.
-  // A viewport's scene: the document's scene: ("") in the main view, or a scenes: entry in its own.
+  // A viewport's scene: the document's scene: ("") in the main view, or a scenes: entry in its own,
+  // or a mounted document's ("mount:<sub>", "mount:<sub>/<id>" for its scenes:) in its own
+  // (ARIADNE_SHELL.md 4.3).
   auto scenes = [this](const std::string &id, SceneSlot &out) {
     auto *adapter = static_cast<GlSceneAdapter *>(scene_.get());
+    if (id.rfind("mount:", 0) == 0) {
+      const std::string rest = id.substr(6);
+      const std::size_t bar = rest.find('/');
+      const GlSceneAdapter::MountedScene *m = adapter->mounted(rest.substr(0, bar));
+      if (!m)
+        return false;
+      if (bar == std::string::npos) {
+        out.sg = m->sg.get();
+        out.realized = &m->realized;
+        out.source = m->anchor;
+        out.anchor = true;
+        return true;
+      }
+      for (const auto &s : m->scenes)
+        if (s->id == rest.substr(bar + 1)) {
+          out.sg = s->sg.get();
+          out.realized = &s->realized;
+          out.source = s->anchor;
+          out.anchor = true;
+          return true;
+        }
+      return false;
+    }
     if (id.empty()) {
       out.sg = &view_->scene();
       out.realized = adapter->realized();
@@ -489,6 +705,15 @@ AriRuntime::AriRuntime(SceneRenderer &view, CameraController &cam, ImGuiOverlay 
   };
   views_ = std::make_unique<SceneViews>(view, backend_, scenes, &cam);
   views_->register_widget();
+  { // ARIADNE_SHELL.md 4.3 the mounts' scenes: which one a widget's scope sees, which were drawn
+    // (a world held in the background), and their views going before their viewports.
+    auto *adapter = static_cast<GlSceneAdapter *>(scene_.get());
+    SceneViews *v = views_.get();
+    views_->set_mount_lookup(
+        [adapter](const std::string &scope) { return adapter->mount_at(scope); });
+    adapter->set_view_hooks([v](const std::string &key) { return v->scene_drawn(key); },
+                            [v](const std::string &key) { v->drop_scene(key); });
+  }
   {
     cvc::ariadne::Runtime *r = &app_rt_.runtime();
     SceneViews *v = views_.get();
@@ -531,6 +756,7 @@ AriRuntime::~AriRuntime() {
     overlay_->setDrawCallback([] {});
   app_rt_.runtime().set_main_view_pick({}); // it picks through views_
   views_->clear(); // the viewports, while the view they are in is still the host's
+  static_cast<GlSceneAdapter *>(scene_.get())->set_view_hooks({}, {}); // no views from here on
 }
 
 // ── setup / document (forward to AppRuntime) ─────────────────────────────────────────────────────
@@ -754,6 +980,10 @@ SceneViews &AriRuntime::views() { return *views_; }
 
 const RealizedScene *AriRuntime::realized() const {
   return static_cast<const GlSceneAdapter *>(scene_.get())->realized();
+}
+
+std::vector<const RealizedScene *> AriRuntime::mounted_scenes() const {
+  return static_cast<const GlSceneAdapter *>(scene_.get())->mounted_scenes();
 }
 
 std::vector<std::string> AriRuntime::take_warnings() { return app_rt_.take_warnings(); }

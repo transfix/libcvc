@@ -74,8 +74,11 @@ public:
   // for an inset drawn over the primary. Throws if `name` is taken or `scene` is
   // already drawn by another viewport (a scene attaches to ONE renderer — the
   // loud-guard for the silent "second setRenderer blanks the first view" trap).
+  // `viewer` names its camera and layout state ("<scene prefix>.viewers.<viewer>.camera"); empty:
+  // `name` does. A document mounted in the Ariadne shell keeps its camera at
+  // <its prefix>.viewers.main.camera, as it would alone, while its viewport has a name of its own.
   Viewport &addSceneViewport(const std::string &name, SceneGraph &scene, const double region[4],
-                             int layer = 1);
+                             int layer = 1, const std::string &viewer = std::string());
 
   // Add a MIRROR viewport: an alternate view (its own camera) of the scene that
   // `sourceViewport` already draws — the true minimap. It does NOT attach the
@@ -92,8 +95,10 @@ public:
   // the source later, and its lights are never overwritten. That lets a caller
   // pin a fixed look (a flat overview with its own headlight) a live re-sync
   // would clobber, and exclude content added after this call.
+  // `viewer` names its camera and layout state, as addSceneViewport's does; empty: `name`.
   Viewport &addMirrorViewport(const std::string &name, const std::string &sourceViewport,
-                              const double region[4], int layer = 2, bool liveSync = true);
+                              const double region[4], int layer = 2, bool liveSync = true,
+                              const std::string &viewer = std::string());
 
   // A live mirror's re-sync now, through its filter (Viewport::setMirrorFilter), as its next draw
   // would do first: for a caller that reads what it will draw before the render reaches it (a

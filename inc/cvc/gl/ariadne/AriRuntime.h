@@ -143,6 +143,9 @@ public:
   cvc::gl::ImGuiBackend &backend();        // e.g. register_widget for a custom ImGui widget
   // The last load()'s realized scene (its lighting rigs, ...), or null when it had none.
   const RealizedScene *realized() const;
+  // The mounted documents' realized scenes (docs/roadmap/ARIADNE_SHELL.md 4.3): each mount's and
+  // each of its scenes:, for a host or a test that waits on their work as on realized()'s.
+  std::vector<const RealizedScene *> mounted_scenes() const;
   // The document's `viewport` widgets' views of the scene (scene_views.h).
   SceneViews &views();
 

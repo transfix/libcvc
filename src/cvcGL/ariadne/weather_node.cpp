@@ -91,6 +91,7 @@
 #include <cvc/ariadne/shown_clock.h>   // the time the scene is drawn at (OW5q)
 #include <cvc/ariadne/value.h>
 #include <cvc/core/app.h>
+#include <cvc/core/scene_clocks.h> // a mounted scene's own clock (ARIADNE_SHELL.md 4.4)
 #include <cvc/core/world_clock.h>
 #include <cvc/geometry/height_field.h>
 #include <cvc/gl/GeometryNode.h>
@@ -524,7 +525,7 @@ void lightning(WeatherRT &r, vtkRenderer *ren);
 // The time the storms are drawn at: the scene's shown time (OW5q: a client of a relay draws the
 // relay's storms at the relay's time, shown_clock.h), else the app's world clock's.
 double weather_time(const WeatherRT &r) {
-  return ari::shown_time(*r.app, r.prefix, r.app->world_clock().t());
+  return ari::shown_time(*r.app, r.prefix, cvc::scene_clock(*r.app, r.prefix).t());
 }
 
 void tick(WeatherRT &r, vtkRenderer *ren) {

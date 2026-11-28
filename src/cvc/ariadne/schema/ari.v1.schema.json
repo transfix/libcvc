@@ -1583,7 +1583,15 @@
             }
           }
         },
-        "background": {"$ref": "#/$defs/background"}
+        "background": {"$ref": "#/$defs/background"},
+        "view": {
+          "enum": ["window"],
+          "description": "Where the module's scene is drawn: window, its scene window (docs/roadmap/ARIADNE_SHELL.md 4.4)."
+        },
+        "in_background": {
+          "enum": ["run", "hold"],
+          "description": "Whether the module's world keeps stepping while its scene is drawn nowhere (its scene window closed): run (the default) or hold."
+        }
       },
       "patternProperties": {
         "^(id|type|title|label|widget|tab|visible_when|enabled_when|disabled_when|tooltip|autofocus|repeat|on_click|on_hover|on_drag|on_drag_start|on_drag_end|on_hover_end|hover)$": true,
@@ -1612,7 +1620,20 @@
       "properties": {
         "mounts": {"$ref": "#/$defs/string"},
         "allow": {"$ref": "#/$defs/uri_list", "description": "The URI prefixes that may be mounted; absent or empty: any file or link."},
-        "catalog": {"$ref": "#/$defs/uri_list", "description": "The catalog's documents, which run as the local principal; the rest run as file: or remote: ones."}
+        "catalog": {"$ref": "#/$defs/uri_list", "description": "The catalog's documents, which run as the local principal; the rest run as file: or remote: ones."},
+        "in_background": {
+          "description": "Whether its applications' worlds keep stepping while their scenes are drawn nowhere, where an entry's own background says nothing: run (the default), hold, or { bind: <key> } naming a state key that holds hold (or a true value) or run.",
+          "anyOf": [
+            {"enum": ["run", "hold"]},
+            {
+              "type": "object",
+              "properties": {"bind": {"$ref": "#/$defs/string"}},
+              "required": ["bind"],
+              "patternProperties": {"^x-": true},
+              "additionalProperties": false
+            }
+          ]
+        }
       },
       "patternProperties": {
         "^(id|type|title|label|widget|tab|visible_when|enabled_when|disabled_when|tooltip)$": true,

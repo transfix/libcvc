@@ -227,3 +227,6 @@ root:
   - mounts: shell.apps
     allow: { bind: shell.allow }
     catalog: { bind: shell.catalog_uris }
+    # Hold background applications' worlds (ARIADNE_SHELL.md 4.4): 1 holds every application's
+    # world while its scene is drawn nowhere, unless its entry's background says run.
+    in_background: { bind: shell.settings.hold_background }

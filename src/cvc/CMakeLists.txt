@@ -74,6 +74,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/core/clock_follower.h
   ../../inc/cvc/core/clock_driver.h
   ../../inc/cvc/core/world_units.h
+  ../../inc/cvc/core/scene_clocks.h
   ../../inc/cvc/core/unit_registry.h
   ../../inc/cvc/physics/types.h
   ../../inc/cvc/physics/shape.h
@@ -428,6 +429,7 @@ set(SOURCE_FILES
   state/state_exec/priority.cpp
   core/world_clock.cpp
   core/world_clock_binding.cpp
+  core/scene_clocks.cpp
   core/input_trace.cpp
   core/input_trace_json.cpp
   core/clock_driver.cpp

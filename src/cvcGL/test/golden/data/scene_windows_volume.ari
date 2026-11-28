@@ -1,0 +1,36 @@
+# An application for the scene_windows golden: a volren node (the embedded bunny's signed distance
+# field, 32^3, raycast as an opaque surface) with a rod through it, on a dark background of its own.
+
+meta:
+  name: Volume
+  min_libcvc: 4.0.6
+
+scene:
+  chrome: false
+  background: { top: [0.10, 0.12, 0.16], bottom: [0.02, 0.02, 0.03] }
+  cameras:
+    - camera: main
+      azimuth: -30
+      elevation: 15
+  nodes:
+    - node: bunny
+      type: volren
+      source: { sdf: { mesh: stanford.bunny, dim: 32 } }
+      fit: { height: 100, up: y }
+      volren:
+        distance_field: true
+        ambient: 0.35
+        steps: 128
+        resolution_scale: 0.5
+        isosurfaces:
+          - { value: 0.0, color: [0.85, 0.80, 0.92], opacity: 1.0, shininess: 24 }
+        lights:
+          - { color: [1.0, 1.0, 1.0], direction: [-0.4, -0.3, -0.85] }
+    - node: rod
+      type: geometry
+      source: { box: { size: [150, 8, 8] } }
+      transform: { position: [0, 0, 24] }
+      material: { color: [0.10, 0.75, 0.70] }
+  lights:
+    - rig: three_point
+      key: { intensity: 1.4, azimuth: -38, elevation: 52 }

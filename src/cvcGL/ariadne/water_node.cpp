@@ -139,6 +139,7 @@
 #include <cvc/ariadne/scene_world.h>
 #include <cvc/ariadne/world_vehicles.h>
 #include <cvc/core/app.h>
+#include <cvc/core/scene_clocks.h> // a mounted scene's own clock (ARIADNE_SHELL.md 4.4)
 #include <cvc/core/world_clock.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/geometry/height_field.h>
@@ -1061,14 +1062,14 @@ void follow_sea(cvc::app &app, WaterRT &rt) {
   if (ari::SceneWaterKeyframe k; ari::scene_water_followed(app, rt.node, rt.prefix, k))
     rt.seaClock->follow(k, spec_of(app, rt), rt.shore);
   else
-    rt.seaClock->advance(app.world_clock().t(), spec_of(app, rt), rt.shore);
+    rt.seaClock->advance(cvc::scene_clock(app, rt.prefix).t(), spec_of(app, rt), rt.shore);
   rt.sea = rt.seaClock->sea();
 }
 
 // The time its sea is drawn at: the scene's shown time (OW5q: another host's, shown_clock.h), else
 // the app's world clock's.
 double sea_time(cvc::app &app, const WaterRT &rt) {
-  return ari::scene_water_time(app, rt.prefix, app.world_clock().t());
+  return ari::scene_water_time(app, rt.prefix, cvc::scene_clock(app, rt.prefix).t());
 }
 
 // What each cascade takes from the wind (scene_water.h's split), for keyframes k.
@@ -1654,7 +1655,7 @@ void tick_hulls(WaterRT &rt, vtkRenderer *ren, RealizedScene &scene,
   };
   if (scene.world && scene.physics_binding) {
     cvc::physics::pose_tracker &tracker = scene.physics_binding->tracker();
-    const double a = tracker.alpha(app.world_clock(), clock.alpha);
+    const double a = tracker.alpha(scene.scene_world_clock(), clock.alpha);
     const cvc::physics::world &w = scene.world->world();
     for (const auto &b : scene.world->boats()) {
       const cvc::physics::body_id id = b->hull();
@@ -1782,7 +1783,7 @@ void tick_wake(cvc::app &app, WaterRT &rt, vtkRenderer *ren, RealizedScene &scen
   if (on)
     place_wake(rt, tx, ty);
   rt.wakeLaps.lap("wake_place");
-  const double wt = app.world_clock().t();
+  const double wt = scene.scene_world_clock().t();
   const double dt = rt.wakeT < 0.0 ? 0.0 : wt - rt.wakeT;
   if (on && (rt.wakeT < 0.0 || dt > 0.0)) {
     rt.wakeSrc->begin();
@@ -1792,7 +1793,7 @@ void tick_wake(cvc::app &app, WaterRT &rt, vtkRenderer *ren, RealizedScene &scen
       const cvc::physics::world &w = scene.world->world();
       // The view lags the world by a step (pose_tracker.h): a body is drawn a of the way from tick
       // k - 1 to k, so the sea it is cut against is read at the field time of that point.
-      const double a = tracker.alpha(app.world_clock(), clock.alpha);
+      const double a = tracker.alpha(scene.scene_world_clock(), clock.alpha);
       const double fdt = w.config().fixed_dt;
       const double t0 = w.field_time() - double(w.tick()) * fdt;
       const double drawnT = t0 + std::max(0.0, double(tracker.tick()) - 1.0 + a) * fdt;

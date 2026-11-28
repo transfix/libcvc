@@ -1964,15 +1964,19 @@ def _typed_node(sg, name):
 %pythonappend cvc::gl::ViewportManager::activeViewport %{
     if val is not None: val._pycvc_keepalive = self
 %}
-// addSceneViewport is a named-parameter proxy (single signature, no *args), so
-// reference the `scene` argument by name — `args` is undefined here, which raised
-// NameError the moment a viewport was added. (See the %pythonappend note above.)
+// SWIG gives addSceneViewport's proxy named parameters (`scene`) or `*args`
+// (test_pycvc_proxy_hooks.py says when); adding its defaulted `viewer` turned it into
+// `*args`. So the scene is found in the proxy's locals under either name, never by a
+// bare name the other shape leaves undefined (a NameError the moment a viewport is
+// added; test_pycvc_proxy_hooks checks every proxy's names).
 // The MANAGER keeps the added scene: it holds it by pointer for its whole life. On
 // the returned Viewport proxy, the scene died with that proxy, under the manager.
 // A tuple, not a list: the collector can empty a list and free the scenes under the
 // manager; a tuple it never clears (see pycvc._keepalive).
 %pythonappend cvc::gl::ViewportManager::addSceneViewport %{
-    self._pycvc_scenes = self.__dict__.get("_pycvc_scenes", ()) + (pycvc._keepalive(scene),)
+    _pycvc_args = locals()
+    _pycvc_scene = _pycvc_args["scene"] if "scene" in _pycvc_args else _pycvc_args["args"][1]
+    self._pycvc_scenes = self.__dict__.get("_pycvc_scenes", ()) + (pycvc._keepalive(_pycvc_scene),)
     if val is not None:
         val._pycvc_keepalive = self
 %}

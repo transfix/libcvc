@@ -17,14 +17,15 @@
 #include <array>
 #include <cctype>
 #include <cmath>
-#include <cvc/ariadne/bind.h> // resolve_bind, read_or
-#include <cvc/ariadne/data.h> // a data look's package
+#include <cvc/ariadne/bind.h>   // resolve_bind, read_or
+#include <cvc/ariadne/data.h>   // a data look's package
 #include <cvc/ariadne/loader.h> // parse_value: a parted look's rig file
 #include <cvc/ariadne/scene.h>
 #include <cvc/ariadne/scene_world.h>
 #include <cvc/ariadne/world_spawns.h>
 #include <cvc/ariadne/world_vehicles.h>
 #include <cvc/core/app.h>
+#include <cvc/core/scene_clocks.h> // a mounted scene's own clock (ARIADNE_SHELL.md 4.4)
 #include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/GraphicsNode.h>
 #include <cvc/gl/SceneGraph.h>
@@ -1618,7 +1619,7 @@ std::shared_ptr<GraphicsNode> realize_vehicle_preview(SceneGraph &sg, const ari:
       }
     }
     if (std::shared_ptr<GraphicsNode> g = graph->getGraphics(drawn)) {
-      const double t = app.world_clock().t();
+      const double t = cvc::scene_clock(app, prefix).t();
       g->setRotation(0.0, 0.0, std::fmod(spin * t, 360.0));
     }
   });

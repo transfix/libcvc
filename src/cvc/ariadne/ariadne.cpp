@@ -27,6 +27,7 @@
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/ariadne/backend.h>
 #include <cvc/ariadne/bind.h>
+#include <cvc/ariadne/data.h> // ARIADNE_SHELL.md 4.3 a mount's datasets, bound as it opens
 #include <cvc/ariadne/files.h> // §10.8 (file-pick): the files the app's programs hold
 #include <cvc/ariadne/icons.h> // §5.22 a tray icon's named glyphs
 #include <cvc/ariadne/input.h>  // §4.6 InputEvent — Runtime::post_input feeds on_key/on_pointer
@@ -34,6 +35,7 @@
 #include <cvc/ariadne/media.h>  // §5.11 pictures by URI
 #include <cvc/ariadne/media_player.h> // §5.13 video: / audio: players
 #include <cvc/ariadne/media_save.h>   // §5.29 saving a picture or a video
+#include <cvc/ariadne/mount_scene.h>  // ARIADNE_SHELL.md 4.3 a mount's scene, datasets and keys
 #include <cvc/ariadne/net_host.h>     // net_host_status (the net capability tokens)
 #include <cvc/ariadne/oidc_host.h>    // pump_oidc
 #include <cvc/ariadne/principal.h>    // set_scope_principal: what a mount runs as (SH11)
@@ -2615,6 +2617,10 @@ struct Runtime::Impl {
     // raise paths.
     struct Item {
       std::string title, open_path, raise_path;
+      // Listed only while this key is "1": a mount's scene window (ARIADNE_SHELL.md 4.3), at
+      // <sub>.ariadne.scene, which only a host that drew its scene sets. Elsewhere (ari's
+      // terminals, a scene adapter that draws no mounted scene) the window never shows.
+      std::string when_path;
     };
     std::vector<Item> items;
     // The windows a `repeat:` makes (conference_roster's per-peer cameras): their template in
@@ -2710,6 +2716,20 @@ struct Runtime::Impl {
     bool by_memory = false;   // its memory, not its time, is what holds it
   };
   std::map<std::string, MountSlot> mount_slots_;
+  // ARIADNE_SHELL.md 4.3 (SH3): the mounts that carry a scene, datasets or keys, as
+  // plan_windows_menu last walked the tree: each load: (not one under repeat:) and each open
+  // mounts: entry, with what its world does in the background (Runtime::scene_mounts).
+  struct ScenePlan {
+    std::string scope, name, parent_scope;
+    std::shared_ptr<const MountScene> scene;
+    std::string entry;                      // a mounts: entry's key (<slot key>.<as>); "" a load:
+    std::shared_ptr<const MountsSpec> spec; // ... and its slot's
+  };
+  std::vector<ScenePlan> scene_plan_;
+  // The load: mounts of this tree whose datasets are bound (emit_container binds each once).
+  std::set<std::string> data_bound_;
+  // A mount's data: at its sub-prefix (<sub>.data.<name>), each started as a document's is.
+  void bind_mount_data(const std::string &sub, const MountScene &ms);
   // The slots in the tree, each with the scope it sits in, as plan_windows_menu last walked it
   // (into the open mounts too, for theirs).
   std::vector<std::pair<const Widget *, std::string>> mounts_widgets_;
@@ -2803,6 +2823,7 @@ struct Runtime::Impl {
   };
   std::vector<RepeatedWindow> repeated_windows(); // this frame's instances
   bool windows_menu_has_items();                  // anything to list this frame
+  bool windows_menu_listed(const WindowsMenuPlan::Item &it); // its when_path, if any, is "1"
   void emit_windows_menu(const std::string &title);
   void emit_windows_menu_items();
 
@@ -3353,6 +3374,10 @@ void Runtime::Impl::emit_container(const Widget &w) {
     // Plant the mount's parent-scope holes once, BEFORE emitting the fragment that reads them.
     if (!w.links.empty() && wired_mounts.insert(sub_prefix).second)
       wire_holes(parent_prefix, sub_prefix, w.links);
+    // ARIADNE_SHELL.md 4.3 its datasets at its sub-prefix, before its init: (which may read their
+    // status), as a document's are bound before its own.
+    if (w.mount_scene && !w.mount_scene->data.empty() && data_bound_.insert(sub_prefix).second)
+      bind_mount_data(sub_prefix, *w.mount_scene);
     // Run the fragment's init: once (after its holes exist, so init may seed through them), its
     // state: seeds (§5.3) just before. Kept in ran_inits, NOT cleared on reconcile — a one-shot
     // seed, never re-run per frame/rebuild.
@@ -5625,6 +5650,7 @@ void Runtime::Impl::render() {
     }
     planted_holes.clear();
     wired_mounts.clear();
+    data_bound_.clear(); // the new tree's load:s bind theirs as they first draw
     drop_mount_ticks(); // §12 the old tree's module ticks the new one does not keep
     if (fullscreen.active)
       close_fullscreen(); // §5.13 its widget is the old tree's
@@ -5729,6 +5755,10 @@ void Runtime::Impl::plan_windows_menu() {
   std::set<std::string> toggled;   // open-state paths a menu item of the document already toggles
   std::set<std::string> bar_menus; // the titles of the menus straight in a menubar
   std::vector<WindowsMenuPlan::Item> windows;
+  // ARIADNE_SHELL.md 4.3 the mounts with a scene, datasets or keys (scene_plan_), and the open
+  // mounts: entries' wrappers among them (a load: met in the walk is any other mount).
+  std::vector<ScenePlan> scene_plan;
+  std::set<const Widget *> slot_wrappers;
   // Walk the tree with the scope each node resolves its binds in (a load: mount scopes its
   // children, §12). A repeated widget is made per frame: a repeated window's instances are listed
   // as the menu is drawn (repeated_windows).
@@ -5792,6 +5822,11 @@ void Runtime::Impl::plan_windows_menu() {
           p.repeated.emplace_back(&w, scope);
           p.any_closable = p.any_closable || w.closable;
         }
+        // ARIADNE_SHELL.md 4.3 its scene would need a SceneGraph per instance: not drawn.
+        if (!w.scope.empty() && w.mount_scene && w.mount_scene->has_scene())
+          warn_once("ari: a repeated load:'s scene is not drawn (" + resolve_bind(scope, w.scope) +
+                    "): its instances share one sub-prefix pattern, and each would need a scene "
+                    "of its own");
         // §5.25 a repeated mount with a menubar of its own: an application per instance.
         if (!w.scope.empty()) {
           if (const Widget *bar = first_bar(w)) {
@@ -5813,6 +5848,10 @@ void Runtime::Impl::plan_windows_menu() {
         v.mount = &w;
         v.mount_scope = inner;
         v.mount_parent = scope;
+        if (w.mount_scene && !slot_wrappers.count(&w)) // a load:'s (4.3)
+          scene_plan.push_back(
+              {inner, !w.app_name.empty() ? w.app_name : w.scope.substr(w.scope.rfind('.') + 1),
+               scope, w.mount_scene, std::string(), nullptr});
       }
       const Widget *const mount = v.mount;
       const std::string &mount_scope = v.mount_scope;
@@ -5885,6 +5924,12 @@ void Runtime::Impl::plan_windows_menu() {
           todo.push_back({nullptr, scope, false, nullptr, {}, {}, *e}); // then its application
           todo.push_back({(*e)->second.wrapper.get(), scope, false, nullptr, {}, {}});
         }
+        for (const auto *e : open) // 4.3 each one's scene, datasets and keys
+          if (const Widget *wr = e->second.wrapper.get(); wr->mount_scene) {
+            slot_wrappers.insert(wr);
+            scene_plan.push_back({e->first, e->second.name, scope, wr->mount_scene,
+                                  key + cvc::state::SEPARATOR + e->second.as, w.mounts});
+          }
         break;
       }
       case Kind::Window: {
@@ -5892,6 +5937,8 @@ void Runtime::Impl::plan_windows_menu() {
         windows.push_back({w.label.empty() ? id : w.label,
                            resolve_bind(scope, "tree." + id + ".open"),
                            resolve_bind(scope, "tree." + id + ".raise")});
+        if (mount && id == kSceneWindowId) // the loader's scene window, shown as its scene is
+          windows.back().when_path = resolve_bind(scope, "ariadne.scene");
         p.any_closable = p.any_closable || w.closable;
         in_menubar = false;
         break;
@@ -5918,6 +5965,7 @@ void Runtime::Impl::plan_windows_menu() {
   p.toggled = std::move(toggled);
   windows_menu = std::move(p);
   mounts_widgets_ = std::move(mounts);
+  scene_plan_ = std::move(scene_plan);
 }
 
 std::vector<Runtime::Impl::RepeatedWindow> Runtime::Impl::repeated_windows() {
@@ -5948,9 +5996,14 @@ std::vector<Runtime::Impl::RepeatedWindow> Runtime::Impl::repeated_windows() {
   return out;
 }
 
+bool Runtime::Impl::windows_menu_listed(const WindowsMenuPlan::Item &it) {
+  return it.when_path.empty() || read_string(app, it.when_path) == "1";
+}
+
 bool Runtime::Impl::windows_menu_has_items() {
-  return !windows_menu.items.empty() || !frame_apps.empty() ||
-         (!windows_menu.repeated.empty() && !repeated_windows().empty());
+  return std::any_of(windows_menu.items.begin(), windows_menu.items.end(),
+                     [&](const WindowsMenuPlan::Item &it) { return windows_menu_listed(it); }) ||
+         !frame_apps.empty() || (!windows_menu.repeated.empty() && !repeated_windows().empty());
 }
 
 void Runtime::Impl::emit_windows_menu(const std::string &title) {
@@ -5977,8 +6030,9 @@ void Runtime::Impl::emit_windows_menu_items() {
     }
   };
   for (const WindowsMenuPlan::Item &it : windows_menu.items)
-    if (quit_apps.empty() || app_running(it.open_path)) // §5.25 a quit application's come back
-      item(it.title, it.open_path, it.raise_path);      // with it
+    if ((quit_apps.empty() || app_running(it.open_path)) && // §5.25 a quit application's come
+        windows_menu_listed(it))                            // back with it
+      item(it.title, it.open_path, it.raise_path);
   for (const RepeatedWindow &r : repeated_windows()) {
     b.push_id(r.id.c_str()); // two instances may share a title (the label, before their names)
     item(r.title, r.open_path, r.raise_path);
@@ -6655,6 +6709,8 @@ void Runtime::Impl::open_mount(MountSlot &slot, const Widget &w) {
   if (!fns.empty())
     mount_functions[sub] = fns;
   const Widget &wrapper = *slot.wrapper;
+  if (wrapper.mount_scene && !wrapper.mount_scene->data.empty()) // before its init: (4.3)
+    bind_mount_data(sub, *wrapper.mount_scene);
   if ((!wrapper.state_seeds.empty() || !wrapper.init_script.empty()) &&
       ran_inits.insert(sub).second) {
     seed_state(app, sub, wrapper.state_seeds); // just before init:, which may override them
@@ -6861,6 +6917,8 @@ bool Runtime::Impl::reconcile_mounts_once() {
       s.wrapper = std::make_unique<Widget>(std::move(r.wrapper));
       if (!s.wrapper->app_name.empty())
         s.name = s.wrapper->app_name;
+      if (s.wrapper->mount_scene && !s.wrapper->mount_scene->data.empty())
+        bind_mount_data(x.sub, *s.wrapper->mount_scene); // its data: as it is now
       mount_instances_.clear();
       // Its on_tick: resident stays when its program is the same (drop_mount_ticks compares).
       drop_mount_ticks();
@@ -9942,6 +10000,50 @@ bool Runtime::reload_mounts_if_changed() {
       any = true;
     }
   return any;
+}
+
+void Runtime::Impl::bind_mount_data(const std::string &sub, const MountScene &ms) {
+  const std::shared_ptr<DataStore> store = DataStore::of(app);
+  for (const DataSpec &d : ms.data) {
+    try {
+      store->bind(sub, d);
+    } catch (const std::exception &e) {
+      warn_once("ari: mount '" + sub + "': data." + d.name + ": " + e.what());
+    }
+  }
+}
+
+bool Runtime::scene_mounts(std::vector<SceneMount> &out) const {
+  if (m_->has_pending)
+    return false; // the plan is the old tree's until the next frame swaps the new one in
+  out.clear();
+  for (const Impl::ScenePlan &p : m_->scene_plan_) {
+    if (!p.scene || !m_->app_running(p.scope))
+      continue; // §5.25 an application the user quit: its scene comes down until Restart
+    SceneMount s;
+    s.scope = p.scope;
+    s.name = p.name;
+    s.scene = p.scene;
+    // ARIADNE_SHELL.md 4.4: a load:'s in_background:; a mounts: entry's background, else its
+    // slot's in_background: (a value, or a key holding hold or a true value).
+    std::string bg = p.scene->background;
+    if (!p.entry.empty()) {
+      bg = read_string(m_->app, p.entry + cvc::state::SEPARATOR + "background");
+      if (bg != "run" && bg != "hold") {
+        bg.clear();
+        if (p.spec && !p.spec->background.empty()) {
+          bg = p.spec->background;
+        } else if (p.spec && !p.spec->background_bind.empty()) {
+          const std::string v =
+              read_string(m_->app, resolve_bind(p.parent_scope, p.spec->background_bind));
+          bg = v == "hold" || v == "1" || v == "true" ? "hold" : "run";
+        }
+      }
+    }
+    s.hold = bg == "hold";
+    out.push_back(std::move(s));
+  }
+  return true;
 }
 
 // A backend with no list draws the rows as stacked radio buttons (the first shown picked while

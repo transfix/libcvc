@@ -723,7 +723,8 @@ std::vector<std::string> ViewportManager::viewportNames() const {
 }
 
 Viewport &ViewportManager::addSceneViewport(const std::string &name, SceneGraph &scene,
-                                            const double region[4], int layer) {
+                                            const double region[4], int layer,
+                                            const std::string &viewer) {
   m_impl->requireOpen();
   if (m_impl->byName.find(name) != m_impl->byName.end())
     throw std::invalid_argument("ViewportManager: a viewport named '" + name + "' already exists");
@@ -734,8 +735,10 @@ Viewport &ViewportManager::addSceneViewport(const std::string &name, SceneGraph 
   if (layer < 0)
     throw std::invalid_argument("ViewportManager: layer must be >= 0");
 
-  const std::string camPath = CameraController::viewerStatePath(scene.getStatePrefix(), name);
-  std::unique_ptr<Viewport> vp(new Viewport(*m_impl->app, scene, camPath, name, /*mirror=*/false));
+  const std::string &state_name = viewer.empty() ? name : viewer;
+  const std::string camPath = CameraController::viewerStatePath(scene.getStatePrefix(), state_name);
+  std::unique_ptr<Viewport> vp(new Viewport(*m_impl->app, scene, camPath, name, /*mirror=*/false,
+                                            /*managed=*/true, state_name));
   vp->setRegion(region[0], region[1], region[2], region[3]);
   vp->setLayer(layer);
   m_impl->window->AddRenderer(vp->renderer());
@@ -759,7 +762,8 @@ Viewport &ViewportManager::addSceneViewport(const std::string &name, SceneGraph 
 
 Viewport &ViewportManager::addMirrorViewport(const std::string &name,
                                              const std::string &sourceViewport,
-                                             const double region[4], int layer, bool liveSync) {
+                                             const double region[4], int layer, bool liveSync,
+                                             const std::string &viewer) {
   m_impl->requireOpen();
   if (m_impl->byName.find(name) != m_impl->byName.end())
     throw std::invalid_argument("ViewportManager: a viewport named '" + name + "' already exists");
@@ -772,8 +776,10 @@ Viewport &ViewportManager::addMirrorViewport(const std::string &name,
 
   Viewport *src = srcIt->second;
   SceneGraph &scene = src->scene(); // the mirror echoes the source's scene
-  const std::string camPath = CameraController::viewerStatePath(scene.getStatePrefix(), name);
-  std::unique_ptr<Viewport> vp(new Viewport(*m_impl->app, scene, camPath, name, /*mirror=*/true));
+  const std::string &state_name = viewer.empty() ? name : viewer;
+  const std::string camPath = CameraController::viewerStatePath(scene.getStatePrefix(), state_name);
+  std::unique_ptr<Viewport> vp(new Viewport(*m_impl->app, scene, camPath, name, /*mirror=*/true,
+                                            /*managed=*/true, state_name));
   vp->setRegion(region[0], region[1], region[2], region[3]);
   vp->setLayer(layer);
   vp->setMirrorSource(src->renderer());

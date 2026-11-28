@@ -68,10 +68,41 @@ public:
       warns->push_back("ari: this host draws one scene: the document's scenes: are ignored");
   }
 
+  // docs/roadmap/ARIADNE_SHELL.md 4.3 (SH3): a mounted document's scene. Realize `scene` (its
+  // `scene:`) and `scenes` (its `scenes:`) as a scene of their own, `id`, whose state is under
+  // `sub_prefix` (the mount's): its nodes at <sub_prefix>.graphics.root.children.<node>, its
+  // physics at <sub_prefix>.physics, its scenes: at <sub_prefix>.scenes.<id>, its camera at
+  // <sub_prefix>.viewers.main.camera, and every relative bind in it resolved against
+  // <sub_prefix>, as it did when the document ran alone. Its world steps on a clock of its own
+  // (cvc::scene_clock at <sub_prefix>), at its `clock: hz` or at the rate of the clock above it.
+  // AppRuntime calls it from drain() when a mount with a scene opens (a load: as the document
+  // runs, a mounts: entry as it opens), and clear_mount(id) when it closes; clear() takes every
+  // mount's down too. False when it was not realized: the default cannot draw it and says so.
+  virtual bool realize_mount(const std::string &id, const Scene &scene,
+                             const std::vector<Scene> &scenes, const std::string &sub_prefix,
+                             std::vector<std::string> *warns) {
+    (void)id;
+    (void)scene;
+    (void)scenes;
+    if (warns)
+      warns->push_back("ari: this host draws one scene: the scene of the document mounted at '" +
+                       sub_prefix + "' is ignored");
+    return false;
+  }
+  virtual void clear_mount(const std::string &id) { (void)id; }
+  // Whether mount `id`'s world holds (stops stepping) while its scene is drawn nowhere: its scene
+  // window closed or collapsed and no other view of it drawn (ARIADNE_SHELL.md 4.4). False, the
+  // default: it keeps stepping. AppRuntime sets it as it changes.
+  virtual void hold_mount(const std::string &id, bool hold) {
+    (void)id;
+    (void)hold;
+  }
+
   // Take down what the last realize() built (its nodes, lights, physics, and the view properties
-  // it set), so the next document starts on an empty stage. AppRuntime::load() calls it before
-  // each load, when a host switches documents as much as on a hot reload. The default keeps
-  // everything, which is right only for an adapter that never realizes.
+  // it set), and every mount's scene, so the next document starts on an empty stage.
+  // AppRuntime::load() calls it before each load, when a host switches documents as much as on a
+  // hot reload. The default keeps everything, which is right only for an adapter that never
+  // realizes.
   virtual void clear() {}
 
   // The document just loaded has no `scene:` (called after clear()). It is its widgets alone, so a

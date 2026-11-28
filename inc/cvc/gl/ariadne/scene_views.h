@@ -53,12 +53,24 @@
 // renderer for the length of its draw (main_view_begin / main_view_end), so the views still have
 // them.
 //
+// A document mounted in the Ariadne shell (docs/roadmap/ARIADNE_SHELL.md 4.3, SH3) keeps its
+// scene, realized by the host at the mount's sub-prefix. Its own viewports (in its own windows)
+// show its scene, as when it runs alone: a viewport with no `scene:`, or `scene: <id>` naming one
+// of its scenes:, inside a mount with a scene finds the mount's. `scene: { mount: <as> }` shows
+// the scene of the document mounted as <as> beside it (includes.<as> in the viewport's scope): a
+// further view, which mirrors that scene's own viewport. Its scene window is that own viewport,
+// drawn into the window's texture: the scene's own renderer, with its lights, background and
+// shadows, from <sub>.viewers.main.camera. A view of a mounted scene is named after the mount
+// (two documents' views of one name never meet); its camera is <sub>.viewers.<view>.camera, as
+// alone. `fill: true` makes a view as tall as the rest of its window.
+//
 // AriRuntime owns one and registers the widget, so every AriRuntime host (arigl, pycvc_gl) has it.
 #pragma once
 
 #include <functional>
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -114,6 +126,17 @@ public:
   // Register `type: viewport` with the backend.
   void register_widget();
 
+  // The mount whose scene the widgets at a scope see as their document's (ARIADNE_SHELL.md 4.3):
+  // the deepest one at or above it with a realized scene, "" for none. AriRuntime sets it to its
+  // adapter's. Without one, a view inside a mount shows the document's scene.
+  void set_mount_lookup(std::function<std::string(const std::string &scope)> mount_at);
+  // Whether a view of scene `scene` ("mount:<sub>" for a mount's) was drawn in the last walk: a
+  // mount's world that holds in the background holds while none was.
+  bool scene_drawn(const std::string &scene) const { return drawn_scenes_.count(scene) != 0; }
+  // Remove the views of scene `scene` and of its scenes: ("<scene>/<id>"), and their named
+  // cameras: a mount's scene is going (its viewports go after its views).
+  void drop_scene(const std::string &scene);
+
   // After the frame's widget walk (inside the render, before the renderers draw): hide each view
   // no widget drew this frame.
   void end_walk();
@@ -166,7 +189,10 @@ public:
 private:
   struct View;
   struct Camera; // a named camera (scene: cameras:) and its controller
-  View *view_for(const std::string &name, const std::string &scene);
+  // The view named `name` of scene `scene` ("" the main one, a scenes: id, or "mount:<sub>" and
+  // "mount:<sub>/<id>" for a mount's); `own`: the scene's own viewport (a mount's scene window).
+  View *view_for(const std::string &name, const std::string &scene, bool own);
+  void release(View &v); // its shadow pass's GL objects and its mirror viewport (not an own one)
   Camera *named_camera(const std::string &scene, const std::string &name);
   void main_view_begin(); // the main renderer's StartEvent: take out what main_view: hides
   void main_view_end();   // ... and its EndEvent: put it back
@@ -209,6 +235,8 @@ private:
   SceneRenderer *view_;
   ImGuiBackend *backend_;
   std::function<bool(const std::string &, SceneSlot &)> scenes_;
+  std::function<std::string(const std::string &)> mount_at_; // set_mount_lookup
+  std::set<std::string> drawn_scenes_;                       // scene_drawn
   CameraController *main_;
   std::map<std::string, std::unique_ptr<View>> views_;
   std::map<std::string, std::unique_ptr<Camera>> cameras_; // by "<scene>|<name>"
