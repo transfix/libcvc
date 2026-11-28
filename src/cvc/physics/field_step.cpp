@@ -735,7 +735,7 @@ void field_set::body_added(const world_backend &be, body_id id, const body_desc 
     fb.cut_shape = std::make_shared<const physics::shape>(d.shape);
   fb.cell_volume = fb.volume / static_cast<double>(fb.cells.size());
   fb.mass = d.mass > 0.0 ? d.mass : d.density * fb.volume;
-  fb.buoyancy = fb.damping = d.displacement;
+  fb.buoyancy = fb.water_share = d.displacement;
   bounds_of(fb);
   if (d.hull) {
     compile_hull(*d.hull, fb.hull);
@@ -1639,7 +1639,7 @@ void field_set::apply(world_backend &be, const world_config &cfg, double t) {
         }
 
         const vec3 u = cr.w - (s.linear_velocity + cross(s.angular_velocity, arm));
-        double c_i = cf.desc.damping * fv * fb.damping; // kg/s: the force is c_i u
+        double c_i = cf.desc.damping * fv * fb.water_share; // kg/s: the force is c_i u
         if (inertial) {                    // the damping on the vertical only
           if (c_i > 0.0) {
             const vec3 d{0.0, 0.0, u.z * c_i};
@@ -1652,9 +1652,11 @@ void field_set::apply(world_backend &be, const world_config &cfg, double t) {
         }
         if (cf.desc.kind != field_kind::medium) {
           const double speed = norm(u);
+          // A fluid's drag on the body's share of its cells (field_body::water_share).
+          const double share = cf.desc.kind == field_kind::fluid ? fb.water_share : 1.0;
           if (speed > 0.0)
             c_i += 0.5 * cr.value * cf.desc.drag_coefficient *
-                   area_across(fb, r.inverse(u * (1.0 / speed))) * (fv / fb.volume) * speed;
+                   area_across(fb, r.inverse(u * (1.0 / speed))) * (fv / fb.volume) * speed * share;
         }
         if (c_i > 0.0) {
           const vec3 d = u * c_i;

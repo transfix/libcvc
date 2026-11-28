@@ -14,10 +14,20 @@
 // to a list of origins; a name no line binds is bound to the origin it was captured from. A token
 // is sent only to an origin its credential is bound to.
 //
-// With a file, the store keeps its credentials across runs: one "<name> <origin> <token>" line
-// each, written owner-only (0600 in a 0700 directory on POSIX; a Windows profile directory is the
-// user's own) and replaced whole on every change. Without one (and always in a browser), they live
-// in memory and end with the process.
+// Every credential belongs to a principal (docs/roadmap/ARIADNE_SHELL.md 4.12): who the program
+// that captured it runs as. `local` is a document the launcher or the shell's catalog named; a
+// document opened from a file is `file:<its directory>`, one fetched from the network
+// `remote:<its origin>`. A store object is one principal's view of the credentials: what it
+// captures, finds, binds, forgets and renews is that principal's alone, so a document fetched from
+// a post cannot send the reader's `txwtf` token by naming it. The constructor makes a new store and
+// its `local` view; for_principal() hands out the views of the other principals, which share its
+// file, its entries and its lock.
+//
+// With a file, the store keeps its credentials across runs: one "<principal> <name> <origin>
+// <token>" line each (the principal percent-encoded; a line of three words, as a store written
+// before principals were kept, is `local`'s), written owner-only (0600 in a 0700 directory on
+// POSIX; a Windows profile directory is the user's own) and replaced whole on every change.
+// Without one (and always in a browser), they live in memory and end with the process.
 //
 // Thread-safe: requests on background threads read it while the program's thread forgets.
 
@@ -62,18 +72,34 @@ public:
   }
 };
 
+// The principal of a document the launcher or the shell's catalog named.
+inline constexpr char kLocalPrincipal[] = "local";
+
 class CredentialStore {
 public:
-  // `path` "" keeps credentials in memory only.
+  // A new store, and its `local` principal's view of it. `path` "" keeps credentials in memory
+  // only.
   explicit CredentialStore(std::string path = std::string());
   CredentialStore(const CredentialStore &) = delete;
   CredentialStore &operator=(const CredentialStore &) = delete;
 
-  // Read the file (a missing one holds nothing). False, with `error` set and nothing loaded, when
-  // it cannot be read, is malformed, or (on POSIX) belongs to another user or is open to others.
+  // The same store as principal `principal` sees it: the same file, entries and lock, and that
+  // principal's own credentials, bindings and renewers. Two views of one principal see the same.
+  // Null when `principal` is not one (valid_principal).
+  std::shared_ptr<CredentialStore> for_principal(const std::string &principal);
+  // Whose credentials this view holds.
+  const std::string &principal() const { return principal_; }
+  // Whether `other` views the same store as the same principal.
+  bool same_view(const CredentialStore &other) const {
+    return shared_ == other.shared_ && principal_ == other.principal_;
+  }
+
+  // Read the file (a missing one holds nothing): every principal's credentials. False, with
+  // `error` set and nothing loaded, when it cannot be read, is malformed, or (on POSIX) belongs to
+  // another user or is open to others.
   bool load(std::string *error = nullptr);
-  const std::string &path() const { return path_; }
-  bool persistent() const { return !path_.empty(); }
+  const std::string &path() const;
+  bool persistent() const { return !path().empty(); }
 
   // Bind credential `name` to `origins` (replacing any earlier binding of it).
   void bind(const std::string &name, std::vector<Origin> origins);
@@ -101,11 +127,11 @@ public:
   bool has(const std::string &name, const Origin &to) const {
     return token_for(name, to).has_value();
   }
-  // Credential names with a token, sorted.
+  // Credential names with a token, sorted (this principal's).
   std::vector<std::string> names() const;
 
-  // Drop every token of `name` (true if there was one), or every token, and any renewer of it. With
-  // a file, it is rewritten; `error` reports a failed write.
+  // Drop every token of `name` (true if there was one), or every token, and any renewer of it: this
+  // principal's only. With a file, it is rewritten; `error` reports a failed write.
   bool forget(const std::string &name, std::string *error = nullptr);
   void clear(std::string *error = nullptr);
 
@@ -124,21 +150,20 @@ public:
   // path. "" when no config directory can be named (or in a browser).
   static std::string resolve_path(const std::string &spec);
 
-private:
-  struct Entry {
-    std::string name;
-    Origin from;
-    std::string token;
-    bool kept = true; // written to the file (false: provided, this run only)
-  };
-  bool save_locked(std::string *error) const;
-  bool sends_to(const std::string &name, const Entry &e, const Origin &to) const;
+  // A principal as written: `local`, `file:<directory>` (a non-empty path without control bytes)
+  // or `remote:<origin>` (an origin as parse_origin_spec reads one).
+  static bool valid_principal(const std::string &principal);
+  // `principal` as the store keys it: a remote one's origin written as Origin::str writes it
+  // ("remote:HTTPS://Apps.Example.org:443/" is "remote:https://apps.example.org"), any other as
+  // it is. "" when it is not a principal.
+  static std::string canonical_principal(const std::string &principal);
 
-  std::string path_;
-  mutable std::mutex mutex_;
-  std::vector<Entry> entries_;
-  std::vector<std::pair<std::string, std::vector<Origin>>> bindings_;
-  std::vector<std::pair<std::string, std::shared_ptr<CredentialRenewer>>> renewers_;
+private:
+  struct Shared; // the file, the entries of every principal, their bindings and renewers, the lock
+  CredentialStore(std::shared_ptr<Shared> shared, std::string principal);
+
+  std::shared_ptr<Shared> shared_;
+  std::string principal_;
 };
 
 // The capture half of a sign-in: find the JSON string at `field` (object keys joined by '.', e.g.
