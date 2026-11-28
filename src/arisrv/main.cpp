@@ -1752,6 +1752,9 @@ int main(int argc, char **argv) {
   // the relay's own and each client's, reads them from the tree (holon_sync).
   {
     rconf::write_room_rules(app, room, rules);
+    // Where avatars start and come back (ARISRV_SCENES SC1): the document's world: spawns:, which
+    // the relay alone uses (the room carries no spawns).
+    server_holon.set_avatar_spawns(rules.spawns);
     rconf::write_room_clock(app, room, simHz);
     const double quantum = server_holon.clock().fixed_dt();
     std::printf("[arisrv] clock: %.0f Hz (%s): every holon in the room steps %.4f s, and a "

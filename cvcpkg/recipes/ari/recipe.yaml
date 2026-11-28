@@ -1,7 +1,7 @@
 schema_version: 1
 recipe:
   name: ari
-  upstream_version: "4.0.10"
+  upstream_version: "4.0.11"
   cvc_revision: 1
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
@@ -36,10 +36,10 @@ patches: []
 depends:
   build:
     - name: libcvc
-      version: "==4.0.10"
+      version: "==4.0.11"
   runtime:
     - name: libcvc
-      version: "==4.0.10"
+      version: "==4.0.11"
   host_tools:
     - cmake
     - ninja
