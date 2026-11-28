@@ -24,6 +24,7 @@
 #include <cvc/ariadne/loader.h>            // §12 end-to-end load: mount through the real Runtime
 #include <cvc/ariadne/net_host.h>          // enable_net: the host's allowlist and credentials
 #include <cvc/ariadne/net_intrinsics.h>    // §13.8 async (http-get-async) intrinsic test
+#include <cvc/ariadne/principal.h>         // ARIADNE_SHELL.md SH11: what a mount runs as
 #include <cvc/ariadne/rich_text.h>         // §5.20 layout_rich_text
 #include <cvc/ariadne/stream/stream.h>     // AR-3b: a producer thread's post on a document's stream
 #include <cvc/ariadne/stream_intrinsics.h> // Phase-2 PR6 (stream-open/stream-info/stream-close)
@@ -64,6 +65,7 @@
 #include <optional>
 #include <set>
 #include <span>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -14771,4 +14773,204 @@ TEST(AriadneComponents, ShellOpensItsCatalogOnDemand) {
   ASSERT_TRUE(
       pump_until(rt, [&] { return peek(app, "ui.shell.shell.apps.counter.status") == "open"; }));
   EXPECT_EQ(sval(app, "ui.shell.includes.counter.count"), "1") << "resumed with its state";
+}
+
+// ---- docs/roadmap/ARIADNE_SHELL.md SH11: a mount reaches the network as its principal
+// ------
+
+namespace {
+
+const char *const kPlainDoc = R"(meta: { name: Plain, min_libcvc: "0.0.0" }
+root:
+  - text: plain
+)";
+
+// Run `program` as a program of the mount at `scope` (start_process with its chroot) and pump
+// frames until it ends: "" or why not.
+std::string run_in_mount(Runtime &rt, const std::string &scope, const std::string &program) {
+  bool ended = false;
+  std::string how = "unset";
+  LaneProcess p;
+  p.program = program;
+  p.name = "sh11";
+  p.scope = scope;
+  p.done = [&](const std::string &h) {
+    ended = true;
+    how = h;
+  };
+  rt.start_process(std::move(p));
+  return pump_until(rt, [&] { return ended; }, 20000) ? how : "timed out";
+}
+
+} // namespace
+
+// Each mounts: entry runs as the principal SH1 fixed for it: the catalog's document as `local`,
+// with the launcher's allowlist and credentials; another file as `file:<its directory>`, which
+// finds none of them and reaches nothing it was not granted. Closing it drops its principal.
+TEST(AriadneMountsNet, AMountReachesTheNetworkAsItsPrincipal) {
+  if (!cvc::net::have_http_backend())
+    GTEST_SKIP() << "libcvc built without an HTTP backend";
+  LocalHttpServer api(txwtf);
+  const fs::path dir = fs::temp_directory_path() / "ariadne_mounts_net";
+  fs::remove_all(dir);
+  const fs::path feed = write_doc(dir / "catalog", "feed.ari", kPlainDoc);
+  const fs::path stranger = write_doc(dir / "downloads", "stranger.ari", kPlainDoc);
+  const fs::path shell = write_doc(
+      dir, "shell.ari",
+      std::string("meta: { name: Shell, min_libcvc: \"0.0.0\" }\nroot:\n  - mounts: apps\n"
+                  "    catalog:\n      - \"") +
+          feed.generic_string() + "\"\n");
+  cvc::app app;
+  ASSERT_EQ(enable_net(app, allow({api.origin()})), "");
+  AppRuntime art(app, "ui.shell");
+  TrayBackend be;
+  art.set_backend(be);
+  art.load(shell.string());
+  Runtime &rt = art.runtime();
+  cvc::state &tree = cvc::state::instance(app);
+  tree("ui.shell.apps.feed.uri").value(feed.generic_string());
+  tree("ui.shell.apps.stranger.uri").value(stranger.generic_string());
+  ASSERT_TRUE(pump_until(rt,
+                         [&] {
+                           return peek(app, "ui.shell.apps.feed.status") == "open" &&
+                                  peek(app, "ui.shell.apps.stranger.status") == "open";
+                         }))
+      << peek(app, "ui.shell.apps.feed.error") << "; " << peek(app, "ui.shell.apps.stranger.error");
+  const std::string feed_scope = "ui.shell.includes.feed",
+                    stranger_scope = "ui.shell.includes.stranger";
+  EXPECT_EQ(cvc::ariadne::scope_principal(app, feed_scope).principal, "local");
+  const std::string theirs = cvc::ariadne::scope_principal(app, stranger_scope).principal;
+  EXPECT_EQ(theirs.rfind("file:", 0), 0u) << theirs;
+  EXPECT_NE(theirs.find("downloads"), std::string::npos) << theirs;
+  EXPECT_EQ(mount_named(rt.mounts(), "stranger")->principal, theirs) << "one spelling";
+
+  ASSERT_EQ(run_in_mount(rt, feed_scope, login_program(api)), "");
+  EXPECT_EQ(sval(app, "ui.shell.includes.feed.login.captured"), "true");
+  ASSERT_EQ(run_in_mount(rt, stranger_scope,
+                         "(begin (state-set \"has\" (net-auth-has? \"txwtf\"))"
+                         " (state-set \"allowed\" (net-allowed? \"" +
+                             api.url("/user/me") +
+                             "\"))"
+                             " (set r (try (http-get \"" +
+                             api.url("/user/me") +
+                             "\" (dict \"auth\" \"txwtf\")) (catch (e) (dict \"status\" -1))))"
+                             " (state-set \"status\" (get-attr r \"status\")))"),
+            "");
+  EXPECT_EQ(sval(app, "ui.shell.includes.stranger.has"), "false");
+  EXPECT_EQ(sval(app, "ui.shell.includes.stranger.allowed"), "false");
+  EXPECT_NE(sval(app, "ui.shell.includes.stranger.status"), "200");
+  EXPECT_EQ(api.requests().size(), 1u) << "only the feed's sign-in reached the site";
+
+  // Closed: its principal goes with it.
+  tree("ui.shell.apps").removeChild("stranger");
+  ASSERT_TRUE(pump_until(rt, [&] { return mount_named(rt.mounts(), "stranger") == nullptr; }));
+  for (const auto &[scope, p] : cvc::ariadne::scope_principals(app))
+    EXPECT_NE(scope, stranger_scope);
+  fs::remove_all(dir);
+}
+
+// A local application's entry may give it a network of its own (shell.apps.<as>.net_policy and
+// .credential_store, as bin/nicotina's flags): it signs in into its own file. One whose policy
+// does not load is refused, and so is a sandboxed one that names a store.
+TEST(AriadneMountsNet, AnEntryGivesALocalApplicationItsOwnNetwork) {
+  if (!cvc::net::have_http_backend())
+    GTEST_SKIP() << "libcvc built without an HTTP backend";
+  LocalHttpServer api(txwtf);
+  const fs::path dir = fs::temp_directory_path() / "ariadne_mounts_own_net";
+  fs::remove_all(dir);
+  const fs::path feed = write_doc(dir / "catalog", "nicotina.ari", kPlainDoc);
+  const fs::path stranger = write_doc(dir / "downloads", "stranger.ari", kPlainDoc);
+  const fs::path policy = write_doc(
+      dir, "fleet.policy", "allow " + api.origin() + "\ncredential txwtf " + api.origin() + "\n");
+  const fs::path store = dir / "nicotina" / "credentials";
+  const fs::path shell = write_doc(
+      dir, "shell.ari",
+      std::string("meta: { name: Shell, min_libcvc: \"0.0.0\" }\nroot:\n  - mounts: apps\n"
+                  "    catalog:\n      - \"") +
+          feed.generic_string() + "\"\n");
+  cvc::app app;
+  ASSERT_EQ(enable_net(app, allow({"https://tx.wtf"})), ""); // the shell's own: not nicotina's site
+  AppRuntime art(app, "ui.shell");
+  TrayBackend be;
+  art.set_backend(be);
+  art.load(shell.string());
+  Runtime &rt = art.runtime();
+  cvc::state &tree = cvc::state::instance(app);
+  tree("ui.shell.apps.nicotina.net_policy").value(policy.string());
+  tree("ui.shell.apps.nicotina.credential_store").value(store.string());
+  tree("ui.shell.apps.nicotina.uri").value(feed.generic_string());
+  tree("ui.shell.apps.bad.net_policy").value((dir / "missing.policy").string());
+  tree("ui.shell.apps.bad.uri").value(feed.generic_string());
+  tree("ui.shell.apps.sneaky.credential_store").value(store.string());
+  tree("ui.shell.apps.sneaky.uri").value(stranger.generic_string());
+  ASSERT_TRUE(pump_until(rt, [&] {
+    return peek(app, "ui.shell.apps.nicotina.status") == "open" &&
+           peek(app, "ui.shell.apps.bad.status") == "refused" &&
+           peek(app, "ui.shell.apps.sneaky.status") == "refused";
+  })) << peek(app, "ui.shell.apps.nicotina.error");
+  EXPECT_NE(peek(app, "ui.shell.apps.bad.error").find("net_policy"), std::string::npos)
+      << peek(app, "ui.shell.apps.bad.error");
+  EXPECT_NE(peek(app, "ui.shell.apps.sneaky.error").find("sandboxed"), std::string::npos)
+      << peek(app, "ui.shell.apps.sneaky.error");
+
+  const std::string scope = "ui.shell.includes.nicotina";
+  const std::optional<NetAccess> own = cvc::ariadne::net_host_access(app, scope);
+  ASSERT_TRUE(own && own->credentials);
+  EXPECT_EQ(fs::path(own->credentials->path()), store);
+  ASSERT_EQ(run_in_mount(rt, scope, login_program(api)), "");
+  EXPECT_EQ(sval(app, "ui.shell.includes.nicotina.login.captured"), "true");
+  std::ostringstream text;
+  {
+    std::ifstream in(store, std::ios::binary); // closed before the directory is removed
+    text << in.rdbuf();
+  }
+  EXPECT_NE(text.str().find("local txwtf " + api.origin() + " "), std::string::npos)
+      << "kept in its own file";
+  EXPECT_FALSE(cvc::ariadne::net_host_access(app)->credentials->has("txwtf"))
+      << "not in the shell's store";
+  fs::remove_all(dir);
+}
+
+// shell.ari: a catalog entry's net_policy and credential_store (relative to the catalog) open it
+// under its slug with that network.
+TEST(AriadneComponents, ShellGivesACatalogEntryItsOwnNetwork) {
+  const fs::path root = fs::path(__FILE__).parent_path().parent_path().parent_path().parent_path();
+  const fs::path shell = root / "src" / "cvc" / "ariadne" / "components" / "shell.ari";
+  if (!fs::exists(shell))
+    GTEST_SKIP() << "sources not found at " << shell.string();
+  const fs::path dir = fs::temp_directory_path() / "ariadne_shell_own_net";
+  fs::remove_all(dir);
+  write_doc(dir, "nicotina.ari", kPlainDoc);
+  write_doc(dir, "fleet.policy", "allow https://tx.wtf\ncredential txwtf https://tx.wtf\n");
+  const fs::path catalog =
+      write_doc(dir, "apps.json",
+                R"({"demos": [{"slug": "nicotina", "title": "nicotina", "desc": "TX.WTF",
+  "doc": "nicotina.ari", "net_policy": "fleet.policy", "credential_store": "nicotina/credentials"}]})");
+  cvc::app app;
+  ASSERT_EQ(enable_net(app, allow({"https://example.test"})), "");
+  AppRuntime art(app, "ui.shell");
+  art.add_component_path((root / "src" / "cvc" / "ariadne").string());
+  TrayBackend be;
+  art.set_backend(be);
+  art.set_document_args({"--catalog", catalog.string(), "--open", "nicotina"}, "ari run shell.ari",
+                        true);
+  for (const std::string &w : art.load(shell.string()))
+    ADD_FAILURE() << "load warning: " << w;
+  Runtime &rt = art.runtime();
+  ASSERT_TRUE(
+      pump_until(rt, [&] { return peek(app, "ui.shell.shell.apps.nicotina.status") == "open"; }))
+      << "catalog " << data_status(app, "ui.shell.data.catalog") << "; "
+      << peek(app, "ui.shell.shell.apps.nicotina.error");
+  const std::string scope = "ui.shell.includes.nicotina";
+  EXPECT_EQ(cvc::ariadne::scope_principal(app, scope).principal, "local");
+  const std::optional<NetAccess> own = cvc::ariadne::net_host_access(app, scope);
+  ASSERT_TRUE(own && own->credentials && own->policy);
+  // weakly_canonical both: the store's path comes back resolved (long names), and the temp
+  // directory may be in its short (8.3) spelling on Windows (RUNNER~1).
+  EXPECT_EQ(fs::weakly_canonical(own->credentials->path()),
+            fs::weakly_canonical(dir / "nicotina" / "credentials"));
+  EXPECT_TRUE(own->policy->allows(*cvc::net::parse_origin("https://tx.wtf")));
+  EXPECT_FALSE(own->policy->allows(*cvc::net::parse_origin("https://example.test")))
+      << "its own policy, not the shell's";
+  fs::remove_all(dir);
 }

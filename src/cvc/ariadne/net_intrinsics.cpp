@@ -1590,9 +1590,11 @@ struct WsEntry {
   std::shared_ptr<cvc::net::WsConnection> conn;
   cvc::net::Origin origin;
   std::shared_ptr<WsSent> sent = std::make_shared<WsSent>();
+  std::string owner; // NetAccess::owner of the program that opened it
 };
 
-// An app's open WebSockets, by handle: another app's documents can't reach them.
+// An app's open WebSockets, by handle: another app's documents can't reach them, nor a program of
+// another owner (NetAccess::owner: another principal's) in this app.
 struct WsTable {
   static constexpr const char *app_slot = "cvc.ariadne.ws-connections";
   std::mutex mutex;
@@ -1600,11 +1602,12 @@ struct WsTable {
   std::uint64_t next = 1;
 };
 
-WsEntry ws_lookup(WsTable &t, const char *verb, std::span<const se::value_t> args) {
+WsEntry ws_lookup(WsTable &t, const char *verb, std::span<const se::value_t> args,
+                  const std::string &owner) {
   const std::string handle = arg_string(args, 0);
   std::lock_guard<std::mutex> lock(t.mutex);
   auto it = t.open.find(handle);
-  if (it == t.open.end())
+  if (it == t.open.end() || it->second.owner != owner) // another owner's is not there for it
     throw std::runtime_error(std::string(verb) + ": no WebSocket '" + handle +
                              "' (closed, or not one ws-open returned)");
   return it->second;
@@ -1755,6 +1758,7 @@ struct WsOpen {
   std::vector<std::string> protocols;
   WsAuthProtocol auth_protocol;
   std::string http_url;
+  std::string owner; // NetAccess::owner: whose the connection is
 };
 
 // The checks made where the verb is called (the scheduler thread), so a misuse is a DSL error.
@@ -1787,6 +1791,7 @@ WsOpen build_ws_open(std::span<const se::value_t> args, const NetAccess &access)
   o.http_url = cvc::net::ws_http_equivalent(o.req.url);
   if (o.http_url == o.req.url)
     throw std::runtime_error("ws-open: a WebSocket URL starts with ws:// or wss://: " + o.req.url);
+  o.owner = access.owner;
   return o;
 }
 
@@ -1892,6 +1897,7 @@ se::value_t finish_ws_open(WsTable &table, const WsOpen &o, const WsPrepared &p,
   }
   const std::string handle = "ws:" + std::to_string(t.next++);
   WsEntry entry{std::move(conn), p.origin};
+  entry.owner = o.owner;
   if (!o.auth.use.empty())
     entry.sent->add(o.auth.use);
   for (const CredentialValue &v : o.auth.values)
@@ -2039,7 +2045,7 @@ void ws_send_json(const WsEntry &entry, const se::value_t &message, const NetAcc
 }
 
 se::value_t ws_send(WsTable &table, std::span<const se::value_t> args, const NetAccess &access) {
-  const WsEntry entry = ws_lookup(table, "ws-send", args);
+  const WsEntry entry = ws_lookup(table, "ws-send", args, access.owner);
   if (args.size() < 2)
     throw std::runtime_error("ws-send: (ws-send H MESSAGE)");
   const se::value_t &message = args[1];
@@ -2073,7 +2079,7 @@ void register_ws_verbs(const std::shared_ptr<se::environment> &env, se::async_ho
       env, host, "ws-recv",
       [live, access, &table, &host](std::span<const se::value_t> args) -> se::async_work {
         live("ws-recv");
-        WsEntry entry = ws_lookup(table, "ws-recv", args);
+        WsEntry entry = ws_lookup(table, "ws-recv", args, access.owner);
         const double secs = number_arg(args, 1, 30);
         se::async_work work;
         work.kernel = [entry, secs, access](se::async_call &call) -> se::value_t {
@@ -2105,7 +2111,7 @@ void register_ws_verbs(const std::shared_ptr<se::environment> &env, se::async_ho
   se::builtins::register_fn(
       env, "ws-poll", [live, access, &table](std::span<const se::value_t> args) -> se::value_t {
         live("ws-poll");
-        const WsEntry entry = ws_lookup(table, "ws-poll", args);
+        const WsEntry entry = ws_lookup(table, "ws-poll", args, access.owner);
         std::optional<cvc::net::WsEvent> e = entry.conn->recv(0);
         scrub_ws_event(e, entry, access);
         return marshal_ws_event(e);
@@ -2120,14 +2126,15 @@ void register_ws_verbs(const std::shared_ptr<se::environment> &env, se::async_ho
       });
   // (ws-close H [CODE]): close and forget H. #t if it was still open; a closed or unknown
   // handle is no error, so a program can close in any cleanup path.
+  const std::string owner = access.owner;
   se::builtins::register_fn(env, "ws-close",
-                            [&table](std::span<const se::value_t> args) -> se::value_t {
+                            [&table, owner](std::span<const se::value_t> args) -> se::value_t {
                               std::shared_ptr<cvc::net::WsConnection> conn;
                               {
                                 WsTable &t = table;
                                 std::lock_guard<std::mutex> lock(t.mutex);
                                 auto it = t.open.find(arg_string(args, 0));
-                                if (it == t.open.end())
+                                if (it == t.open.end() || it->second.owner != owner)
                                   return se::value_t(false);
                                 conn = std::move(it->second.conn);
                                 t.open.erase(it);
@@ -2138,11 +2145,12 @@ void register_ws_verbs(const std::shared_ptr<se::environment> &env, se::async_ho
                             });
   // (ws-open? H): whether H is open (connected, no close seen or sent).
   se::builtins::register_fn(env, "ws-open?",
-                            [&table](std::span<const se::value_t> args) -> se::value_t {
+                            [&table, owner](std::span<const se::value_t> args) -> se::value_t {
                               WsTable &t = table;
                               std::lock_guard<std::mutex> lock(t.mutex);
                               auto it = t.open.find(arg_string(args, 0));
-                              return se::value_t(it != t.open.end() && it->second.conn->open());
+                              return se::value_t(it != t.open.end() && it->second.owner == owner &&
+                                                 it->second.conn->open());
                             });
 }
 
@@ -2241,6 +2249,10 @@ void host_get_start(cvc::app &app, const std::string &url, const std::string &au
 void register_net_intrinsics(cvc::app &app) { register_net_intrinsics(app, NetAccess{}); }
 
 void register_net_intrinsics(cvc::app &app, NetAccess access) {
+  register_net_intrinsics(app, std::move(access), NetAccessFor());
+}
+
+void register_net_intrinsics(cvc::app &app, NetAccess base, NetAccessFor for_scope) {
   // Warm the lazy per-app singletons on THIS thread before any background worker touches them, so a
   // worker never races their first construction (the nav_compute discipline).
   app.computePool();
@@ -2257,7 +2269,13 @@ void register_net_intrinsics(cvc::app &app, NetAccess access) {
   // timeouts and size cap bound a request instead.
   se::async_options io;
   io.io = true;
-  const bool have_ws = access.ws || cvc::net::have_ws_backend();
+  const bool have_ws = base.ws || cvc::net::have_ws_backend();
+  // The access a program gets: its principal's (docs/roadmap/ARIADNE_SHELL.md 4.12), from the scope
+  // it runs in, as its verbs are bound; it keeps that access for its life, whatever its scope's
+  // principal becomes. `base` decides whether the network is on at all.
+  const auto access_for = [base, for_scope](const se::intrinsics_context &ictx) {
+    return for_scope ? for_scope(ictx.root_path) : base;
+  };
   // Two providers by kind (S1-Q7). The first, `any`: the requests, net-allowed? and the net-auth-*
   // verbs. A request's kernel runs on the app's background task pool and its completion goes to
   // the call's own scheduler; the WebSocket table and each connection's sent list lock; the policy
@@ -2274,10 +2292,11 @@ void register_net_intrinsics(cvc::app &app, NetAccess access) {
   WsTable &ws_table = app.slot<WsTable>();
   OpenUrlLimit &open_limit = app.slot<OpenUrlLimit>();
   // The handlers keep the app by reference: its providers and its pool go before it does.
-  auto requests = [&app, &ws_table, have_http, have_ws, access,
+  auto requests = [&app, &ws_table, have_http, have_ws, base, access_for,
                    io](std::shared_ptr<se::environment> env, se::intrinsics_context &ictx) {
-    if (!is_live(access))
+    if (!is_live(base))
       return; // the host turned the network off: later programs do not get the verbs
+    const NetAccess access = access_for(ictx);
     // The calling program's async host (td 4.9, B30): the app's for a document in group 0, its own
     // group's for an isolated one, the init lane's inline one in init:. A started request
     // (http_work, uri_fetch_work) keeps its host's finisher, not the host: a host's shutdown (a
@@ -2321,10 +2340,28 @@ void register_net_intrinsics(cvc::app &app, NetAccess access) {
     // (fetch URI [BASE]) / (fetch-async URI [BASE]) — the GENERIC async resolver over ANY
     // registered scheme (file/state/cvc/http), so an ari program async-loads any URI without
     // blocking the scheduler thread. Reply dict: { ok body(bytes) url error }. An http(s) URI goes
-    // through the registered handler, which carries the host's policy (enable_net).
+    // through the registered handler, which carries the host's policy (enable_net). A program whose
+    // principal has a policy of its own (a mounted document's, docs/roadmap/ARIADNE_SHELL.md 4.12)
+    // is held to that one first: what it may not reach is not fetched, whatever the launcher's
+    // allows.
+    const std::shared_ptr<const cvc::net::NetPolicy> own_policy =
+        access.policy != base.policy ? access.policy : nullptr;
     se::register_async_fn(
         env, *host, "fetch",
-        [&app, host](std::span<const se::value_t> args) {
+        [&app, host, own_policy](std::span<const se::value_t> args) {
+          if (own_policy && !args.empty())
+            if (const std::string *u = std::get_if<std::string>(&args[0].v)) {
+              const std::string scheme = parse_uri(*u).scheme;
+              std::string why;
+              if ((scheme == "http" || scheme == "https") && !own_policy->allows_url(*u, &why)) {
+                UriResult refused;
+                refused.canonical = *u;
+                refused.error = "fetch: " + why;
+                se::async_work work;
+                work.kernel = [refused](se::async_call &) { return marshal_uri_result(refused); };
+                return work;
+              }
+            }
           return uri_fetch_work(app, args, *host);
         },
         io);
@@ -2340,9 +2377,10 @@ void register_net_intrinsics(cvc::app &app, NetAccess access) {
   // one-a-second clock is the app's (OpenUrlLimit), so every program the app builds shares it.
   register_action_intrinsics(
       app,
-      [&app, access, &open_limit](std::shared_ptr<se::environment> env, se::intrinsics_context &) {
-        if (is_live(access))
-          register_open_url(app, env, access, open_limit);
+      [&app, base, access_for, &open_limit](std::shared_ptr<se::environment> env,
+                                            se::intrinsics_context &ictx) {
+        if (is_live(base))
+          register_open_url(app, env, access_for(ictx), open_limit);
       },
       se::provider_affinity::host_proxied);
   // (http-upload URL FILE [OPTS]) / (http-upload-async ...) — send a file the user picked
@@ -2353,9 +2391,11 @@ void register_net_intrinsics(cvc::app &app, NetAccess access) {
   if (have_http)
     register_action_intrinsics(
         app,
-        [&app, access, io](std::shared_ptr<se::environment> env, se::intrinsics_context &ictx) {
-          if (!is_live(access))
+        [&app, base, access_for, io](std::shared_ptr<se::environment> env,
+                                     se::intrinsics_context &ictx) {
+          if (!is_live(base))
             return;
+          const NetAccess access = access_for(ictx);
           se::async_host *host = ictx.host;
           const std::string root = ictx.root_path;
           cvc::app *const app_ptr = &app;

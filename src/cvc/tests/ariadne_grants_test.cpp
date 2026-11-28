@@ -18,6 +18,7 @@
 #include <cvc/ariadne/grants.h>
 #include <cvc/ariadne/input.h>
 #include <cvc/ariadne/loader.h>
+#include <cvc/ariadne/principal.h>
 #include <cvc/ariadne/widget.h>
 #include <cvc/core/app.h>
 #include <cvc/core/notify.h>
@@ -877,7 +878,8 @@ root:
 }
 
 // 4.12 the net.origin form of requires:: the origins a mount asks for and its slot grants are what
-// it holds, on its entry (SH11 reaches them: ScopePrincipal::net_origins).
+// it holds, on its entry and recorded with its principal, where SH11's net host reads them
+// (ScopePrincipal::net_origins); a reload that asks for fewer records fewer.
 TEST(AriadneGrantsRuntime, AMountHoldsTheOriginsItsSlotGrants) {
   const fs::path dir = fs::temp_directory_path() / "ariadne_grants_origins";
   fs::remove_all(dir);
@@ -916,6 +918,10 @@ root:
   const Runtime::MountState *m = mount_named(all, "c");
   ASSERT_NE(m, nullptr);
   EXPECT_EQ(m->net_origins.size(), 2u);
+  EXPECT_EQ(scope_principal(app, "ui.shell.includes.c").net_origins,
+            (std::vector<std::string>{"https://api.example.org", "https://cdn.example.org"}));
+  EXPECT_EQ(scope_principal(app, "ui.shell.includes.o").net_origins,
+            (std::vector<std::string>{"https://api.example.org"}));
 
   // A slot that grants one of them fewer refuses a document that requires both.
   const fs::path narrow =
@@ -948,6 +954,20 @@ requires:
   EXPECT_EQ(peek(app, "ui.shell.apps.p.status"), "refused");
   EXPECT_NE(peek(app, "ui.shell.apps.p.error").find("is a URL, not an origin"), std::string::npos)
       << peek(app, "ui.shell.apps.p.error");
+
+  // A reload that asks for fewer holds, and records, fewer.
+  std::ofstream(client, std::ios::binary | std::ios::trunc)
+      << R"(meta: { name: Client, min_libcvc: "0.0.0" }
+requires:
+  - {name: net.origin, origins: [https://api.example.org]}
+)";
+  fs::last_write_time(client, fs::last_write_time(client) + std::chrono::seconds(5));
+  EXPECT_TRUE(art.reload_if_changed());
+  ASSERT_TRUE(pump_until(rt, [&] {
+    return peek(app, "ui.shell.apps.c.net_origins") == "https://api.example.org";
+  })) << peek(app, "ui.shell.apps.c.net_origins");
+  EXPECT_EQ(scope_principal(app, "ui.shell.includes.c").net_origins,
+            (std::vector<std::string>{"https://api.example.org"}));
   fs::remove_all(dir);
 }
 
