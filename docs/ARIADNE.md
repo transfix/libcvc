@@ -9495,8 +9495,10 @@ Measured in CI (2026-10-20):
   their edges differently, and the volume grids' texel edges land a pixel apart. On
   volume_grid_quad the Probe tab's Min/Max text differs too: the bunny SDF's range is one float32
   ulp apart on the arm64 runner (`-26.27533721923828` against llvmpipe's `-26.275339126586914`).
-- So `widgets`, `scene`, `grid`, `orthoslicer`, `view_stacking` and those eight have
-  `<name>.macos.png` goldens, and macOS compares them against its own renderer.
+- scene_windows (2026-11-27) had 759 pixels beyond 40, at the edges of the shapes and of the
+  volren in its two windows.
+- So `widgets`, `scene`, `grid`, `orthoslicer`, `view_stacking`, those eight and `scene_windows`
+  have `<name>.macos.png` goldens, and macOS compares them against its own renderer.
 
 To make or refresh a macOS golden, take `<name>.actual.png` from the failing macOS job's
 `ari-golden-macOS-<lane>` artifact, look at it, and commit it as `<name>.macos.png`.

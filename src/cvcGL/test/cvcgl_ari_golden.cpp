@@ -92,7 +92,8 @@ const double kBackground[3] = {0.09, 0.10, 0.12};
 // contour_tiler: lines and translucent surfaces; volren_views: box edges and the volren's
 // shading; volume_grid, _quad, _contours, _segment: texel edges, and on _quad the Probe tab's
 // Min/Max text, the bunny SDF's range a float32 ulp apart on the arm64 runner), so they have
-// them too, as view_stacking does.
+// them too, as view_stacking does. scene_windows (2026-11-27) leaves 759: the shapes' and the
+// volren's edges in its two windows, so it has one as well.
 const Tolerance kTolerance{40, 0.00002};
 
 // A scripted pointer for documents whose interesting state needs one (an open menu, a tooltip).
