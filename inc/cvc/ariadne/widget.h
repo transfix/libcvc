@@ -66,6 +66,8 @@ enum class Kind {
                   // Add / Remove buttons that edit the array
   Heatmap,        // a rows x cols grid of cells, each filled from a colour ramp by its value, with
                   // an optional text, corner mark and tooltip; hover and click report the cell
+  Mounts,         // on-demand mounts (docs/roadmap/ARIADNE_SHELL.md 4.2): one isolated mount per
+                  // child of the state key at `bind`, loaded when it appears, freed when it goes
 };
 
 // How a Kind::Image fills its box (`fit:`) and the box's shape (`shape:`); media.h fits a picture
@@ -262,11 +264,22 @@ struct TextRunSpec {
   bool operator==(const TextRunSpec &) const = default;
 };
 
+struct MountsSpec; // Kind::Mounts's slot, below
+
+// §5.3 a `state:` block's seeds, in document order: each a path (relative to the prefix it is
+// written under, or app-root-absolute with a leading '/') and the text written there.
+using StateSeeds = std::vector<std::pair<std::string, std::string>>;
+
 // One node of the retained tree. `bind` is a cvc::state path (relative to the
 // Runtime's prefix, or absolute with a leading '/'); `on` is an event name a
 // host handler is registered for (Runtime::on). Empty fields are simply unused
 // by the kinds that don't read them.
-struct Widget {
+//
+// WidgetNode is every field but the node's two subtrees (Widget::children and
+// Widget::context_items), so a Widget copies and frees its tree node by node,
+// never recursing once per level (a document nested thousands deep is copied by
+// a repeat: each frame, and freed, on a small stack).
+struct WidgetNode {
   Kind kind = Kind::Group;
 
   std::string id;    // stable widget id suffix; defaults to `label`
@@ -615,11 +628,20 @@ struct Widget {
   // wrapper; empty otherwise.
   std::string init_script;
 
+  // §12 load: the mounted fragment's own `state:` seeds (§5.3), written at the mount's sub-prefix
+  // just before its init: runs, and like it once. Only on a mount wrapper; empty otherwise.
+  StateSeeds state_seeds;
+
   // §12 load: the mounted fragment's own on_tick: body. The Runtime runs it as one resident per
   // mount, chrooted to the sub-prefix with the mount's functions, woken once per drain like the
   // document's: from the mount's first frame (after its init:) until a reconcile drops it. Only on
   // a mount wrapper; empty otherwise.
   std::string tick_script;
+
+  // Kind::Mounts (docs/roadmap/ARIADNE_SHELL.md 4.2): `bind` is the state key whose children are
+  // the mounts (<bind>.<as>.uri, .args.<name>, ...), and this the rest of the slot (MountsSpec,
+  // below). Out of line, so every other widget stays the size it was. Null for every other kind.
+  std::shared_ptr<const MountsSpec> mounts;
 
   // §6.6 functions: set on the document's root and on every mount wrapper, null elsewhere. The
   // programs started inside this subtree (on: actions, the mount's init:) run with these
@@ -632,16 +654,107 @@ struct Widget {
   std::string custom_type;
   Value props;
 
-  std::vector<Widget> children;
-
   // §5.30 `context_menu:` the menu a right-click, a long press or the Menu key opens over this
-  // window, group or viewport (on the document's root: over the main view). `context_items` are
-  // its items, as a menu's `items:` are; `context_menu_id` its `id:`, the name
+  // window, group or viewport (on the document's root: over the main view). Its items are
+  // Widget::context_items, as a menu's `items:` are; `context_menu_id` its `id:`, the name
   // `contributes: context_menus:` adds to (a menu without one takes items from no one).
   // `context_menu` says it has one, so an id with no items of its own yet still counts.
   bool context_menu = false;
   std::string context_menu_id;
-  std::vector<Widget> context_items;
+};
+
+struct Widget : WidgetNode {
+  std::vector<Widget> children;
+  std::vector<Widget> context_items; // §5.30 its context menu's items (WidgetNode::context_menu)
+
+  Widget() = default;
+  Widget(const Widget &other);
+  Widget(Widget &&) noexcept = default;
+  Widget &operator=(const Widget &other);
+  Widget &operator=(Widget &&) noexcept = default;
+  ~Widget();
+
+private:
+  struct node_only {};
+
+public:
+  // `other` without its subtrees: the copy constructor's step (node_only is its own).
+  Widget(node_only, const Widget &other) : WidgetNode(other) {}
+};
+
+// A copy of `other`'s tree, a node at a time: each node's subtrees are copied
+// from a list of the nodes still to do, not by a call per level. (Only a node
+// whose children have subtrees of their own waits in that list.)
+inline Widget::Widget(const Widget &other) : WidgetNode(other) {
+  if (other.children.empty() && other.context_items.empty())
+    return;
+  std::vector<std::pair<Widget *, const Widget *>> todo;
+  const auto lists_of = [&todo](Widget &to, const Widget &from) {
+    for (auto lists : {std::pair{&to.children, &from.children},
+                       std::pair{&to.context_items, &from.context_items}}) {
+      lists.first->reserve(lists.second->size());
+      for (const Widget &c : *lists.second)
+        lists.first->emplace_back(node_only{}, c);
+      // Taken once the list is whole: it is not grown again, so the pointers stay good.
+      for (std::size_t i = 0; i < lists.second->size(); ++i)
+        if (!(*lists.second)[i].children.empty() || !(*lists.second)[i].context_items.empty())
+          todo.emplace_back(&(*lists.first)[i], &(*lists.second)[i]);
+    }
+  };
+  lists_of(*this, other);
+  while (!todo.empty()) {
+    const auto [to, from] = todo.back();
+    todo.pop_back();
+    lists_of(*to, *from);
+  }
+}
+
+inline Widget &Widget::operator=(const Widget &other) {
+  if (this != &other) {
+    Widget copy(other); // first: `other` may be in this tree
+    *this = std::move(copy);
+  }
+  return *this;
+}
+
+// The tree's nodes moved out into a list and freed one at a time, each with its
+// subtrees already empty, so no destructor call nests in another.
+inline Widget::~Widget() {
+  const auto leaves = [](const std::vector<Widget> &list) {
+    for (const Widget &c : list)
+      if (!c.children.empty() || !c.context_items.empty())
+        return false;
+    return true;
+  };
+  if (leaves(children) && leaves(context_items))
+    return; // the lists free their nodes, each with nothing under it
+  std::vector<Widget> todo;
+  const auto take = [&todo](std::vector<Widget> &list) {
+    for (Widget &c : list)
+      todo.push_back(std::move(c));
+    list.clear();
+  };
+  take(children);
+  take(context_items);
+  while (!todo.empty()) {
+    Widget node = std::move(todo.back());
+    todo.pop_back();
+    take(node.children);
+    take(node.context_items);
+  }
+}
+
+// Kind::Mounts's slot (Widget::mounts). `allow` lists the URI prefixes that may be mounted, or
+// `allow_bind` names a state key holding them (a list, or one per child); both empty: any.
+// `catalog` / `catalog_bind` likewise list the catalog's documents, which run as the `local`
+// principal. `base` is the directory of the document that holds the slot: its entries' relative
+// URIs resolve against it.
+struct MountsSpec {
+  std::vector<std::string> allow;
+  std::string allow_bind;
+  std::vector<std::string> catalog;
+  std::string catalog_bind;
+  std::string base;
 };
 
 // §5.30 `w` with a right-click menu of `items` (named `id`, "" for none).

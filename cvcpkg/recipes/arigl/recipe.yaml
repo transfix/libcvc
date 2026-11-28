@@ -1,7 +1,7 @@
 schema_version: 1
 recipe:
   name: arigl
-  upstream_version: "4.0.9"
+  upstream_version: "4.0.10"
   cvc_revision: 1
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
@@ -22,8 +22,8 @@ recipe:
 # tree (it uses libcvc API newer than the last release, e.g. cvc/ariadne/doc_fetch.h), so publish
 # it with that libcvc, as ari is.
 #
-# Platforms: wherever cvcgl is: linux and windows. macOS joins when VTK and cvcgl have macOS
-# bundles; build.sh already sets nothing Linux-only.
+# Platforms: wherever cvcgl is: linux, windows and macOS (arm64 only while vtk has no
+# macos/x86_64 bundle); build.sh sets nothing Linux-only.
 #
 # Its browser twin is arigl-web (cvcpkg/recipes/arigl-web): the same program built to wasm, with
 # a page that runs a document by URL.
@@ -42,9 +42,9 @@ patches: []
 depends:
   build:
     - name: libcvc
-      version: "==4.0.9"
+      version: "==4.0.10"
     - name: cvcgl
-      version: "==4.0.9"
+      version: "==4.0.10"
     # arigl itself links VTK's RenderingUI and IOImage modules (its window and --png), beyond
     # what cvcGL links.
     - name: vtk
@@ -53,9 +53,9 @@ depends:
     - name: sdl3
   runtime:
     - name: libcvc
-      version: "==4.0.9"
+      version: "==4.0.10"
     - name: cvcgl
-      version: "==4.0.9"
+      version: "==4.0.10"
     - name: vtk
     - name: imgui-w32
     - name: sdl3
@@ -67,8 +67,20 @@ build:
   matrix:
     - platform: linux
       script: build.sh
+    - platform: macos
+      script: build.sh
+      env:
+        MACOSX_DEPLOYMENT_TARGET: "13.0"
     - platform: windows
       script: build.ps1
+    # The BSDs build on the cvcpkg.org fleet from the release tag's tarball, against the fleet's
+    # libcvc (see the libcvc recipe's matrix).
+    - platform: freebsd
+      script: build.sh
+    - platform: openbsd
+      script: build.sh
+    - platform: netbsd
+      script: build.sh
 
 package:
   # Just the `arigl` executable (bin/arigl, bin/arigl.exe on Windows). No cmake package config —

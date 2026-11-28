@@ -1,18 +1,18 @@
 schema_version: 1
 recipe:
   name: libcvc-examples-web
-  upstream_version: "4.0.9"
+  upstream_version: "4.0.10"
   # Replaces cvcgl-examples' wasm-mt column (last published 3.7.0+cvc.1), which carried
   # only the four nav/terrain demos; this carries the whole gallery.
   # Bumped 1 -> 2: the gallery now links ImageMagick (CVC_ENABLE_IMAGEMAGICK=ON, was OFF
   # because the demo link could not resolve MagickCore's static codec libraries).
   # Bumped 1 -> 2: the contour tiler demo (cvc::planar's clipper2, cdt and shewchuk-predicates).
-  # Reset to 1 for the 4.0.9 upstream version: a version bump restarts cvc_revision.
+  # Reset to 1 for the 4.0.10 upstream version: a version bump restarts cvc_revision.
   cvc_revision: 1
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"
-  description: "libcvc's examples as a WebAssembly browser gallery (share/libcvc-examples-web/web/): the cvcGL scene demos (lsystem_forest, lsystem_coast, bunny_shadow, volren_bunny, volslice_bunny), the GRL-SNAM navigation demos (nav_city_swarm / nav_city_drive / nav_fog_ghost, on the real Austin scene with the trained policy) and the Ariadne .ari demos, among them the terrain lab and the FEM gallery, all run by arigl, with a card index, a page per demo, and a Demos menu in each. The single-threaded build (wasm) also has the `ari` terminal page and is what transfix.github.io/libcvc serves; the threaded build (wasm-mt) needs cross-origin isolation, which libcvc-examples' libcvc-examples-web launcher provides."
+  description: "libcvc's examples as a WebAssembly browser gallery (share/libcvc-examples-web/web/): the cvcGL scene demos (lsystem_forest, lsystem_coast, bunny_shadow, volren_bunny, volslice_bunny), nav_scrub (a navigation policy learning on the real Austin scene) and the Ariadne .ari demos, among them the terrain lab and the FEM gallery, all run by arigl, with a card index, a page per demo, and a Demos menu in each. The single-threaded build (wasm) also has the `ari` terminal page and is what transfix.github.io/libcvc serves; the threaded build (wasm-mt) needs cross-origin isolation, which libcvc-examples' libcvc-examples-web launcher provides."
   homepage: https://github.com/transfix/libcvc
   # BSD-3-Clause: the demos link cvcGL statically, which carries code derived
   # from VTK 9.5.0. MIT: lsystem_coast's OceanFFT is a port of ABYSSAL. Both
@@ -89,11 +89,10 @@ depends:
     # (cvc.4 on) carries the browser console it needs; there is no older wasm build.
     - name: tvision
       platforms: [wasm]
-    # Austin scene + trained policy + vehicle model, preloaded into the nav_city demos'
-    # MEMFS so the gallery shows real downtown Austin. Data-only (platform any).
-    # build-wasm.sh preloads them when present and falls back to a synthetic city otherwise.
+    # Austin scene + vehicle model, preloaded into nav_scrub's MEMFS so the gallery's
+    # scrubber runs on real downtown Austin. Data-only (platform any). build-wasm.sh
+    # preloads them when present and falls back to a generated world otherwise.
     - name: scene-austin-south-small
-    - name: grl-snam-weights
     - name: vehicle-humvee
   # Nothing at run time: the bundle is finished page files (share/libcvc-examples-web/web/), the
   # libraries above all linked into the demos' .wasm and the scene, policy and vehicle preloaded

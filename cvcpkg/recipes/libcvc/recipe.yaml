@@ -1,7 +1,7 @@
 schema_version: 1
 recipe:
   name: libcvc
-  upstream_version: "4.0.9"
+  upstream_version: "4.0.10"
   # Bumped 1 -> 2: the host-only libcvc ABI changed (voxels::_cuda_unified_ptr is
   # now always std::shared_ptr<void>, +8 bytes, to match the CUDA build and make
   # cvc::volume's layout variant-invariant). The new CPU bundle is not ABI-
@@ -177,6 +177,16 @@ source:
 patches: []
 
 depends:
+  # The BSD columns (freebsd, openbsd, netbsd) build on the cvcpkg.org fleet from the release
+  # tag's tarball (publish-cvcpkg.yml: fleet-bsd-haiku), against the bundles those same builders
+  # made. A dep scoped off a BSD below has no bundle there yet: googletest (tests stay off on the
+  # fleet) and tvision on openbsd; openmp on all three (the base clangs ship no libomp, so the
+  # OpenMP loops build serially there).
+  #
+  # Haiku builds the same way, with less: no gRPC chain (abseil, protobuf, re2, grpc), so build.sh
+  # turns both conference transports off there (the WebSocket one needs protobuf too); no
+  # openblas, so no levmar; and no fontconfig, tvision or openmp.
+  #
   # Build-only: GoogleTest for the test suite (CVC_BUILD_TESTS=ON). Listed so
   # `cvcpkg install-deps cvcpkg/recipes/libcvc` (ci-recipe.yml, and the
   # fetch-libcvc-deps action behind ci.yml's package-* jobs) puts the catalog's
@@ -206,7 +216,7 @@ depends:
     # platforms this recipe builds; on Windows tvision uses the Win32 console
     # (cy-pca/cvcpkg tvision cvc.3), elsewhere ncursesw (runtime, below).
     - name: tvision
-      platforms: [linux, macos, windows]
+      platforms: [linux, macos, windows, freebsd, netbsd]
     # The VolumeRover ports' permissive geometry (docs/roadmap/VOLROVER-LIBRARY-PORTS-ROADMAP.md
     # §1.2), build-only:
     #  - CDT (2D constrained Delaunay) and Shewchuk's predicates are header-only and linked
@@ -217,11 +227,11 @@ depends:
     # SHEWCHUK are on there too, and permissive_libs_test runs every section. A dep is scoped by
     # platform, never by arch, so each listed platform needs a bundle for every arch it builds.
     - name: clipper2
-      platforms: [linux, macos, freebsd, openbsd, netbsd, windows]
+      platforms: [linux, macos, freebsd, openbsd, netbsd, windows, haiku]
     - name: cdt
-      platforms: [linux, macos, freebsd, openbsd, netbsd, windows]
+      platforms: [linux, macos, freebsd, openbsd, netbsd, windows, haiku]
     - name: shewchuk-predicates
-      platforms: [linux, macos, freebsd, openbsd, netbsd, windows]
+      platforms: [linux, macos, freebsd, openbsd, netbsd, windows, haiku]
   # libcvc is a pure C++ SDK — no Python. The pycvc bindings (SWIG, Python,
   # numpy) are a separate `pycvc` recipe that depends on libcvc.
   runtime:
@@ -234,7 +244,7 @@ depends:
     # landed on consumers' link lines whether they used the feature or not.
     # Build-only: nothing in libcvc's public headers mentions it.
     - name: pocketfft
-      platforms: [linux, macos, windows]
+      platforms: [linux, macos, windows, freebsd, openbsd, netbsd, haiku]
     # Eigen 5 + libigl's MPL-2.0 core module, both header-only, back
     # mesh_ops.h / fem.h (CVC_ENABLE_LIBIGL). Build-only like pocketfft: nothing
     # under inc/cvc includes them, they compile into the private cvc_igl helper,
@@ -243,31 +253,31 @@ depends:
     # option flips OFF and every mesh_ops/fem entry point throws
     # mesh_ops_unavailable; CI asserts that did not happen.
     - name: eigen
-      platforms: [linux, macos, windows]
+      platforms: [linux, macos, windows, freebsd, openbsd, netbsd, haiku]
     - name: libigl
-      platforms: [linux, macos, windows]
+      platforms: [linux, macos, windows, freebsd, openbsd, netbsd, haiku]
     - name: gsl
-      platforms: [linux, macos, windows]
+      platforms: [linux, macos, windows, freebsd, openbsd, netbsd, haiku]
     # No cgal, gmp or mpfr: libcvc does not use CGAL. Its only uses were CGAL's
     # Spatial Searching (GPL-3+), now the vendored nanoflann (BSD-2-Clause,
     # src/cvc/third_party), and gmp/mpfr were here only because CGAL needs them.
     - name: hdf5
-      platforms: [linux, macos, windows]
+      platforms: [linux, macos, windows, freebsd, openbsd, netbsd, haiku]
     - name: log4cplus
-      platforms: [linux, macos, windows]
+      platforms: [linux, macos, windows, freebsd, openbsd, netbsd, haiku]
     # The conference's Opus mics (media_opus.h): without libopus every mic stays f32, 1.5 Mbit/s
     # against 32 kbit/s. Linked from its shared library natively, so a runtime dep; wasm links the
     # static libopus.a (cvc.8 on, cy-pca/cvcpkg#467). No wasm-mt bundle exists yet, and Emscripten
     # will not link a single-threaded archive into a -pthread build, so wasm-mt goes without.
     - name: libopus
-      platforms: [linux, macos, windows, wasm]
+      platforms: [linux, macos, windows, freebsd, openbsd, netbsd, haiku, wasm]
     # The host-side end-to-end encryption (cvc::net::E2eeStore, the e2ee-* verbs, --e2ee-store):
     # TX.WTF's X3DH + Double Ratchet over libsodium (cy-pca/cvcpkg#612). Without it CVC_HAVE_SODIUM
     # is off and the verbs are absent, so a document shows encrypted conversations locked.
     # Shared natively; wasm and wasm-mt link the static libsodium.a (wasm-mt seeds its randomness
     # from getentropy: libsodium's emscripten default throws on a pthread).
     - name: libsodium
-      platforms: [linux, macos, windows, wasm, wasm-mt]
+      platforms: [linux, macos, windows, freebsd, openbsd, netbsd, haiku, wasm, wasm-mt]
     - name: tiff
     - name: imagemagick
     # ImageMagick delegates + libtiff codecs. `cvcpkg install` installs each
@@ -304,17 +314,17 @@ depends:
     # outright (same trap as assimp/openblas above). bzip2 is unscoped — it is
     # published for every platform libcvc builds.
     - name: fontconfig
-      platforms: [linux, macos]
+      platforms: [linux, macos, freebsd, openbsd, netbsd]
     # fontconfig's own link — flat install means adding a dep can reveal the
     # next layer, so the prefix was re-scanned after adding fontconfig and
     # libfontconfig.dylib -> @rpath/libexpat.1.10.0.dylib turned up. Unscoped:
     # expat is published for every platform libcvc builds.
     - name: expat
-      platforms: [linux, macos, windows]
+      platforms: [linux, macos, windows, freebsd, openbsd, netbsd, haiku]
     - name: bzip2
     - name: libxml2
     - name: yaml
-      platforms: [linux, macos, windows]
+      platforms: [linux, macos, windows, freebsd, openbsd, netbsd, haiku]
     # yaml-cpp (the C++ parser, distinct from the `yaml` C libYAML above) is
     # linked by cvc::ariadne's .ari loader — the Ariadne UI/scene DSL parses
     # documents into the widget tree (src/cvc/ariadne/loader.cpp). It is OPTIONAL
@@ -326,7 +336,7 @@ depends:
     # packages its cvcConfig.cmake finds for a consumer (cy-pca/cvcpkg#387
     # published the threaded bundle).
     - name: yaml-cpp
-      platforms: [linux, macos, windows, wasm-mt]
+      platforms: [linux, macos, windows, freebsd, openbsd, netbsd, haiku, wasm-mt]
     # The other Ariadne optional deps (cvc::ariadne in libcvc core): nlohmann-json
     # + json-schema-validator power the .ari Layer-2 JSON-Schema validation (§15);
     # ftxui is the terminal backend (§16.4). All OPTIONAL at the CMake level
@@ -337,21 +347,21 @@ depends:
     # (cy-pca/cvcpkg#378), and the wasm-mt libcvc links it
     # (publish-cvcgl-wasm.yml), so it is declared there too.
     - name: nlohmann-json
-      platforms: [linux, macos, windows]
+      platforms: [linux, macos, windows, freebsd, openbsd, netbsd, haiku]
     - name: json-schema-validator
-      platforms: [linux, macos, windows]
+      platforms: [linux, macos, windows, freebsd, openbsd, netbsd, haiku]
     - name: ftxui
-      platforms: [linux, macos, windows, wasm-mt]
+      platforms: [linux, macos, windows, freebsd, openbsd, netbsd, haiku, wasm-mt]
     # ncurses: the Unix tvision backend links libncursesw (tvision, above, is
     # build-only), and ncurses ships the terminfo database (share/terminfo) that
     # TvisionBackend::run points ncurses at. A runtime dep so the flat install
     # puts both in the consumer's prefix. Not Windows: no ncurses there.
     - name: ncurses
-      platforms: [linux, macos]
+      platforms: [linux, macos, freebsd, openbsd, netbsd, haiku]
     - name: levmar
-      platforms: [linux, macos, windows]
+      platforms: [linux, macos, windows, freebsd, openbsd, netbsd]
     - name: libiimod
-      platforms: [linux, macos, windows]
+      platforms: [linux, macos, windows, freebsd, openbsd, netbsd, haiku]
     # Native mesh/model import (Phase 3: cvc::model + read_model/read_geometry for
     # obj/ply/stl/fbx/gltf/... via Assimp). Guarded by CVC_ENABLE_ASSIMP; the
     # bundle links libassimp so it must be present in the flat prefix. (libcvc's
@@ -364,9 +374,9 @@ depends:
     # and CVC_ENABLE_ASSIMP flips OFF, so libcvc still builds (without the model
     # loader). Windows added now that an assimp windows bundle is published
     # (assimp 6.0.5+cvc.2) — this is what lets read_model parse buildings.glb, i.e.
-    # nav_finale / nav_city_swarm --bundle load a real Austin city on Windows.
+    # a city document's or nav_scrub's --bundle load a real Austin city on Windows.
     - name: assimp
-      platforms: [linux, macos, freebsd, netbsd, windows, wasm-mt]
+      platforms: [linux, macos, freebsd, netbsd, windows, openbsd, haiku, wasm-mt]
     # Jolt Physics, the cvc::physics backend (src/cvc/physics/jolt). Without it
     # find_package(Jolt CONFIG) misses, CVC_WITH_JOLT turns OFF and libcvc builds
     # with the null backend only. Linked PRIVATE into the cvc target: a shared
@@ -374,7 +384,7 @@ depends:
     # joltphysics 5.6.0+cvc.5 is cross-platform deterministic and published for
     # these platforms (macOS: arm64 only so far, like the rest of this list).
     - name: joltphysics
-      platforms: [linux, macos, freebsd, netbsd, windows, wasm-mt]
+      platforms: [linux, macos, freebsd, netbsd, windows, openbsd, haiku, wasm-mt]
     # Reentrant Qhull (libqhull_r), the VolumeRover ports' 3D Delaunay in place of CGAL's GPL
     # triangulations (docs/roadmap/VOLROVER-LIBRARY-PORTS-ROADMAP.md §1.2). A shared cvc links
     # the shared libqhull_r PRIVATE, so it is a runtime dependency; without the package
@@ -386,7 +396,7 @@ depends:
     #    macOS bundle exists, because nav needs it on every platform.
     # install-deps is all-or-nothing, so a dependency with no build fails every lane.
     - name: qhull
-      platforms: [linux, macos, freebsd, openbsd, netbsd, windows]
+      platforms: [linux, macos, freebsd, openbsd, netbsd, windows, haiku]
     # Scoped for the same reason as assimp above, but the other way round:
     # openblas deliberately has NO macOS build. macOS ships BLAS/LAPACK in the
     # Accelerate framework, so libcvc-deps uses the system libraries there —
@@ -419,7 +429,7 @@ depends:
     # them, and its dylib is @rpath-relocatable like the other deps.
     # curl's own closure is openssl (declared below) and zlib.
     - name: curl
-      platforms: [linux, macos, windows]
+      platforms: [linux, macos, windows, freebsd, openbsd, netbsd, haiku]
     # The gRPC/xmlrpc network state-transport stack (CVC_USING_XMLRPC + CVC_ENABLE_GRPC).
     # Scoped to the platforms this recipe actually BUILDS the transport on (the build matrix
     # below: linux/macos/windows). The wasm-mt bundle (built separately by publish-cvcgl-wasm.yml,
@@ -427,17 +437,17 @@ depends:
     # `cvcpkg install cvc/libcvc --platform wasm-mt` fail to resolve (abseil/protobuf/grpc are not
     # published for wasm). The state_exec evaluator is independent of this stack (always built).
     - name: openssl
-      platforms: [linux, macos, windows]
+      platforms: [linux, macos, windows, freebsd, openbsd, netbsd, haiku]
     - name: c-ares
-      platforms: [linux, macos, windows]
+      platforms: [linux, macos, windows, freebsd, openbsd, netbsd, haiku]
     - name: re2
-      platforms: [linux, macos, windows]
+      platforms: [linux, macos, windows, freebsd, openbsd, netbsd]
     - name: abseil
-      platforms: [linux, macos, windows]
+      platforms: [linux, macos, windows, freebsd, openbsd, netbsd]
     - name: protobuf
-      platforms: [linux, macos, windows]
+      platforms: [linux, macos, windows, freebsd, openbsd, netbsd]
     - name: grpc
-      platforms: [linux, macos, windows]
+      platforms: [linux, macos, windows, freebsd, openbsd, netbsd]
     - name: pthreads4w
       platforms: [windows]
     # LLVM's OpenMP runtime (libomp), redistributable.
@@ -474,6 +484,17 @@ build:
         MACOSX_DEPLOYMENT_TARGET: "13.0"
     - platform: windows
       script: build.ps1
+    # The BSDs build on the cvcpkg.org fleet, not in GitHub Actions (which has no BSD runners):
+    # on a v* tag, publish-cvcpkg.yml pushes this recipe with the tag's tarball as its source and
+    # submits these rows as a fleet DAG, so the builders that made the deps build libcvc too.
+    - platform: freebsd
+      script: build.sh
+    - platform: openbsd
+      script: build.sh
+    - platform: netbsd
+      script: build.sh
+    - platform: haiku
+      script: build.sh
 
 package:
   files:
@@ -491,14 +512,14 @@ package:
     # package.files check refused the v3.6.0 wasm-mt bundle for declaring one
     # ("2 entries that match nothing in the staged tree").
     - glob: lib/libxmlrpc*
-      platforms: [linux, macos, windows, freebsd, netbsd]
+      platforms: [linux, macos, windows, freebsd, openbsd, netbsd, haiku]
     # ...and the MSVC spelling. add_library(xmlrpc STATIC) yields libxmlrpc.a on
     # Unix but xmlrpc.lib on MSVC, which matches neither lib/libcvc* nor
     # lib/cvc* nor the glob above -- the same reason lib/cvc* sits beside
     # lib/libcvc* here. Without it the Windows bundle exports cvc::xmlrpc while
     # shipping no archive for it.
     - glob: lib/xmlrpc*
-      platforms: [linux, macos, windows, freebsd, netbsd]
+      platforms: [linux, macos, windows, freebsd, openbsd, netbsd, haiku]
     - lib/cmake/cvc/
     - include/cvc/
     - include/xmlrpc/

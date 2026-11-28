@@ -1,0 +1,5 @@
+{"demos": [
+  {"slug": "tray_demo", "title": "Tray demo", "desc": "The menu bar's tray and the notification bell", "doc": "tray_demo.ari"},
+  {"slug": "json_feed", "title": "JSON feed", "desc": "A JSON array rendered with repeat:", "doc": "json_feed.ari"},
+  {"slug": "counter", "title": "Counter", "desc": "A small application with a menu bar of its own", "doc": "apps/counter.ari"}
+]}

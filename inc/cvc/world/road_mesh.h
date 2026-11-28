@@ -30,9 +30,11 @@
 // PAD sits at every junction and dead end, a hair above the strips it covers, so roads meeting at
 // an angle join cleanly. A single dark yellow CENTRE STRIPE runs down each road wide enough for
 // one, stopping short of the junctions. Arterials are drawn a shade darker than local streets
-// (per-vertex colour). Output is plain cvc::geometry (triangles + up normals + colour) — GL-free
-// and reusable by the native lab and the wasm demos alike. Deterministic: a pure function of the
-// network + params.
+// (per-vertex colour). With a SKIRT, every strip's edges (and its ends where no pad covers them)
+// and every pad's rim drop in a wall to below the ground, a shade darker than the road, so seen
+// from the side a road is a layer of pavement set into the terrain, not a ribbon floating over it.
+// Output is plain cvc::geometry (triangles + up normals + colour) — GL-free and reusable by the
+// native lab and the wasm demos alike. Deterministic: a pure function of the network + params.
 
 #ifndef CVC_WORLD_ROAD_MESH_H
 #define CVC_WORLD_ROAD_MESH_H
@@ -59,6 +61,9 @@ struct road_mesh_params {
   double centerline_rgb[3] = {0.62, 0.47, 0.10}; // dark yellow
   double arterial_rgb[3] = {0.24, 0.24, 0.26};   // asphalt colour for major roads
   double local_rgb[3] = {0.32, 0.32, 0.34};      // ... and for local streets (a shade lighter)
+  double skirt_depth = 0.0;  // > 0: the edges' walls reach this far below the sampled ground (m);
+                             // 0: no walls
+  double skirt_shade = 0.75; // the walls' colour: the road's, times this
 };
 
 // Extrude the network into a road-surface mesh (see the file header). `height` places the surface

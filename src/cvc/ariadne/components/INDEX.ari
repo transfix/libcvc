@@ -22,7 +22,9 @@ meta:
   min_libcvc: 3.4.0
 
 # catalog: one entry per shipped component — its file, the unit to include, the state-key subtree it
-# drives, the demos/objects it fits, and any include args. Read by tooling; not a widget tree.
+# drives, the demos/objects it fits, and any include args. `demos:`, where an entry has it, lists the
+# example documents (examples/ariadne/documents) that include the component. Read by tooling; not a
+# widget tree.
 catalog:
   - component: stage_lighting
     file: stage_lighting.ari
@@ -192,6 +194,7 @@ catalog:
     for: "a `type: mesh_lab` node (load a mesh; smooth / decimate / repair / orient; colour by curvature, geodesic distance or a Laplace-Beltrami eigenfunction; the skeleton of its vertices, with a progress bar and Stop)"
     args: { node: mesh, title: Mesh tools, id: mesh_tools }   # defaults
     note: "needs a CVC_ENABLE_LIBIGL build; commands are written to mesh_ops.request and run off the render thread"
+    demos: [mesh_lab.ari, skeleton_lab.ari]   # skeleton_lab: the skeleton of 1GRL's blurred surface
   - component: fe_controls
     file: fe_controls.ari
     unit: fe_controls
@@ -206,13 +209,15 @@ catalog:
     for: "a `type: contour_lab` node (planar contours from a file or another node: the component picker, the slice range, the tiler's parameters, Tile / Stop / Load and a progress bar naming the slice pair)"
     args: { node: contours, title: Contour tiler, id: contour_tiler, slices: 200 }   # defaults
     note: "the tile runs as a sliced task (tiler.request); a libcvc built without cvc::planar has no tiler, and its status says so"
+    demos: [contour_tiler.ari]   # the Kuwajima 2019 Reconstruct series (examples/data/contours/kuwajima2019)
   - component: transfer_function
     file: transfer_function.ari
     unit: transfer_function
     binds: "<prefix>.graphics.root.children.{node}.transfer_function (+ .range / .histogram / .contour_spectrum / .contour_tree / .overlay_request) and <prefix>.tree.{id}.view.*"
-    for: "a volume-type node (volren / volslice / volume) or an fe_lab node: colour ramp, opacity curve and isocontours over histogram / contour spectrum / contour tree layers"
+    for: "a volume-type node (volren / volslice / volume, or a volume_slice plane) or an fe_lab node: colour ramp, opacity curve and isocontours over histogram / contour spectrum / contour tree layers"
     args: { node: volume, title: Transfer Function, id: transfer_function }   # defaults
     note: "a window holding the tf_editor widget (the ColorTable2 port); every volume node publishes the model and the layers, so no host C++ is needed"
+    demos: [transfer_function.ari, volren_bunny.ari, volslice_bunny.ari, mesh_lab.ari, orthoslicer.ari]   # orthoslicer: on its first volume_slice plane
   - component: transfer_function_editor
     file: transfer_function.ari
     unit: transfer_function_editor
@@ -322,6 +327,7 @@ catalog:
     for: "a `type: volume_grid` node (VolumeGridRover): slice views down its axes under an XY / XZ / ZY switch (layout: switch) or all three at once (layout: quad), a 3D view, the probe, point classes (mark, select, move, delete, save, load), contours per object (linear or spline; draw, close, move, select, delete, save, load) tiled into surfaces in the 3D view, the segmentation (its Segmentation tab), sessions and the transfer function, over a volume the app holds"
     args: { node: grid, title: Volume grid, id: volume_grid, view_size: 360, layout: switch }   # defaults
     note: "the node reads no file: give it source: { data: <name> } (a data: entry the app loads); the panel saves and loads point classes and sessions through the app (data-save, data-load). volume_grid_views (the views), volume_grid_tools (the tool and the side panel, its tabs ending in slot tabs) and volume_grid_contours_tab (the Contours tab) are groups for a document that lays out its own windows; the views are the cvcGL `viewport` widget (AriRuntime hosts)"
+    demos: [volume_grid.ari, volume_grid_segment.ari, volume_grid_contours.ari]   # point classes; the Segmentation tab on the Visible Human CT; the Contours tab
   - component: volume_grid_segmentation
     file: volume_grid_segmentation.ari
     unit: volume_grid_segmentation
@@ -329,6 +335,7 @@ catalog:
     for: "the Segmentation tab of a volume_grid in a window of its own: thresholds, gamma and the automatic seeds, Segment and Stop with a progress bar, the result's classes (colour, show, voxels, triangles), how the labels and surfaces draw, and Save (the classes as one multi-variable volume, the labels as one)"
     args: { node: grid, title: Segmentation, id: volume_grid_segmentation }   # defaults
     note: "the grid's point classes of the shown variable and timestep are the seeds; the labels draw on the slices while the fronts advance, each class's surface in the 3D view; saving goes through the app (data-save). volume_grid_segmentation_tab is the controls alone (a group, args node and id), the volume_grid component's Segmentation tab"
+    demos: [volume_grid_segment.ari]   # its tab, inside the volume_grid component (no demo opens the window alone)
   - component: http_cache
     file: http_cache.ari
     unit: http_cache
@@ -343,4 +350,11 @@ catalog:
     binds: "<prefix>.{rows}.* rows (count, total, more, at, every, max, <i>.{pid,scope,app,name,status,steps,waits,memory}); reads <prefix>.ariadne.apps.* and <prefix>.ariadne.name (the Runtime's mirror)"
     for: "the document's running DSL programs, a row each: the application each belongs to (from its (ps) scope), pid, name, status, steps, what it waits on, memory, and a Kill button (docs/roadmap/ARIADNE_SHELL.md 4.10)"
     args: { id: processes, title: Processes, rows: processes }   # defaults
-    note: "call (processes-step ROWS) from on_tick: it polls (ps) twice a second (ROWS.every), at most ROWS.max rows (50); (processes-kill ROWS I) is the Kill button"
+    note: "call (processes-step ROWS) from on_tick: it polls (ps) twice a second (ROWS.every), at most ROWS.max rows (50); (processes-kill ROWS I) is the Kill button; each mounts: application's share of its budget goes in ROWS.apps.<i>.{name,principal,steps,time,memory,held}, from ariadne.apps.<key>.budget.*"
+  - component: shell
+    file: shell.ari
+    document: true                         # run it, not import it: it has no unit
+    binds: "<prefix>.shell.{apps,catalog,catalog_uris,allow}.*, <prefix>.data.catalog (its --catalog), <prefix>.includes.<id> (each application's own state)"
+    for: "a document of its own, not a unit: runs a catalog of .ari documents as applications on demand, with an Apps menu, a Launcher window, a mounts: slot and the Processes window (docs/roadmap/ARIADNE_SHELL.md, SH1; docs/ARIADNE.md §6.8)"
+    args: { catalog: "a gallery.json-format catalog (required)", open: "catalog slugs to open at start" }
+    note: "ari run cvc://components/shell.ari --catalog <prefix>/share/libcvc-examples/ariadne/documents/shell_apps.json"

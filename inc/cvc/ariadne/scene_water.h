@@ -92,6 +92,7 @@
 namespace cvc {
 class app;
 class height_field;
+class sliced_job;
 class world_clock;
 namespace ocean {
 struct shore_grid;
@@ -189,6 +190,9 @@ struct SceneWaterSea {
   std::vector<double> full, full_from; // per cascade: the fetch it is grown at (E2)
   std::uint64_t keyframe = 0;          // counts keyframes (and rebuilt fetch maps)
   double build_ms = 0.0;               // the last keyframe's h0 and fetch maps
+  // Of build_ms, what ran on the thread that made the keyframe (SceneWaterSeaClock::advance or
+  // begin: the frame's): all of it when built at once, none when a job built it elsewhere.
+  double frame_ms = 0.0;
 
   // The new keyframe's share at clock time t (0 -> 1 over the crossfade).
   double weight(double t) const;
@@ -233,12 +237,32 @@ double scene_water_time(cvc::app &app, const std::string &bind_prefix, double ap
 // Steps a water node's sea along its lagged wind (cvc::ocean::sea_lag). advance() with the spec
 // and coast now and the clock's time: true when the sea changed (a keyframe, or a new coast or lee
 // switch that rebuilt the fetch maps).
+//
+// A keyframe off the frame (F4): begin() decides the keyframe as advance() does (the lag is cheap
+// and on the clock) but hands back what it builds, the cascades' h0 for the new wind and the fetch
+// maps when the wind turned (100-250 ms in all), as a job (cvc::sliced_job: a few h0 rows a step)
+// for the app's scheduler to run on another thread or a slice a frame. sea() stays the last sea
+// until the job is adopted. The sea it makes is the one advance() makes, bit for bit (the same
+// builders), and its crossfade starts where advance()'s would have, so the caller only has to put
+// it in by then: adopt() once the job is done, or finish() it there and then (waiting out a step
+// running on another thread). advance(), begin() and follow() finish a pending job first.
 class SceneWaterSeaClock {
 public:
   SceneWaterSeaClock();
   ~SceneWaterSeaClock();
   bool advance(double t, const SceneWaterSpec &s,
                const std::shared_ptr<const SceneWaterShore> &shore);
+  // advance()'s keyframe as a job: null when there is nothing to build off the frame. `changed`
+  // is true when sea() changed now (the first sea, or a new coast or lee switch, built at once).
+  std::shared_ptr<cvc::sliced_job> begin(double t, const SceneWaterSpec &s,
+                                         const std::shared_ptr<const SceneWaterShore> &shore,
+                                         bool &changed);
+  // The job begun last and not yet adopted (null: none).
+  std::shared_ptr<cvc::sliced_job> pending() const;
+  // The pending job's sea made sea() once the job is done: true when it was.
+  bool adopt();
+  // The pending job stepped to its end on this thread, and adopted: true when there was one.
+  bool finish();
   // The sea of keyframe K, made as advance() made it where it was made (its h0 and fetch maps from
   // its winds, the old one's too after the first), on this coast. Its own lag stops: from here on
   // the sea is the one given. True when the sea changed (a new keyframe, a new coast).
@@ -281,6 +305,17 @@ constexpr bool kWaterAdvect[3] = {false, true, true};
 // after them (a renderer's). So the sea, and what floats on it, is the same at every frame rate,
 // headless or drawn, given one tick() and one world sync a period (the scene's world warns when a
 // frame runs the clock over more than one).
+//
+// Off the frame (F4): such a keyframe's h0 and fetch maps, 100-250 ms of work, are built while the
+// period runs out, as a sliced job on the app's scheduler (cvc/core/sliced_task.h: on a background
+// thread natively, a few milliseconds a frame where there are no threads), and the keyframe goes
+// in at the same tick as before: adopted at a tick() once the job is done, or finished there and
+// then when the clock reaches its tick first (tick(), or the scene's world's sync through
+// SceneColliders::settle, before the step that needs it). The sea and the field are the ones built
+// at once, bit for bit; only where the work runs changes. The node's `sea_threading` prop chooses:
+// automatic (the default), `cooperative` (a slice a frame), `threaded`, or `frame` (built in the
+// frame, as before). A keyframe that comes with anything else (a key or the ground changing, the
+// first sea, a new coast) is built at once, as before; so is every keyframe without storms.
 class WaterRuntime {
 public:
   // `ground` gives the ground the water fills, now and after a regenerate (null: none yet).
@@ -306,6 +341,9 @@ public:
   double level() const;
   // The sea's keyframes (O13), which the drawn node draws too.
   std::shared_ptr<const SceneWaterSea> keyframes() const;
+  // The keyframe being built off the frame (null: none), and the clock tick it goes in after.
+  std::shared_ptr<cvc::sliced_job> sea_job() const;
+  std::uint64_t sea_job_tick() const;
 
   // The sea's last keyframe, and the tick its field goes in after (OW5q; keyframe 0: none yet).
   SceneWaterKeyframe keyframe() const;

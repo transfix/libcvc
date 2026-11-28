@@ -24,7 +24,6 @@ University of Texas at Austin for a different license.
 ******************************************************************************/
 
 #include <math.h>
-#include <sys/timeb.h>
 #include <xmlrpc/XmlRpcDispatch.h>
 #include <xmlrpc/XmlRpcSource.h>
 #include <xmlrpc/XmlRpcUtil.h>
@@ -32,6 +31,9 @@ University of Texas at Austin for a different license.
 #if defined(_WINDOWS)
 #include <winsock2.h>
 
+// ftime is the Windows path only: <sys/timeb.h> is gone from OpenBSD (and obsolete in POSIX),
+// where getTime() uses gettimeofday.
+#include <sys/timeb.h>
 #define USE_FTIME
 #if defined(_MSC_VER)
 #define timeb _timeb

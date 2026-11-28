@@ -98,6 +98,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cvc/algo/gust_front.h>
 #include <cvc/algo/wind_field.h>
 #include <cvc/ocean/current.h>
 #include <cvc/ocean/fetch.h>
@@ -134,6 +135,24 @@ struct sea_cascade {
   bool advect = false;            // E6: carried by the current
 };
 
+// F4: the storms' gust fronts where each wave is, at one time: the cells (cvc/algo/gust_front.h),
+// the mean wind they add to, and the wind the sea's keyframes grow toward (the fronts' wind at one
+// reference point). The ripples (the cascades whose gust weight is 1) scale by
+// cvc::algo::front_wind_ratio there, as the drawn water's do (cvc/gl/StormFrontGLSL.h), so a front
+// reaches the waves where it blows, not at one point for the whole sea.
+struct sea_fronts {
+  std::vector<cvc::algo::front_cell> cells;
+  double ux = 0.0, uy = 0.0; // m/s
+  double ref = 0.0;          // m/s
+};
+// Where a sea's fronts come from: the fronts at the sea's time t (null: none then). Thread-safe;
+// read for each point read, so it should keep what it last made.
+class sea_front_source {
+public:
+  virtual ~sea_front_source() = default;
+  virtual std::shared_ptr<const sea_fronts> at(double t) const = 0;
+};
+
 // The wind's forcing of the sea (O13): the crossfade, the fetch maps, the scene's wind for the
 // gusts, and the current.
 struct sea_forcing {
@@ -142,6 +161,10 @@ struct sea_forcing {
   std::shared_ptr<const fetch_field> fetch_from; // and the old's (null: `fetch`)
   cvc::algo::wind_state wind;                    // E3: the gusts' wind (the scene's)
   current_params current;                        // E6
+  // F4: the storms' fronts (null: none). Not in the digest: they are a function of the time that
+  // the caller's state holds (the scene's world: its air, whose digest its state hash has), and
+  // with no front there every ratio is 1 and the sea is the same to the bit.
+  std::shared_ptr<const sea_front_source> fronts;
 };
 
 struct sea_params {

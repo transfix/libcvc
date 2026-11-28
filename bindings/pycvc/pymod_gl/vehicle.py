@@ -183,10 +183,10 @@ def body_transform(position, rotation, ground_z=None):
 
 class VehicleModel:
     """A vehicle mesh (glTF / GLB, e.g. the ``vehicle-humvee`` package's ``Humvee.glb``) made
-    ready to draw at true scale: its smallest extent becomes up (+Z, resting on z = 0), its
-    longest forward (+X, scaled to ``length_m``), centred, with the nose picked as the C++ nav
-    demos pick it (``load_vehicle_template``: the end whose top sits lower, the hood). Its first
-    base-colour texture, if any, comes along.
+    ready to draw at true scale by cvcGL's own fit (``pycvc_gl.fit_vehicle_geometry``, the one a
+    world vehicle's model look and the swarm layer draw with): up +Z, resting on z = 0, its length
+    along +X scaled to ``length_m``, centred, its nose (the end whose top sits lower, the hood) at
+    +X. Its first base-colour texture, if any, comes along.
 
     ``add(scene, name)`` adds one copy as a scene node (the copies share the mesh); move each
     with ``node.setTransform(seat_transform(...))`` or :class:`VehiclePose`."""
@@ -194,37 +194,17 @@ class VehicleModel:
     def __init__(self, app, path, length_m=4.72):
         import numpy as np
         import pycvc
+        import pycvc_gl
 
         model = pycvc.load_model(app, str(path))
-        g = model.merged()
-        if g.num_triangles() == 0:
+        merged = model.merged()
+        if merged.num_triangles() == 0:
             raise ValueError(f"VehicleModel: {path} has no triangles")
+        g = pycvc_gl.fit_vehicle_geometry(merged, float(length_m))
         pts = np.asarray(g.vertices())
-        lo, hi = pts.min(axis=0), pts.max(axis=0)
-        ext = hi - lo
-        up = int(np.argmin(ext))
-        fwd, side = (up + 1) % 3, (up + 2) % 3
-        if ext[side] > ext[fwd]:
-            fwd, side = side, fwd
-        s = float(length_m) / float(ext[fwd]) if ext[fwd] > 1e-9 else 1.0
-        cf, cs = 0.5 * (lo[fwd] + hi[fwd]), 0.5 * (lo[side] + hi[side])
-        f = pts[:, fwd] - cf
-        top = pts[:, up] >= lo[up] + 0.6 * ext[up]  # the upper 40%
-        front = 1.0 if (f > 0).sum() < (f <= 0).sum() else -1.0  # the lighter half
-        if (top & (f > 0)).sum() > 8 and (top & (f <= 0)).sum() > 8:
-            front = 1.0 if f[top & (f > 0)].mean() < abs(f[top & (f <= 0)].mean()) else -1.0
-        out = np.empty_like(pts)
-        out[:, 0] = f * s * front
-        out[:, 1] = (pts[:, side] - cs) * s
-        out[:, 2] = (pts[:, up] - lo[up]) * s
-        pts[:] = out  # vertices() is the geometry's own buffer
-        normals = np.asarray(g.get_normals(), float).reshape(-1, 3)
-        if len(normals) == len(pts):  # the same axis change, without the scale
-            nn = np.stack([normals[:, fwd] * front, normals[:, side], normals[:, up]], axis=1)
-            g.set_normals(nn.ravel().tolist())
         self.geometry = g
         self.length_m = float(length_m)
-        self.size = tuple(float(v) for v in ext[[fwd, side, up]] * s)  # length, width, height
+        self.size = tuple(float(v) for v in pts.max(axis=0) - pts.min(axis=0))  # l, w, h
         self.texture = None
         for mat in model.material_list():
             if mat.has_base_color_texture():

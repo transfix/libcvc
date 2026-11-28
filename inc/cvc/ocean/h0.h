@@ -85,6 +85,28 @@ struct h0_field {
 // h0 for cascade c of an n x n tile (n a power of two) under sea state s.
 h0_field build_h0(int n, const cascade &c, const sea_state &s);
 
+// The same a few rows at a time, for a build spread over frames or run on another thread (a sea's
+// keyframe, OCEAN-AND-WEATHER-ROADMAP.md F4): step(rows) builds that many of the tile's rows (0:
+// the rest) and returns true once every row is built, then take() gives the field, bit for bit
+// what build_h0 gives (each texel's Gaussian is hashed from its seed, column and row, so the rows
+// are independent; the conjugate partners are paired in take()). Throws as build_h0 does, from the
+// constructor.
+class h0_builder {
+public:
+  h0_builder(int n, const cascade &c, const sea_state &s);
+  bool step(int rows);
+  bool done() const noexcept { return _row >= _n; }
+  int rows_done() const noexcept { return _row; }
+  int rows() const noexcept { return _n; }
+  h0_field take(); // once done(); the builder is spent after it
+
+private:
+  int _n = 0, _row = 0;
+  cascade _c;
+  sea_state _s;
+  std::vector<double> _h; // h0(k) at each texel (re, im)
+};
+
 } // namespace ocean
 } // namespace cvc
 

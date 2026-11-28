@@ -61,7 +61,8 @@ struct room_entity {
   std::array<double, 3> wheels{3.3, 1.82, 0.45};
   // The ground (or the water) under its chassis's centre, relative to that centre (m, negative):
   // where a fitted model's base goes. A `pose` entity's is its stand height below it
-  // (stand_height), wherever its poses put it.
+  // (stand_height), wherever its poses put it. A boat's (a floating plant's) is its keel: its
+  // hull's bottom in its hull body's frame, whatever depth of water it is on.
   double base_z = -1.0;
   // The length a model look is fitted to (m): a boat's overall length (dyn_boat_desc::
   // length_overall), longer than its hull's box; 0 for the chassis's, size[0].

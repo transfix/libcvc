@@ -419,15 +419,16 @@ struct push_sums {
 };
 
 // A hull's push from one fluid field (hull.h): each triangle split at the waterline, its
-// submerged part's pressure at its centre of pressure, and its velocity terms. `world_v` and
-// `depth` are scratch, one per vertex; `wet` collects each triangle's submerged area.
+// submerged part's pressure at its centre of pressure, and its velocity terms. `surface` is the
+// field's surface as the step reads it (held at t, fluid_surface::at; null: the box's flat top).
+// `world_v` and `depth` are scratch, one per vertex; `wet` collects each triangle's submerged
+// area. It reads and writes nothing else, so the hulls' pushes run on the field workers.
 void push_hull(const field_body &fb, const body_state &s, const mat3 &r, const vec3 &com,
-               const compiled_field &cf, double gn, double dt, double t, std::vector<vec3> &world_v,
-               std::vector<double> &depth, std::vector<double> &wet, push_sums &sum,
-               const wake_view *wake) {
+               const compiled_field &cf, const fluid_surface *surface, double gn, double dt,
+               double t, std::vector<vec3> &world_v, std::vector<double> &depth,
+               std::vector<double> &wet, push_sums &sum, const wake_view *wake) {
   const hull_mesh &h = *fb.hull.desc;
   const field_grid &box = cf.scalar;
-  const fluid_surface *surface = cf.desc.surface.get();
   const std::size_t nv = h.vertices.size();
   world_v.resize(nv);
   depth.resize(nv);
@@ -440,7 +441,8 @@ void push_hull(const field_body &fb, const body_state &s, const mat3 &r, const v
     if (p.x >= box.lo[0] && p.x <= box.hi[0] && p.y >= box.lo[1] && p.y <= box.hi[1]) {
       double top = box.hi[2];
       if (surface) {
-        double sh = surface->height(p.x, p.y, t);
+        surface_memo memo;
+        double sh = surface->height_with(p.x, p.y, t, memo);
         if (wake)
           sh += wake->height(p.x, p.y);
         top = std::min(top, sh);
@@ -525,7 +527,8 @@ void push_hull(const field_body &fb, const body_state &s, const mat3 &r, const v
     // others' waves' at its depth, the mean of the depths over the part: press / area).
     vec3 w;
     if (surface) {
-      w = surface->velocity(at, t);
+      surface_memo memo;
+      w = surface->velocity_with(at, t, memo);
       if (wake) {
         wake->motion(at.x, at.y, press / area, ws);
         w = w + vec3{ws.u, ws.v, ws.w};
@@ -732,6 +735,7 @@ void field_set::body_added(const world_backend &be, body_id id, const body_desc 
     fb.cut_shape = std::make_shared<const physics::shape>(d.shape);
   fb.cell_volume = fb.volume / static_cast<double>(fb.cells.size());
   fb.mass = d.mass > 0.0 ? d.mass : d.density * fb.volume;
+  fb.buoyancy = fb.water_share = d.displacement;
   bounds_of(fb);
   if (d.hull) {
     compile_hull(*d.hull, fb.hull);
@@ -824,8 +828,9 @@ bool field_set::water_at(const vec3 &p, double t, water_sample &out, const wake_
     const fluid_wake *fw = wake.on && surface ? cf.wake.get() : nullptr;
     const int own = fw && wake.body.valid() ? fw->own(wake.body.value) : -1;
     double top = g.hi[2];
+    surface_memo memo; // the height and the velocity at p share the surface's work (its source)
     if (surface) {
-      double sh = surface->height(p.x, p.y, t);
+      double sh = surface->height_with(p.x, p.y, t, memo);
       if (fw)
         sh += fw->height(own, p.x, p.y);
       top = std::min(top, sh);
@@ -835,9 +840,10 @@ bool field_set::water_at(const vec3 &p, double t, water_sample &out, const wake_
     out.density = g.at(q);
     out.wet = out.depth > 0.0 && out.density > 0.0;
     if (surface) {
-      out.velocity = surface->velocity(p, t);
+      out.velocity = surface->velocity_with(p, t, memo);
       if (fw) {
         wake_sample ws;
+        fw->ready_depths(); // its callers read one at a time (a boat's pre-step, the world's lock)
         fw->motion(own, p.x, p.y, out.depth, ws);
         out.velocity = out.velocity + vec3{ws.u, ws.v, ws.w};
       }
@@ -1364,9 +1370,6 @@ void field_set::apply(world_backend &be, const world_config &cfg, double t) {
   const vec3 g = cfg.gravity;
   const double gn = norm(g);
   const vec3 up = gn > 0.0 ? g * (-1.0 / gn) : vec3{0.0, 0.0, 1.0};
-  std::vector<vec3> world_v; // a hull's scratch: its vertices in the world, their depths, and
-  std::vector<double> depth; // its triangles' submerged areas this step
-  std::vector<double> wet;
 
   // The awake bodies and where they are now, read once, in id order.
   struct placed {
@@ -1399,14 +1402,18 @@ void field_set::apply(world_backend &be, const world_config &cfg, double t) {
   // workers), made once a step as first needed, by a wake or by the cells' reads below.
   std::vector<std::pair<const compiled_field *, std::shared_ptr<const fluid_surface>>> held;
   fluid_surface::parallel_run par; // the workers, once some read needs a surface
+  const auto workers = [&]() -> field_workers & {
+    if (!_workers || _workers->threads() != cfg.field_threads)
+      _workers = std::make_unique<field_workers>(cfg.field_threads);
+    return *_workers;
+  };
   const auto held_of = [&](const compiled_field &cf) -> const fluid_surface * {
     const fluid_surface *own = cf.desc.surface.get();
     for (const auto &h : held)
       if (h.first == &cf)
         return h.second ? h.second.get() : own;
     if (!par) {
-      if (!_workers || _workers->threads() != cfg.field_threads)
-        _workers = std::make_unique<field_workers>(cfg.field_threads);
+      workers();
       par = [this](std::size_t n, const std::function<void(std::size_t)> &fn) {
         _workers->run(n, fn);
       };
@@ -1421,6 +1428,16 @@ void field_set::apply(world_backend &be, const world_config &cfg, double t) {
       advance_wakes(be, cfg, t, gn, held_of);
       break;
     }
+  // And their motion below the top, for the reads below (made here, before the field workers
+  // read it): only for a wake an awake body is in, so the waves' steps while every body sleeps
+  // make none.
+  for (const auto &fe : _fields)
+    if (fe.second.wake)
+      for (const placed &pb : awake)
+        if (overlaps(pb.blo, pb.bhi, fe.second.scalar)) {
+          fe.second.wake->ready_depths();
+          break;
+        }
   // What body `id` reads of field `cf`'s wake: the others' waves (none without a wake).
   const auto view_of = [](const compiled_field &cf, body_id id) {
     wake_view v;
@@ -1476,7 +1493,60 @@ void field_set::apply(world_backend &be, const world_config &cfg, double t) {
     });
   }
 
-  std::size_t run_at = 0;
+  // The hulls' pushes (push_hull), next: each hull body's from the fluids that reach it, in id
+  // order, into a slot of its own, a body a task of the field workers. A body's sums add up in the
+  // order they always did, whichever thread runs it, so the step is the same with or without
+  // workers; the sums below take the slots in the bodies' order.
+  struct hull_push {
+    std::size_t body; // in awake
+    std::vector<vec3> world_v;
+    std::vector<double> depth, wet; // its vertices' depths; its triangles' submerged areas
+    push_sums sums;
+  };
+  std::vector<hull_push> hulls;
+  for (std::size_t bi = 0; bi < awake.size(); ++bi) {
+    const placed &pb = awake[bi];
+    if (pb.fb->hull.desc == nullptr)
+      continue;
+    bool reached = false;
+    for (const auto &fe : _fields) {
+      const compiled_field &cf = fe.second;
+      if (cf.desc.kind != field_kind::fluid || !overlaps(pb.blo, pb.bhi, cf.scalar))
+        continue;
+      reached = true;
+      if (cf.desc.surface)
+        held_of(cf); // held here, before the workers read it
+    }
+    if (reached)
+      hulls.push_back({bi, {}, {}, {}, {}});
+  }
+  if (!hulls.empty()) {
+    const auto surface_of = [&](const compiled_field &cf) -> const fluid_surface * {
+      if (!cf.desc.surface)
+        return nullptr;
+      for (const auto &h : held) // read only: every one was held above
+        if (h.first == &cf)
+          return h.second ? h.second.get() : cf.desc.surface.get();
+      return cf.desc.surface.get();
+    };
+    workers().run(hulls.size(), [&](std::size_t k) {
+      hull_push &hp = hulls[k];
+      const placed &pb = awake[hp.body];
+      const field_body &fb = *pb.fb;
+      const vec3 com = pb.s.position + pb.r * fb.center_of_mass;
+      hp.wet.assign(fb.hull.wetted.size(), 0.0);
+      for (const auto &fe : _fields) {
+        const compiled_field &cf = fe.second;
+        if (cf.desc.kind != field_kind::fluid || !overlaps(pb.blo, pb.bhi, cf.scalar))
+          continue;
+        const wake_view view = view_of(cf, pb.id);
+        push_hull(fb, pb.s, pb.r, com, cf, surface_of(cf), gn, cfg.fixed_dt, t, hp.world_v,
+                  hp.depth, hp.wet, hp.sums, view.wake ? &view : nullptr);
+      }
+    });
+  }
+
+  std::size_t run_at = 0, hull_at = 0;
   for (std::size_t bi = 0; bi < awake.size(); ++bi) {
     const placed &pb = awake[bi];
     const body_id id = pb.id;
@@ -1492,23 +1562,24 @@ void field_set::apply(world_backend &be, const world_config &cfg, double t) {
     double rate = 0.0, immersed = 0.0;
     double rate_heave = 0.0; // the part of rate an inertial fluid's damping gives the vertical
     bool felt = false;       // a field pushed on one of its cells
-    // A hull's triangles take the fluids' push in place of the cells (hull.h).
+    // A hull's triangles take the fluids' push in place of the cells (hull.h): its slot's, above.
     const bool hull = fb.hull.desc != nullptr;
+    hull_push *hp = nullptr;
+    if (hull && hull_at < hulls.size() && hulls[hull_at].body == bi)
+      hp = &hulls[hull_at++];
     push_sums hs;
-    if (hull)
-      wet.assign(fb.hull.wetted.size(), 0.0);
+    if (hp)
+      hs = hp->sums;
     for (const auto &fe : _fields) {
       const compiled_field &cf = fe.second;
       if (fb.vehicle && cf.desc.kind == field_kind::flow)
         continue; // a vehicle's aero is its drag (vehicle.h)
       if (!overlaps(pb.blo, pb.bhi, cf.scalar))
         continue;
+      if (hull && cf.desc.kind == field_kind::fluid)
+        continue; // pushed on its triangles (its slot's sums)
       const wake_view view = view_of(cf, id);
       const wake_view *wv = view.wake ? &view : nullptr;
-      if (hull && cf.desc.kind == field_kind::fluid) {
-        push_hull(fb, s, r, com, cf, gn, cfg.fixed_dt, t, world_v, depth, wet, hs, wv);
-        continue;
-      }
       // A flow's wind, once per body (body_wind, flow_velocity.h).
       const flow_velocity *wind = cf.desc.wind.get();
       body_wind bw;
@@ -1551,7 +1622,8 @@ void field_set::apply(world_backend &be, const world_config &cfg, double t) {
           immersed += fv;
 
         if (cf.desc.kind == field_kind::fluid) {
-          // A flooded chassis displaces only its share (vehicle.h's wading; 1 otherwise).
+          // A body displaces only its share (body_desc::displacement; a flooded chassis,
+          // vehicle.h's wading).
           const vec3 b = g * (-cr.value * fv * fb.buoyancy);
           push_f = push_f + b;
           push_t = push_t + cross(arm, b);
@@ -1567,7 +1639,7 @@ void field_set::apply(world_backend &be, const world_config &cfg, double t) {
         }
 
         const vec3 u = cr.w - (s.linear_velocity + cross(s.angular_velocity, arm));
-        double c_i = cf.desc.damping * fv; // kg/s: the force is c_i u
+        double c_i = cf.desc.damping * fv * fb.water_share; // kg/s: the force is c_i u
         if (inertial) {                    // the damping on the vertical only
           if (c_i > 0.0) {
             const vec3 d{0.0, 0.0, u.z * c_i};
@@ -1580,9 +1652,11 @@ void field_set::apply(world_backend &be, const world_config &cfg, double t) {
         }
         if (cf.desc.kind != field_kind::medium) {
           const double speed = norm(u);
+          // A fluid's drag on the body's share of its cells (field_body::water_share).
+          const double share = cf.desc.kind == field_kind::fluid ? fb.water_share : 1.0;
           if (speed > 0.0)
             c_i += 0.5 * cr.value * cf.desc.drag_coefficient *
-                   area_across(fb, r.inverse(u * (1.0 / speed))) * (fv / fb.volume) * speed;
+                   area_across(fb, r.inverse(u * (1.0 / speed))) * (fv / fb.volume) * speed * share;
         }
         if (c_i > 0.0) {
           const vec3 d = u * c_i;
@@ -1611,7 +1685,10 @@ void field_set::apply(world_backend &be, const world_config &cfg, double t) {
       }
     }
     if (hull) {
-      fb.hull.wetted.swap(wet);
+      if (hp)
+        fb.hull.wetted.swap(hp->wet);
+      else // no fluid reaches it: nothing is wet
+        std::fill(fb.hull.wetted.begin(), fb.hull.wetted.end(), 0.0);
       if (!hs.wet && !felt)
         continue;
       push_f = push_f + hs.push_f;

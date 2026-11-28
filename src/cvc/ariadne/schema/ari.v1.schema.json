@@ -64,7 +64,7 @@
         "data": {
           "type": "object",
           "propertyNames": {"pattern": "^[^.]+$"},
-          "description": "Datasets: name: URI, or { uri | generate, path, as, params, load }.",
+          "description": "Datasets: name: URI, or { uri | generate, path, as, params, load }; uri may be { arg: <name> }.",
           "patternProperties": {
             "^.*$": {
               "anyOf": [
@@ -72,7 +72,19 @@
                 {
                   "type": "object",
                   "properties": {
-                    "uri": {"$ref": "#/$defs/string"},
+                    "uri": {
+                      "anyOf": [
+                        {"$ref": "#/$defs/string"},
+                        {
+                          "type": "object",
+                          "description": "The document's argument of this name (its args: block).",
+                          "properties": {"arg": {"$ref": "#/$defs/string"}},
+                          "required": ["arg"],
+                          "patternProperties": {"^x-": true},
+                          "additionalProperties": false
+                        }
+                      ]
+                    },
                     "path": {"$ref": "#/$defs/string"},
                     "as": {"$ref": "#/$defs/string"},
                     "generate": {"$ref": "#/$defs/string"},
@@ -120,6 +132,10 @@
           "description": "What the document needs from its host (docs/ARIADNE.md §5.7)."
         },
         "init": {"$ref": "#/$defs/program", "description": "Runs once at load."},
+        "state": {
+          "$ref": "#/$defs/state_tree",
+          "description": "Literal values written under the document's prefix just before init: runs (docs/ARIADNE.md §5.3)."
+        },
         "on_tick": {"$ref": "#/$defs/program", "description": "Runs every frame."},
         "on_key": {"$ref": "#/$defs/program", "description": "Runs on each key event."},
         "on_pointer": {"$ref": "#/$defs/program", "description": "Runs on each pointer event."},
@@ -282,6 +298,19 @@
     },
     "string": {"type": "string"},
     "scalar": {"type": ["string", "number", "boolean"], "description": "A scalar the loader reads as text."},
+    "state_tree": {
+      "type": ["object", "null"],
+      "description": "A state: block's keys (docs/ARIADNE.md §5.3): each a path segment (dots allowed; a top-level one may start with / for the app root), its value written as spelled, a list of scalars joined by commas, nothing (or an empty block) as \"\", a map one level deeper. The names are the document's own, so the keys are open.",
+      "patternProperties": {
+        "^.*$": {
+          "anyOf": [
+            {"$ref": "#/$defs/scalar"},
+            {"type": "array", "items": {"$ref": "#/$defs/scalar"}},
+            {"$ref": "#/$defs/state_tree"}
+          ]
+        }
+      }
+    },
     "label": {
       "type": ["string", "number", "boolean", "null"],
       "description": "A widget's label: its type key's value (empty is no label)."
@@ -1520,7 +1549,7 @@
         },
         "link": {
           "type": "object",
-          "description": "Holes into the parent's state: name: target, or { to, mode: ro|rw }.",
+          "description": "Holes into the parent's state: name: target (read-write), or { to, mode: ro|rw } (read-only unless mode is rw).",
           "patternProperties": {
             "^.*$": {
               "anyOf": [
@@ -1538,7 +1567,7 @@
         },
         "channels": {
           "type": "object",
-          "description": "Channels granted to the module, as link:.",
+          "description": "Channels granted to the module, as link: (a map with no mode is read-only).",
           "patternProperties": {
             "^.*$": {
               "anyOf": [
@@ -1562,6 +1591,35 @@
       },
       "additionalProperties": false,
       "required": ["load"]
+    },
+    "uri_list": {
+      "description": "URI prefixes: one, a list of them, or { bind: <key> } naming a state key that holds them.",
+      "anyOf": [
+        {"$ref": "#/$defs/strings"},
+        {
+          "type": "object",
+          "properties": {"bind": {"$ref": "#/$defs/string"}},
+          "required": ["bind"],
+          "patternProperties": {"^x-": true},
+          "additionalProperties": false
+        }
+      ]
+    },
+    "mounts_site": {
+      "type": "object",
+      "description": "mounts: <state key> holds one isolated mount per child of the key: <key>.<as>.uri, .args, .view, .background, .budget (docs/roadmap/ARIADNE_SHELL.md 4.2, docs/ARIADNE.md §6.8).",
+      "allOf": [{"$ref": "#/$defs/widget_common"}],
+      "properties": {
+        "mounts": {"$ref": "#/$defs/string"},
+        "allow": {"$ref": "#/$defs/uri_list", "description": "The URI prefixes that may be mounted; absent or empty: any file or link."},
+        "catalog": {"$ref": "#/$defs/uri_list", "description": "The catalog's documents, which run as the local principal; the rest run as file: or remote: ones."}
+      },
+      "patternProperties": {
+        "^(id|type|title|label|widget|tab|visible_when|enabled_when|disabled_when|tooltip)$": true,
+        "^x-": true
+      },
+      "additionalProperties": false,
+      "required": ["mounts"]
     },
     "typed_widget": {
       "allOf": [
@@ -1704,6 +1762,9 @@
         "if": {"required": ["load"]},
         "then": {"$ref": "#/$defs/load_site"},
         "else": {
+         "if": {"required": ["mounts"]},
+         "then": {"$ref": "#/$defs/mounts_site"},
+         "else": {
           "if": {
             "required": ["type"],
             "properties": {
@@ -1750,11 +1811,12 @@
           },
           "then": {"$ref": "#/$defs/typed_widget"},
           "else": {"$ref": "#/$defs/short_widget"}
+         }
         }
       }
     },
     "widget": {
-      "description": "A widget: a map whose type is its first known key (slider_int: Speed) or type:, an include: or load: entry, or a bare string (a text label, or separator, windows_menu, clock, bell, spinner).",
+      "description": "A widget: a map whose type is its first known key (slider_int: Speed) or type:, an include:, load: or mounts: entry, or a bare string (a text label, or separator, windows_menu, clock, bell, spinner).",
       "type": ["object", "string", "number", "boolean"],
       "if": {"type": "object"},
       "then": {"$ref": "#/$defs/widget_map"}

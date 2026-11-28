@@ -49,6 +49,12 @@
 //
 // e2ee-backup and e2ee-restore are async functions (they park the program, and have -async
 // forms); the rest are plain. Use them in a program lane (on:, on_tick:, ...).
+//
+// The keys are a principal's (principal.h; docs/roadmap/ARIADNE_SHELL.md 4.12), from the scope the
+// program runs in: a `local` program uses the launcher's store; a local application the shell gave
+// a store of its own (ScopePrincipal::e2ee_store, opened by open_e2ee_store) uses that one; a
+// sandboxed principal (file:, remote:) gets a store of its own in memory, never the launcher's.
+// Where the launcher asked for no keys, only a local application with its own store gets the verbs.
 
 #include <memory>
 #include <string>
@@ -72,6 +78,12 @@ void register_e2ee_intrinsics(cvc::app &app, std::shared_ptr<cvc::net::E2eeStore
 // left out and (e2ee-status) says why, which is also what this returns ("" when it opened). The
 // host runs on either way. Again with the same file, nothing changes.
 std::string enable_e2ee(cvc::app &app, const std::string &spec);
+
+// Open the store SPEC names for the local applications that name it as their own
+// (ScopePrincipal::e2ee_store; the shell's shell.apps.<as>.e2ee_store), as enable_e2ee opens the
+// launcher's, and register the verbs if nothing has yet. The launcher's own file, or one open
+// already, is not opened twice. "" when it is open; else why not, which their (e2ee-status) says.
+std::string open_e2ee_store(cvc::app &app, const std::string &spec);
 
 } // namespace ariadne
 } // namespace cvc

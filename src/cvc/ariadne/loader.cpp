@@ -103,12 +103,12 @@ struct block_table {
 };
 // The top-level keys the loader reads itself (builtin_ari_blocks).
 constexpr const char *kBuiltinBlocks[] = {
-    "meta",        "menubar", "windows",      "overlays",      "root",          "children",
-    "scene",       "customs", "init",         "on_tick",       "on_key",        "on_pointer",
-    "on_signal",   "units",   "import",       "channels",      "lint",          "args",
-    "requires",    "keys",    "windows_menu", "tests",         "functions",     "data",
-    "assets",      "scenes",  "clock",        "menu_collapse", "notifications", "prototypes",
-    "context_menu"};
+    "meta",         "menubar", "windows",      "overlays",      "root",          "children",
+    "scene",        "customs", "init",         "on_tick",       "on_key",        "on_pointer",
+    "on_signal",    "units",   "import",       "channels",      "lint",          "args",
+    "requires",     "keys",    "windows_menu", "tests",         "functions",     "data",
+    "assets",       "scenes",  "clock",        "menu_collapse", "notifications", "prototypes",
+    "context_menu", "state"};
 bool is_builtin_block(const std::string &k) {
   for (const char *b : kBuiltinBlocks)
     if (k == b)
@@ -245,6 +245,35 @@ std::vector<std::string> builtin_widget_types() {
 
 namespace {
 
+// Not inlined into its caller: the parse goes down the document a level at a time (parse_seq,
+// parse_widget, parse_widget_impl, the kind's own parse), and MSVC gives a function one frame for
+// every branch's locals, a Widget about 3 KB of them. So what a level does besides going down
+// goes in a function of its own, and the frames on the way down stay small (§6.7).
+#if defined(_MSC_VER)
+#define CVC_ARI_NOINLINE __declspec(noinline)
+#else
+#define CVC_ARI_NOINLINE __attribute__((noinline))
+#endif
+
+struct Ctx;
+
+// §6.7 how deep the parse is: the widgets being parsed, outermost first, each with the Ctx it is
+// parsed in (a load:'s fragment has its own), across the whole document. An include: or load:
+// entry is a level of its own, and the unit's or fragment's widgets go on below it. One for a
+// load, shared with its fragments' sub-Ctxs like mount_count. The first widget past `limit` is
+// refused: the parse stops, and the load fails with `error`, at `source`:`line`:`column`.
+struct Nesting {
+  struct Level {
+    const YAML::Node *node;
+    const Ctx *ctx;
+  };
+  std::size_t limit = kMaxNesting;
+  std::vector<Level> path;
+  bool refused = false;
+  std::string error, source;
+  int line = 0, column = 0;
+};
+
 struct Ctx {
   // The app whose registries the document is checked against: its widget types, .ari blocks and
   // data decoders. Set by load_node; a sub-Ctx carries it.
@@ -289,6 +318,9 @@ struct Ctx {
   std::set<std::string> mount_ids;
   std::shared_ptr<int> mount_count;
 
+  // §6.7 how deep the parse is, shared across the mount graph like mount_count.
+  std::shared_ptr<Nesting> nesting;
+
   // §12.5 hot-reload: the local FILE paths read across this document's whole import/mount graph,
   // shared (like mount_count) so a fresh sub-Ctx contributes to the one list. Copied into
   // LoadResult::sources for a host to watch. state/http canonicals are skipped (not watchable).
@@ -323,6 +355,39 @@ void note_source(Ctx &ctx, const std::string &canonical) {
     if (ctx.source_stamps) // stamp its mtime at read time for the hot-reload baseline
       (*ctx.source_stamps)[canonical] = file_mtime(canonical);
   }
+}
+
+// Where the value `tokens` names is in `root` (with `key`, where its last token's key is): null
+// when the walk leaves the tree, or the node has no position (a clone).
+YAML::Mark mark_at(const YAML::Node &root, const std::vector<std::string> &tokens, bool key) {
+  // reset() rebinds `n`: assigning one YAML::Node to another would overwrite the document.
+  YAML::Node n;
+  n.reset(root);
+  YAML::Mark at = n.Mark();
+  for (std::size_t i = 0; i < tokens.size(); ++i) {
+    bool found = false;
+    if (n.IsMap()) {
+      for (const auto &kv : n)
+        if (kv.first.IsScalar() && kv.first.Scalar() == tokens[i]) {
+          at = key && i + 1 == tokens.size() ? kv.first.Mark() : kv.second.Mark();
+          n.reset(kv.second);
+          found = true;
+          break;
+        }
+    } else if (n.IsSequence()) {
+      char *end = nullptr;
+      const unsigned long k = std::strtoul(tokens[i].c_str(), &end, 10);
+      if (end && *end == '\0' && k < n.size()) {
+        const YAML::Node item = n[k];
+        n.reset(item);
+        at = n.Mark();
+        found = true;
+      }
+    }
+    if (!found)
+      return YAML::Mark::null_mark();
+  }
+  return at;
 }
 
 // ---- §14 checking a document against the .ari schema -------------------------------------------
@@ -455,6 +520,57 @@ std::vector<raw_issue> run_schema(cvc::app &app, const njson &instance, bool wid
   return std::move(collector.found);
 }
 
+// A key as a JSON Pointer token: its '~' and '/' escaped (~0, ~1).
+std::string pointer_token(std::string t) {
+  for (std::size_t at = 0; (at = t.find_first_of("~/", at)) != std::string::npos; at += 2)
+    t.replace(at, 1, t[at] == '~' ? "~0" : "~1");
+  return t;
+}
+
+// §6.7 whether `root` goes more than `cap` levels deep (it is level 1, and each value in a map or a
+// list a level below it); when it does, `tokens` holds the keys and indices to its first value
+// past `cap`, in document order. A loop, so it takes no stack a level.
+bool deeper_than(const YAML::Node &root, std::size_t cap, std::vector<std::string> &tokens) {
+  struct Level {
+    YAML::Node node;
+    YAML::const_iterator at, end;
+    std::size_t index;
+  };
+  tokens.clear();
+  if (cap == 0)
+    return true;
+  std::vector<Level> path;
+  if (root.IsMap() || root.IsSequence())
+    path.push_back({root, root.begin(), root.end(), 0});
+  while (!path.empty()) {
+    Level &l = path.back();
+    if (l.at == l.end) {
+      path.pop_back();
+      if (!path.empty())
+        tokens.pop_back(); // the key or index of the map or list just left
+      continue;
+    }
+    // reset() binds `value`: assigning one YAML::Node to another would overwrite the document.
+    YAML::Node value;
+    if (l.node.IsMap()) {
+      tokens.push_back(l.at->first.IsScalar() ? l.at->first.Scalar() : std::string());
+      value.reset(l.at->second);
+    } else {
+      tokens.push_back(std::to_string(l.index));
+      value.reset(*l.at);
+    }
+    ++l.at;
+    ++l.index;
+    if (path.size() + 1 > cap) // `value` is a level below the map or list it is in
+      return true;
+    if (value.IsMap() || value.IsSequence())
+      path.push_back({value, value.begin(), value.end(), 0});
+    else
+      tokens.pop_back();
+  }
+  return false;
+}
+
 // A JSON Pointer's tokens ("/windows/0" -> windows, 0), unescaped.
 std::vector<std::string> pointer_tokens(const std::string &p) {
   std::vector<std::string> out;
@@ -470,39 +586,6 @@ std::vector<std::string> pointer_tokens(const std::string &p) {
     i = end;
   }
   return out;
-}
-
-// Where the value `tokens` names is in `root` (with `key`, where its last token's key is): null
-// when the walk leaves the tree, or the node has no position (a clone).
-YAML::Mark mark_at(const YAML::Node &root, const std::vector<std::string> &tokens, bool key) {
-  // reset() rebinds `n`: assigning one YAML::Node to another would overwrite the document.
-  YAML::Node n;
-  n.reset(root);
-  YAML::Mark at = n.Mark();
-  for (std::size_t i = 0; i < tokens.size(); ++i) {
-    bool found = false;
-    if (n.IsMap()) {
-      for (const auto &kv : n)
-        if (kv.first.IsScalar() && kv.first.Scalar() == tokens[i]) {
-          at = key && i + 1 == tokens.size() ? kv.first.Mark() : kv.second.Mark();
-          n.reset(kv.second);
-          found = true;
-          break;
-        }
-    } else if (n.IsSequence()) {
-      char *end = nullptr;
-      const unsigned long k = std::strtoul(tokens[i].c_str(), &end, 10);
-      if (end && *end == '\0' && k < n.size()) {
-        const YAML::Node item = n[k];
-        n.reset(item);
-        at = n.Mark();
-        found = true;
-      }
-    }
-    if (!found)
-      return YAML::Mark::null_mark();
-  }
-  return at;
 }
 
 std::string quoted_value(const njson &v) {
@@ -579,6 +662,22 @@ std::string issue_message(const raw_issue &r) {
 std::vector<SchemaIssue> schema_issues(cvc::app &app, const YAML::Node &node, bool widget,
                                        const YAML::Node &positions,
                                        const std::set<std::string> &allowed, bool skip_tokens) {
+  // §6.7 the validator goes down the tree a level of YAML at a time on the native stack: a tree
+  // deeper than it goes is not checked, and the one issue says where it goes past.
+  if (std::vector<std::string> deep; deeper_than(node, kMaxSchemaDepth, deep)) {
+    SchemaIssue i;
+    for (const std::string &t : deep)
+      i.pointer += "/" + pointer_token(t);
+    i.message = "nested more than " + std::to_string(kMaxSchemaDepth) +
+                " levels of YAML deep, the most the schema check goes (docs/ARIADNE.md §6.7): "
+                "this " +
+                (widget ? "widget" : "document") + " is not checked";
+    if (const YAML::Mark mark = mark_at(positions, deep, false); !mark.is_null()) {
+      i.line = mark.line + 1;
+      i.column = mark.column + 1;
+    }
+    return {std::move(i)};
+  }
   // What the validator found, the noise taken out: a repeat's {i} (and with skip_tokens any
   // {name}) a value only a copy or an include site gives; a top-level block `allowed`.
   struct found {
@@ -609,10 +708,7 @@ std::vector<SchemaIssue> schema_issues(cvc::app &app, const YAML::Node &node, bo
     f.key = unknown_key_of(f.raw.message);
     if (!f.key.empty() && f.raw.pointer.empty() && allowed.count(f.key))
       continue;
-    std::string escaped = f.key;
-    for (std::size_t at = 0; (at = escaped.find_first_of("~/", at)) != std::string::npos; at += 2)
-      escaped.replace(at, 1, escaped[at] == '~' ? "~0" : "~1");
-    f.place = f.key.empty() ? f.raw.pointer : f.raw.pointer + "/" + escaped;
+    f.place = f.key.empty() ? f.raw.pointer : f.raw.pointer + "/" + pointer_token(f.key);
     all.push_back(std::move(f));
   }
   // Alternatives (anyOf) none of which fit: the validator reports each one's failure beside the
@@ -735,12 +831,26 @@ std::string action(const YAML::Node &n) {
   return std::string();
 }
 
-Widget parse_widget(Ctx &ctx, const YAML::Node &n);
-Widget expand_include(Ctx &ctx, const YAML::Node &n); // §12 include: expand a units: template
-Widget expand_load(Ctx &ctx, const YAML::Node &n);    // §12 load: mount an isolated fragment
+// The parse goes down the document a level at a time through these. Each builds its widget in
+// place, in `w`, which comes in as a default Widget (an empty group), so no Widget is copied or
+// held on the way down (§6.7).
+void parse_widget(Ctx &ctx, const YAML::Node &n, Widget &w);
+void expand_include(Ctx &ctx, const YAML::Node &n, Widget &w); // §12 include: a units: template
+// What expand_load tells a caller that asks (load_mount): why the fragment was not mounted, where
+// its bytes came from, and whether it has a scene (not mounted until SH3).
+struct LoadOutcome {
+  std::string error;
+  std::string canonical;
+  bool has_scene = false;
+};
+void expand_load(Ctx &ctx, const YAML::Node &n, Widget &w,
+                 LoadOutcome *outcome = nullptr);            // §12 load: an isolated fragment
+void parse_mounts(Ctx &ctx, const YAML::Node &n, Widget &w); // ARIADNE_SHELL.md 4.2 mounts:
+Meta parse_meta(const YAML::Node &m);                        // a document's meta: block
 std::vector<HostRequirement> parse_requires(Ctx &ctx, const YAML::Node &n,
                                             const std::string &where = ""); // §7.6
-Widget parse_document(Ctx &ctx, const YAML::Node &doc); // §12 load: parses a mounted fragment
+StateSeeds parse_state(Ctx &ctx, const YAML::Node &n, const std::string &where = ""); // §5.3
+void parse_document(Ctx &ctx, const YAML::Node &doc, Widget &w); // §12 a document, or a fragment
 Value to_value(const YAML::Node &n); // defined below; used by the Kind::Custom fallback
 std::string start_maximized(Ctx &ctx, const YAML::Node &n, const std::string &label); // §5.9
 
@@ -807,9 +917,10 @@ bool yaml_color(const YAML::Node &n, float rgb[3]) {
 // A `heatmap:` (Kind::Heatmap): its subtree at `bind`, the `ramp:` stops ([at, colour], sorted
 // by at), the layout (cell_size, gap, labels), the legend, the mark's colour, and pick / on:.
 // on_click, on_hover and tooltip are read with every widget's keys, and are per cell here.
-Widget parse_heatmap(Ctx &ctx, const YAML::Node &n, const std::string &label) {
+CVC_ARI_NOINLINE void parse_heatmap(Ctx &ctx, const YAML::Node &n, const std::string &label,
+                                    Widget &w) {
   const std::string name = "ari: heatmap '" + label + "'";
-  Widget w = heatmap(label, str(n, "bind"));
+  w = heatmap(label, str(n, "bind"));
   if (w.bind.empty())
     ctx.warn(name + " has no bind: — it draws nothing");
   HeatmapOptions &o = w.heatmap;
@@ -874,7 +985,6 @@ Widget parse_heatmap(Ctx &ctx, const YAML::Node &n, const std::string &label) {
   w.on = action(n); // optional: fired after a pick's writes
   if (!w.on.empty() && w.pick.empty())
     ctx.warn(name + " has on: but no pick: — on: runs after a pick; use on_click: for any click");
-  return w;
 }
 
 // A slider's `commit:` — live (the default: every change while dragged) or release (once, at the
@@ -898,20 +1008,25 @@ bool range_from_key(Ctx &ctx, const YAML::Node &n, const char *type, const std::
   return r == "key";
 }
 
-std::vector<Widget> parse_seq(Ctx &ctx, const YAML::Node &seq) {
-  std::vector<Widget> out;
-  if (seq && seq.IsSequence())
-    for (const YAML::Node &item : seq)
-      out.push_back(parse_widget(ctx, item));
-  return out;
+// A widget list's widgets, onto the end of `out`, each parsed in place in its own slot.
+void parse_seq(Ctx &ctx, const YAML::Node &seq, std::vector<Widget> &out) {
+  if (!seq || !seq.IsSequence())
+    return;
+  out.reserve(out.size() + seq.size());
+  for (const YAML::Node &item : seq) {
+    out.emplace_back();
+    parse_widget(ctx, item, out.back());
+  }
 }
 
 // §5.30 `context_menu:` onto `w`: a list of items (as a menu's `items:`), or `{ id, items }`,
-// whose `id` names the menu for `contributes: context_menus:`. `where` prefixes a warning.
+// whose `id` names the menu for `contributes: context_menus:`. `where` prefixes a warning. The
+// items replace any `w` has (an include: site's menu, its unit's).
 void parse_context_menu(Ctx &ctx, const YAML::Node &n, Widget &w, const std::string &where) {
   if (n.IsSequence()) {
     w.context_menu = true;
-    w.context_items = parse_seq(ctx, n);
+    w.context_items.clear();
+    parse_seq(ctx, n, w.context_items);
     return;
   }
   if (!n.IsMap()) {
@@ -930,10 +1045,12 @@ void parse_context_menu(Ctx &ctx, const YAML::Node &n, Widget &w, const std::str
   else if (id)
     w.context_menu_id = id.Scalar();
   const YAML::Node items = n["items"];
-  if (items && !items.IsSequence())
+  if (items && !items.IsSequence()) {
     ctx.warn("ari: " + where + "context_menu: items: is a list — ignored");
-  else if (items)
-    w.context_items = parse_seq(ctx, items);
+  } else if (items) {
+    w.context_items.clear();
+    parse_seq(ctx, items, w.context_items);
+  }
   w.context_menu = true;
 }
 
@@ -1147,654 +1264,852 @@ void check_bind(Ctx &ctx, const std::string &type, const std::string &label,
     ctx.warn("ari: " + type + " '" + label + "' has no bind: — it will not read or write state");
 }
 
-Widget parse_widget_impl(Ctx &ctx, const YAML::Node &n) {
+// A menu_item: a toggle bound to a key, or an action.
+CVC_ARI_NOINLINE void parse_menu_item(Ctx &ctx, const YAML::Node &n, const std::string &label,
+                                      Widget &w) {
+  if (has(n, "bind")) {
+    w = menu_toggle(label, str(n, "bind"), flag(n, "def"));
+    w.on = action(n); // optional: fired after each toggle's write
+    return;
+  }
+  const std::string on = action(n);
+  if (on.empty())
+    ctx.warn("ari: menu_item '" + label + "' has neither bind: nor on: — it does nothing");
+  w = menu_action(label, on);
+}
+
+// A text: a caption, a bound value, or rich text (runs:).
+CVC_ARI_NOINLINE void parse_text(Ctx &ctx, const YAML::Node &n, const std::string &label,
+                                 Widget &w) {
+  w = has(n, "bind") ? text_bound(label, str(n, "bind")) : text(label);
+  // Its `color:` (§5.26) is parse_widget's, as a radio's, a button's and a menu item's.
+  // §5.11 emoji: a state path holding a map of shortcode names to picture URIs: a `:name:` in
+  // the text that it names is drawn as that picture.
+  w.emoji = str(n, "emoji");
+  // §5.20 runs: rich text. A list written here (a run a string, or {text, style, href,
+  // on_click, tooltip}), or a state path / an expression giving one at run time.
+  if (has(n, "runs")) {
+    w.has_runs = true;
+    const YAML::Node r = n["runs"];
+    if (r.IsSequence()) {
+      for (const YAML::Node &e : r) {
+        TextRunSpec s;
+        if (e.IsScalar()) {
+          s.text = e.Scalar();
+        } else if (e.IsMap()) {
+          s.text = str(e, "text");
+          s.style = str(e, "style");
+          s.href = str(e, "href");
+          s.on_click = str(e, "on_click");
+          s.tooltip = str(e, "tooltip");
+        } else {
+          ctx.warn("ari: text '" + label + "': a run is a string or {text, style, href, ...}");
+          continue;
+        }
+        w.runs.push_back(std::move(s));
+      }
+    } else if (r.IsScalar()) {
+      w.runs_src = r.Scalar();
+    } else {
+      ctx.warn("ari: text '" + label + "': runs: is a list, a state path or an expression");
+    }
+    w.on_link = str(n, "on_link");
+    const double ml = num(n, "max_lines", 0.0);
+    w.text_max_lines = ml > 0.0 ? static_cast<int>(ml) : 0;
+    w.wrap = flag(n, "wrap", true);
+    // size: N (px), the widest it wraps at; [N, h] takes N
+    const YAML::Node sz = n["size"];
+    if (sz && sz.IsScalar())
+      w.size.w = parse_extent(sz);
+    else
+      w.size = parse_size(sz);
+  }
+}
+
+// A spinner: an activity indicator the host turns by its frame clock.
+CVC_ARI_NOINLINE void parse_spinner(Ctx &ctx, const YAML::Node &n, const std::string &label,
+                                    Widget &w) {
+  w = spinner(label, str(n, "bind"));
+  const std::string glyphs = str(n, "glyphs", "braille");
+  if (glyphs == "ascii")
+    w.ascii_glyphs = true;
+  else if (glyphs != "braille")
+    ctx.warn("ari: spinner '" + label + "': glyphs '" + glyphs +
+             "' is not braille or ascii — braille");
+}
+
+// A progress bar (read-only): bind's number over [lo, hi].
+CVC_ARI_NOINLINE void parse_progress(Ctx &ctx, const YAML::Node &n, const std::string &label,
+                                     Widget &w) {
+  const std::string bind = str(n, "bind");
+  check_bind(ctx, "progress", label, bind);
+  const double lo = num(n, "lo", 0.0), hi = num(n, "hi", 1.0);
+  if (lo >= hi)
+    ctx.warn("ari: progress '" + label + "' has lo >= hi");
+  w = progress(label, bind, lo, hi, str(n, "overlay"));
+}
+
+// A plot (a read-only line graph): bind's comma-separated numbers.
+CVC_ARI_NOINLINE void parse_plot(Ctx &ctx, const YAML::Node &n, const std::string &label,
+                                 Widget &w) {
+  const std::string bind = str(n, "bind");
+  check_bind(ctx, "plot", label, bind);
+  const double lo = num(n, "lo", 0.0), hi = num(n, "hi", 0.0);
+  const double height = num(n, "height", 60.0);
+  if (!(height > 0.0))
+    ctx.warn("ari: plot '" + label + "' height must be > 0 — 60");
+  w = plot(label, bind, lo, hi, str(n, "overlay"), height > 0.0 ? height : 60.0);
+}
+
+// A chart's read-only curves: a plot subtree (host.set_plot's) and/or series:.
+CVC_ARI_NOINLINE void parse_chart(Ctx &ctx, const YAML::Node &n, const std::string &label,
+                                  Widget &w) {
+  w = chart(label, str(n, "bind"));
+  if (const YAML::Node ser = n["series"]; ser && !ser.IsSequence()) {
+    ctx.warn("ari: chart '" + label + "' series: must be a list — ignored");
+  } else if (ser) {
+    for (const YAML::Node &e : ser) {
+      ChartSeriesBind sb;
+      if (e.IsScalar())
+        sb.bind = e.Scalar();
+      else if (e.IsMap())
+        sb = {str(e, "bind"), str(e, "label"), str(e, "style")};
+      if (sb.bind.empty()) {
+        ctx.warn("ari: chart '" + label + "' has a series with no bind: — skipped");
+        continue;
+      }
+      w.chart_series.push_back(std::move(sb));
+    }
+  }
+  if (w.bind.empty() && w.chart_series.empty())
+    ctx.warn("ari: chart '" + label + "' has neither bind: nor series: — it draws nothing");
+  // log_y: a boolean, or a state path / computed expression read each frame (a boolean spelling
+  // reads the same whatever flag()'s default).
+  if (const YAML::Node v = n["log_y"]; v && v.IsScalar()) {
+    const bool t = flag(n, "log_y", true), f = flag(n, "log_y", false);
+    w.log_y = t == f ? (t ? "1" : "0") : v.Scalar();
+  }
+  const std::string legend = str(n, "legend", "top");
+  if (legend == "right")
+    w.legend = ChartLegend::Right;
+  else if (legend == "none")
+    w.legend = ChartLegend::Off;
+  else if (legend != "top")
+    ctx.warn("ari: chart '" + label + "' legend: '" + legend + "' is not top, right or none — top");
+  w.x_label = str(n, "x_label");
+  w.cursor = str(n, "cursor");
+  w.pick = str(n, "pick");
+  const double height = num(n, "height", 160.0);
+  if (!(height > 0.0))
+    ctx.warn("ari: chart '" + label + "' height must be > 0 — 160");
+  w.plot_height = height > 0.0 ? height : 160.0;
+  w.on = action(n); // optional: fired after a pick's write
+}
+
+// A settings editor: one for every key under a state subtree, from its metadata.
+CVC_ARI_NOINLINE void parse_settings(Ctx &ctx, const YAML::Node &n, const std::string &label,
+                                     Widget &w) {
+  w = settings(label, std::string());
+  w.settings_roots.clear();
+  const auto strings = [&](const char *key) {
+    std::vector<std::string> out;
+    const YAML::Node v = n[key];
+    if (v && v.IsScalar()) {
+      out.push_back(v.Scalar());
+    } else if (v && v.IsSequence()) {
+      for (const YAML::Node &e : v)
+        if (e.IsScalar())
+          out.push_back(e.Scalar());
+        else
+          ctx.warn("ari: settings '" + label + "' " + key + ": entries must be text — skipped");
+    } else if (v) {
+      ctx.warn("ari: settings '" + label + "' " + key + ": must be text or a list — ignored");
+    }
+    return out;
+  };
+  for (std::string &r : strings("root"))
+    if (!r.empty())
+      w.settings_roots.push_back(std::move(r));
+  if (w.settings_roots.empty())
+    ctx.warn("ari: settings '" + label + "' has no root: — it shows nothing");
+  w.settings_filter = strings("filter");
+  // groups: each entry a key (its place in the order), {key: title}, or {key: {title, help,
+  // open}}.
+  if (const YAML::Node gs = n["groups"]; gs && !gs.IsSequence()) {
+    ctx.warn("ari: settings '" + label + "' groups: must be a list — ignored");
+  } else if (gs) {
+    for (const YAML::Node &e : gs) {
+      SettingsGroupSpec g;
+      if (e.IsScalar()) {
+        g.key = e.Scalar();
+      } else if (e.IsMap() && e.size() == 1) {
+        const auto kv = *e.begin();
+        g.key = kv.first.Scalar();
+        if (kv.second.IsScalar()) {
+          g.title = kv.second.Scalar();
+        } else if (kv.second.IsMap()) {
+          g.title = str(kv.second, "title");
+          g.help = str(kv.second, "help");
+          g.open = flag(kv.second, "open", false);
+        }
+      }
+      if (g.key.empty()) {
+        ctx.warn("ari: settings '" + label +
+                 "' has a groups: entry that names no key (key, {key: title} or {key: {title, "
+                 "help, open}}) — skipped");
+        continue;
+      }
+      w.settings_groups.push_back(std::move(g));
+    }
+  }
+  w.settings_search = flag(n, "search", false);
+  w.settings_readouts = flag(n, "readouts", true);
+  w.settings_open = flag(n, "open", false);
+  w.commit_on_release = commit_on_release(ctx, n, label);
+  w.on = action(n); // optional: after each committed write or reset
+}
+
+// A checkbox bound to a key.
+CVC_ARI_NOINLINE void parse_checkbox(Ctx &ctx, const YAML::Node &n, const std::string &label,
+                                     Widget &w) {
+  const std::string bind = str(n, "bind");
+  check_bind(ctx, "checkbox", label, bind);
+  w = checkbox(label, bind, flag(n, "def"));
+  w.on = action(n); // optional: fired after each committed write, like input_text's
+}
+
+// An integer slider bound to a key.
+CVC_ARI_NOINLINE void parse_slider_int(Ctx &ctx, const YAML::Node &n, const std::string &label,
+                                       Widget &w) {
+  const std::string bind = str(n, "bind");
+  check_bind(ctx, "slider_int", label, bind);
+  const int lo = static_cast<int>(num(n, "lo", 0)), hi = static_cast<int>(num(n, "hi", 100));
+  if (lo >= hi)
+    ctx.warn("ari: slider_int '" + label + "' has lo >= hi");
+  w = slider_int(label, bind, lo, hi, static_cast<int>(num(n, "def", 0)));
+  w.range_from_key = range_from_key(ctx, n, "slider_int", label);
+  w.commit_on_release = commit_on_release(ctx, n, label);
+  w.on = action(n); // fired on the commit edge (drag end / key step), not every drag frame
+}
+
+// A number slider bound to a key.
+CVC_ARI_NOINLINE void parse_slider_float(Ctx &ctx, const YAML::Node &n, const std::string &label,
+                                         Widget &w) {
+  const std::string bind = str(n, "bind");
+  check_bind(ctx, "slider_float", label, bind);
+  const double lo = num(n, "lo", 0.0), hi = num(n, "hi", 1.0);
+  if (lo >= hi)
+    ctx.warn("ari: slider_float '" + label + "' has lo >= hi");
+  w = slider_float(label, bind, lo, hi, num(n, "def", 0.0), str(n, "fmt", "%.3f"));
+  w.range_from_key = range_from_key(ctx, n, "slider_float", label);
+  w.log_scale = flag(n, "log", false);
+  if (w.log_scale && !(lo > 0.0))
+    ctx.warn("ari: slider_float '" + label + "' has log: true and lo <= 0; drawn linear");
+  w.log_scale = w.log_scale && lo > 0.0;
+  w.commit_on_release = commit_on_release(ctx, n, label);
+  w.on = action(n);
+}
+
+// A combo, radio or radio_row, as `type` says: a radio is a combo shown open.
+CVC_ARI_NOINLINE void parse_choice(Ctx &ctx, const YAML::Node &n, const std::string &type,
+                                   const std::string &label, Widget &w) {
+  const std::string bind = str(n, "bind");
+  check_bind(ctx, type, label, bind);
+  std::vector<std::string> opts;
+  const YAML::Node o = n["options"];
+  // options: a SEQUENCE is a static list; a SCALAR is a §4 computed expression (a list)
+  // re-evaluated each frame.
+  std::string opts_expr;
+  if (o && o.IsSequence()) {
+    for (const YAML::Node &e : o)
+      if (e.IsScalar())
+        opts.push_back(e.Scalar());
+  } else if (o && o.IsScalar()) {
+    opts_expr = o.Scalar();
+  }
+  if (opts.empty() && opts_expr.empty())
+    ctx.warn("ari: " + type + " '" + label + "' has no options:");
+  // values: a parallel list mapping each option label -> a stored value (e.g. an int key). Each
+  // entry is stringified (a YAML int/float/string all become the stored string).
+  std::vector<std::string> values;
+  if (const YAML::Node v = n["values"]; v && v.IsSequence())
+    for (const YAML::Node &e : v)
+      if (e.IsScalar())
+        values.push_back(e.Scalar());
+  w = combo(label, bind, std::move(opts), str(n, "default", str(n, "def")));
+  w.options_expr = opts_expr;
+  w.on = action(n); // optional: fired after each pick's write
+  if (type != "combo") {
+    w.kind = Kind::Radio;
+    w.radio_row = type == "radio_row";
+  }
+  if (!values.empty() && !opts_expr.empty())
+    ctx.warn("ari: " + type + " '" + label +
+             "' has both computed options: and values: — values ignored");
+  else if (!values.empty() && values.size() != w.options.size())
+    ctx.warn("ari: " + type + " '" + label + "' has " + std::to_string(values.size()) +
+             " values: for " + std::to_string(w.options.size()) +
+             " options: — value mapping ignored");
+  else
+    w.values = std::move(values);
+}
+
+// A list: rows of a state array, one selected, with Add / Remove.
+CVC_ARI_NOINLINE void parse_list(Ctx &ctx, const YAML::Node &n, const std::string &label,
+                                 Widget &w) {
+  w.kind = Kind::List;
+  w.label = label;
+  w.bind = str(n, "bind");
+  check_bind(ctx, "list", label, w.bind);
+  w.list_field = str(n, "field", "name");
+  w.list_current = str(n, "current");
+  w.list_add = flag(n, "add", false);
+  w.list_remove = flag(n, "remove", false);
+  w.list_rows = std::max(1, static_cast<int>(num(n, "rows", 6.0)));
+  if (const YAML::Node ni = n["new_item"]; ni && ni.IsMap()) {
+    for (const auto &kv : ni)
+      if (kv.first.IsScalar() && kv.second.IsScalar())
+        w.list_new.emplace_back(kv.first.Scalar(), kv.second.Scalar());
+  } else if (ni) {
+    ctx.warn("ari: list '" + label + "' has a new_item: that is not a map of fields — ignored");
+  }
+  w.on = action(n); // optional: fired after the user selects a row
+  w.on_add = str(n, "on_add");
+  w.on_remove = str(n, "on_remove");
+}
+
+// A text field bound to a key.
+CVC_ARI_NOINLINE void parse_input_text(Ctx &ctx, const YAML::Node &n, const std::string &label,
+                                       Widget &w) {
+  const std::string bind = str(n, "bind");
+  check_bind(ctx, "input_text", label, bind);
+  // on: is optional (send-on-commit), so unlike button we do not warn when it is absent.
+  w = input_text(label, bind, action(n), str(n, "default", str(n, "def")));
+  w.password = flag(n, "password", false); // shown masked
+}
+
+// A text_view: a scrollable text buffer, bind's text, its lines split on '\n'.
+CVC_ARI_NOINLINE void parse_text_view(Ctx &ctx, const YAML::Node &n, const std::string &label,
+                                      Widget &w) {
+  const std::string bind = str(n, "bind");
+  check_bind(ctx, "text_view", label, bind);
+  w = text_view(label, bind, str(n, "on_top"));
+  w.view_height = num(n, "height", 0.0);
+  if (!(w.view_height >= 0.0)) {
+    ctx.warn("ari: text_view '" + label + "' height must be >= 0 — 0 (the rest of the window)");
+    w.view_height = 0.0;
+  }
+  w.follow = flag(n, "follow", true);
+  w.wrap = flag(n, "wrap", true);
+}
+
+// A message_input: a field to post a message, which Enter sends to on:.
+CVC_ARI_NOINLINE void parse_message_input(Ctx &ctx, const YAML::Node &n, const std::string &label,
+                                          Widget &w) {
+  const std::string bind = str(n, "bind");
+  check_bind(ctx, "message_input", label, bind);
+  w = message_input(label, bind, action(n));
+  if (w.on.empty())
+    ctx.warn("ari: message_input '" + label + "' has no on: — what is sent goes nowhere");
+  w.hint = str(n, "hint");
+  w.multiline = flag(n, "multiline", true);
+  const double lines = num(n, "max_lines", 4.0), length = num(n, "max_length", 0.0);
+  if (!(lines >= 1.0))
+    ctx.warn("ari: message_input '" + label + "' max_lines must be >= 1 — 4");
+  if (!(length >= 0.0))
+    ctx.warn("ari: message_input '" + label + "' max_length must be >= 0 — no cap");
+  w.max_lines = lines >= 1.0 ? static_cast<int>(lines) : 4;
+  w.max_length = length >= 0.0 ? static_cast<int>(length) : 0;
+  w.send = str(n, "send");
+  w.live = flag(n, "live", false);   // the draft written to bind: as it is typed
+  w.on_change = str(n, "on_change"); // ... and this run each time, event.text the draft
+}
+
+// An integer field bound to a key.
+CVC_ARI_NOINLINE void parse_input_int(Ctx &ctx, const YAML::Node &n, const std::string &label,
+                                      Widget &w) {
+  const std::string bind = str(n, "bind");
+  check_bind(ctx, "input_int", label, bind);
+  const int lo = static_cast<int>(num(n, "lo", 0)), hi = static_cast<int>(num(n, "hi", 0));
+  if (lo > hi)
+    ctx.warn("ari: input_int '" + label + "' has lo > hi");
+  w = input_int(label, bind, lo, hi, static_cast<int>(num(n, "def", 0)), action(n));
+}
+
+// §10 a transfer-function editor bound to a cvc::tf::model key.
+CVC_ARI_NOINLINE void parse_tf_editor(Ctx &ctx, const YAML::Node &n, const std::string &label,
+                                      Widget &w) {
+  const std::string bind = str(n, "bind");
+  check_bind(ctx, "tf_editor", label, bind);
+  w = tf_editor(label, bind);
+  w.on = action(n); // fired after each committed model write, like input_text's
+  // Every other key is the editor's config (interactive_updates, height, layers, preset, the
+  // overlay source overrides, ...): kept as props, which the Runtime reads each frame.
+  if (n.IsMap())
+    for (const auto &kv : n) {
+      if (!kv.first.IsScalar())
+        continue;
+      const std::string key = kv.first.Scalar();
+      if (key != "tf_editor" && !known_widget_key(key))
+        w.props.entries.emplace_back(key, to_value(kv.second));
+    }
+  if (const Value *layers = w.props.find("layers"); layers && layers->kind == Value::Kind::Sequence)
+    for (const Value &l : layers->items)
+      if (l.scalar != "histogram" && l.scalar != "contour_spectrum" && l.scalar != "contour_tree")
+        ctx.warn("ari: tf_editor '" + label + "' has an unknown layer '" + l.scalar +
+                 "' (histogram | contour_spectrum | contour_tree)");
+  if (const Value *preset = w.props.find("preset"); preset && !preset->scalar.empty()) {
+    const auto &names = cvc::tf::model::preset_names();
+    if (std::find(names.begin(), names.end(), preset->scalar) == names.end())
+      ctx.warn("ari: tf_editor '" + label + "' has an unknown preset '" + preset->scalar + "'");
+  }
+}
+
+// §G7 an RGB picker bound to an "r,g,b" key.
+CVC_ARI_NOINLINE void parse_color(Ctx &ctx, const YAML::Node &n, const std::string &label,
+                                  Widget &w) {
+  const std::string bind = str(n, "bind");
+  check_bind(ctx, "color", label, bind);
+  w = color_widget(label, bind, str(n, "default", str(n, "def")));
+  w.on = action(n);
+  // fmt: rgb (a field per channel, the default) or hex (one "#rrggbb" field).
+  w.fmt = str(n, "fmt", "rgb");
+  if (w.fmt != "rgb" && w.fmt != "hex") {
+    ctx.warn("ari: color '" + label + "': fmt '" + w.fmt + "' is not rgb or hex -- rgb");
+    w.fmt = "rgb";
+  }
+}
+
+// An image: a host-published image, or a picture by URI (§5.11).
+CVC_ARI_NOINLINE void parse_image(Ctx &ctx, const YAML::Node &n, const std::string &label,
+                                  Widget &w) {
+  // size: W (a width; the height follows the picture), "N%" (that share of the line's width) or
+  // [W, H] (a box the picture is fitted to).
+  double w_px = 256.0, h_px = 0.0, fill = 0.0;
+  parse_media_size(n["size"], w_px, h_px, fill);
+  w = image_widget(label, str(n, "src"), w_px);
+  w.img_h = h_px;
+  w.img_fill = fill;
+  w.img_max_h = num(n, "max_height", 0.0);
+  w.bind = str(n, "bind"); // optional: the image name or URI comes from this key instead of src
+  w.media_auth = str(n, "auth");
+  w.media_status = str(n, "status");
+  if (has(n, "fit") && !media::parse_fit(str(n, "fit"), w.img_fit))
+    ctx.warn("ari: image '" + label + "': fit: '" + str(n, "fit") +
+             "' is not contain, cover or fill — using contain");
+  if (has(n, "shape") && !media::parse_shape(str(n, "shape"), w.img_shape))
+    ctx.warn("ari: image '" + label + "': shape: '" + str(n, "shape") +
+             "' is not rect or circle — using rect");
+  if (!w.media_auth.empty() && !w.src.empty() && w.src[0] != '(' && !media::is_uri(w.src))
+    ctx.warn("ari: image '" + label + "': auth: is for a picture by URL (src: https://...)");
+  w.fullscreen_control = flag(n, "fullscreen", false); // §5.13 a click shows it alone
+  w.badge = str(n, "badge");                           // §5.11 a label over the picture ("+3")
+  w.save_menu = flag(n, "save", true); // §5.29 false: no Save image... in its context menu
+}
+
+// §5.13 a video or audio player, as `type` says: a source, controls, state keys.
+CVC_ARI_NOINLINE void parse_media(Ctx &ctx, const YAML::Node &n, const std::string &type,
+                                  const std::string &label, Widget &w) {
+  w.kind = type == "video" ? Kind::Video : Kind::Audio;
+  w.label = label;
+  w.src = str(n, "src");
+  w.media_auth = str(n, "auth");
+  w.poster = str(n, "poster");
+  w.bind = str(n, "bind");
+  w.img_size = type == "video" ? 480.0 : 320.0;
+  w.img_h = type == "video" ? 270.0 : 0.0;
+  parse_media_size(n["size"], w.img_size, w.img_h, w.img_fill);
+  w.img_max_h = num(n, "max_height", 0.0);
+  if (has(n, "fit") && !media::parse_fit(str(n, "fit"), w.img_fit))
+    ctx.warn("ari: " + type + " '" + label + "': fit: '" + str(n, "fit") +
+             "' is not contain, cover or fill — using contain");
+  // controls: false is a decorative picture (an avatar, a banner): it plays by itself, looping,
+  // silent, unless the document says otherwise.
+  w.controls = flag(n, "controls", true);
+  w.autoplay = flag(n, "autoplay", !w.controls);
+  w.loop = flag(n, "loop", !w.controls);
+  w.muted = flag(n, "muted", !w.controls);
+  if (has(n, "shape") && !media::parse_shape(str(n, "shape"), w.img_shape))
+    ctx.warn("ari: " + type + " '" + label + "': shape: '" + str(n, "shape") +
+             "' is not rect or circle — using rect");
+  w.media_status = str(n, "status");
+  w.fullscreen_control = flag(n, "fullscreen", false); // §5.13 a Full screen button
+  if (w.fullscreen_control && w.kind == Kind::Audio)
+    ctx.warn("ari: audio '" + label + "': fullscreen: is for a picture (image:, video:)");
+  w.badge = str(n, "badge");           // §5.11 a label over the picture
+  w.save_menu = flag(n, "save", true); // §5.29 false: no Save video... in its context menu
+  if (!w.badge.empty() && w.kind == Kind::Audio)
+    ctx.warn("ari: audio '" + label + "': badge: is for a picture (image:, video:)");
+  if (w.src.empty())
+    ctx.warn("ari: " + type + " '" + label + "' has no src: — it plays nothing");
+}
+
+// A button: its on: action, and a picture in place of its label (§5.27).
+CVC_ARI_NOINLINE void parse_button(Ctx &ctx, const YAML::Node &n, const std::string &label,
+                                   Widget &w) {
+  const std::string on = action(n);
+  if (on.empty())
+    ctx.warn("ari: button '" + label + "' has no on: action");
+  w = button(label, on);
+  // §5.27 a picture in place of the label, and the pressed-in look of the chosen one
+  w.button_icon = str(n, "icon");
+  w.media_auth = str(n, "auth");
+  w.icon_size = static_cast<float>(std::max(0.0, num(n, "icon_size", 0.0)));
+  if (has(n, "selected")) {
+    const YAML::Node s = n["selected"];
+    const std::string v = s.IsScalar() ? s.Scalar() : std::string();
+    if (v == "true" || v == "yes" || v == "on")
+      w.selected = "true";
+    else if (v == "false" || v == "no" || v == "off")
+      w.selected = "false"; // one of a row, never the chosen one: drawn raised with the others
+    else if (v.empty())
+      w.selected.clear();
+    else if (v.front() == '(') // an expression, read each frame
+      w.selected = v;
+    else
+      ctx.warn("ari: button '" + label + "': selected: '" + v +
+               "' is not true, false or an expression");
+  }
+  if (!w.button_icon.empty() && label.empty())
+    ctx.warn("ari: button with icon: has no label: it shows nothing where the picture can't");
+}
+
+// A widget given as a word or a text (`- separator`, `- clock`, `- Hello`): a separator, the
+// Windows menu, the tray's clock or bell, a spinner, else a text of it.
+CVC_ARI_NOINLINE void parse_scalar_widget(const YAML::Node &n, Widget &w) {
+  const std::string s = n.Scalar();
+  if (s == "separator")
+    w = separator();
+  else if (s == "windows_menu")
+    w = windows_menu();
+  else if (s == "clock") // §5.22: the tray's clock, placed here among a menubar's tray icons
+    w = tray_clock();
+  else if (s == "bell") // §5.24: the tray's bell, placed here among a menubar's tray icons
+    w = tray_bell();
+  else if (s == "spinner")
+    w = spinner("");
+  else
+    w = text(s);
+}
+
+// A widget of a kind that holds no widgets, by `type`, into `w`: false when `type` is not one.
+// Never on the way down, so its frame may be as large as its branches make it.
+CVC_ARI_NOINLINE bool parse_leaf(Ctx &ctx, const YAML::Node &n, const std::string &type,
+                                 const std::string &label, Widget &w) {
+  if (type == "separator")
+    w = separator();
+  else if (type == "windows_menu") // §5.9: `windows_menu: View` puts the built-in Windows menu here
+    w = windows_menu_setting(label);
+  else if (type == "menu_item")
+    parse_menu_item(ctx, n, label, w);
+  else if (type == "text")
+    parse_text(ctx, n, label, w);
+  else if (type == "spinner")
+    parse_spinner(ctx, n, label, w);
+  else if (type == "progress")
+    parse_progress(ctx, n, label, w);
+  else if (type == "plot")
+    parse_plot(ctx, n, label, w);
+  else if (type == "chart")
+    parse_chart(ctx, n, label, w);
+  else if (type == "heatmap") // a grid of cells from a subtree, coloured by a ramp
+    parse_heatmap(ctx, n, label, w);
+  else if (type == "settings")
+    parse_settings(ctx, n, label, w);
+  else if (type == "checkbox")
+    parse_checkbox(ctx, n, label, w);
+  else if (type == "slider_int")
+    parse_slider_int(ctx, n, label, w);
+  else if (type == "slider_float")
+    parse_slider_float(ctx, n, label, w);
+  else if (type == "combo" || type == "radio" || type == "radio_row")
+    parse_choice(ctx, n, type, label, w);
+  else if (type == "list")
+    parse_list(ctx, n, label, w);
+  else if (type == "input_text")
+    parse_input_text(ctx, n, label, w);
+  else if (type == "text_view")
+    parse_text_view(ctx, n, label, w);
+  else if (type == "message_input")
+    parse_message_input(ctx, n, label, w);
+  else if (type == "input_int")
+    parse_input_int(ctx, n, label, w);
+  else if (type == "tf_editor")
+    parse_tf_editor(ctx, n, label, w);
+  else if (type == "color")
+    parse_color(ctx, n, label, w);
+  else if (type == "image")
+    parse_image(ctx, n, label, w);
+  else if (type == "video" || type == "audio")
+    parse_media(ctx, n, type, label, w);
+  else if (type == "button")
+    parse_button(ctx, n, label, w);
+  else
+    return false;
+  return true;
+}
+
+// The kinds that hold widgets go on down: each fills in its own keys, parses its widgets into
+// `w`, and leaves the rest of its keys to a function of its own, so that what stays in its frame
+// on the way down is a few YAML nodes.
+
+// A menubar: its menus and tray icons (children:, or items:), and how it collapses (§5.23).
+CVC_ARI_NOINLINE void parse_menubar(Ctx &ctx, const YAML::Node &n, Widget &w) {
+  w.kind = Kind::Menubar;
+  parse_seq(ctx, has(n, "children") ? n["children"] : n["items"], w.children);
+  w.collapse = menu_collapse_setting(ctx, has(n, "collapse") ? n["collapse"] : YAML::Node());
+}
+
+// A menu: its items (items:, or children:).
+CVC_ARI_NOINLINE void parse_menu(Ctx &ctx, const YAML::Node &n, const std::string &label,
+                                 Widget &w) {
+  w.kind = Kind::Menu;
+  w.label = label;
+  parse_seq(ctx, has(n, "items") ? n["items"] : n["children"], w.children);
+}
+
+// A tray icon's keys besides its items: its tone, and §5.22 `icon:`, a picture in place of the
+// glyph (a URI, a published image, or an expression), round, the bar's height: the glyph shows
+// until it is ready.
+CVC_ARI_NOINLINE void tray_icon_keys(const YAML::Node &n, const std::string &label, Widget &w) {
+  w.label = label;
+  w.badge = str(n, "badge");
+  w.on = action(n);
+  w.tone = str(n, "tone");
+  w.button_icon = str(n, "icon");
+  w.media_auth = str(n, "auth");
+}
+
+// A tray icon, at the menubar's right end: with items:, a click opens them as a menu.
+CVC_ARI_NOINLINE void parse_tray_icon(Ctx &ctx, const YAML::Node &n, const std::string &label,
+                                      Widget &w) {
+  w.kind = Kind::TrayIcon;
+  tray_icon_keys(n, label, w);
+  parse_seq(ctx, n["items"], w.children);
+}
+
+// A window's (or an overlay's) keys besides its children.
+CVC_ARI_NOINLINE void window_keys(Ctx &ctx, const YAML::Node &n, const std::string &label,
+                                  Widget &w) {
+  w.id = str(n, "id");
+  w.bind =
+      str(n, "bind"); // optional: a computed/state-bound VISIBLE TITLE (else the `window:` label)
+  parse_pos(n, w);
+  w.size = parse_size(n["size"]);                     // §3.0.3b window sizing (%/px/auto)
+  w.layout = parse_layout(n["layout"]);               // §3.0.3b window-body layout (grid/tracks)
+  w.frame_border = parse_frame_border(n["frame"]);    // §3.0.3b border width
+  w.closable = flag(n, "closable", true);             // §5.9 a close (X) button + tree.<id>.open
+  w.maximizable = flag(n, "maximizable", true);       // §5.9 a maximize button + .maximized
+  w.start_maximized = start_maximized(ctx, n, label); // §5.9 maximized: true | phone
+  w.resizable = flag(n, "resizable", true);           // §5.9 the user resizes it by an edge
+}
+
+// A window or an overlay: its title (the label) and its children.
+CVC_ARI_NOINLINE void parse_window(Ctx &ctx, const YAML::Node &n, const std::string &label,
+                                   Widget &w) {
+  w.kind = Kind::Window;
+  w.label = label;
+  parse_seq(ctx, n["children"], w.children);
+  window_keys(ctx, n, label, w);
+}
+
+// The title of tab bar `w`'s last tab, from its node `k`: its tab: (else its label:, or title:,
+// as a group keeps no label of its own), else the child's label, else its place.
+CVC_ARI_NOINLINE void tab_title(const YAML::Node &k, Widget &w) {
+  std::string title = k.IsMap() ? str(k, "tab", str(k, "label", str(k, "title"))) : std::string();
+  if (title.empty())
+    title = w.children.back().label;
+  if (title.empty())
+    title = "Tab " + std::to_string(w.children.size());
+  w.tab_titles.push_back(std::move(title));
+}
+
+// A tab bar over options: alone (no children): the options, or a computed list of them, and
+// the values they store.
+CVC_ARI_NOINLINE void tab_options(Ctx &ctx, const YAML::Node &n, const std::string &label,
+                                  Widget &w) {
+  const YAML::Node o = n["options"];
+  if (o && o.IsSequence()) {
+    for (const YAML::Node &e : o)
+      if (e.IsScalar())
+        w.options.push_back(e.Scalar());
+  } else if (o && o.IsScalar()) {
+    w.options_expr = o.Scalar();
+  }
+  if (const YAML::Node v = n["values"]; v && v.IsSequence() && w.options_expr.empty()) {
+    for (const YAML::Node &e : v)
+      if (e.IsScalar())
+        w.values.push_back(e.Scalar());
+    if (w.values.size() != w.options.size()) {
+      ctx.warn("ari: tabs '" + label + "' has " + std::to_string(w.values.size()) +
+               " values: for " + std::to_string(w.options.size()) +
+               " options: — value mapping ignored");
+      w.values.clear();
+    }
+  }
+  if (w.options.empty() && w.options_expr.empty())
+    ctx.warn("ari: tabs '" + label + "' has neither children: nor options:");
+}
+
+// A tab bar's keys besides its tabs.
+CVC_ARI_NOINLINE void tabs_keys(const YAML::Node &n, const std::string &label, Widget &w) {
+  w.kind = Kind::Tabs;
+  w.label = label;
+  w.bind = str(n, "bind");
+  w.on = action(n); // optional: fired after the user picks another tab
+  w.sdef = str(n, "default", str(n, "def"));
+}
+
+// A tab bar bound to a key: over its children, one tab a child, or over options: alone.
+CVC_ARI_NOINLINE void parse_tabs(Ctx &ctx, const YAML::Node &n, const std::string &label,
+                                 Widget &w) {
+  tabs_keys(n, label, w);
+  const YAML::Node kids = n["children"];
+  if (!(kids && kids.IsSequence() && kids.size() > 0)) {
+    tab_options(ctx, n, label, w);
+    return;
+  }
+  w.children.reserve(kids.size());
+  for (const YAML::Node &k : kids) {
+    w.children.emplace_back();
+    parse_widget(ctx, k, w.children.back());
+    tab_title(k, w);
+  }
+}
+
+// A custom widget's props: every key the loader does not read itself, for its emit fn; and a
+// warning when no handler is registered for `type`.
+CVC_ARI_NOINLINE void custom_props(Ctx &ctx, const YAML::Node &n, const std::string &type,
+                                   Widget &w) {
+  w.props.kind = Value::Kind::Map;
+  if (n.IsMap())
+    for (const auto &kv : n) {
+      if (!kv.first.IsScalar())
+        continue;
+      const std::string key = kv.first.Scalar();
+      // known_widget_key already excludes "type"; do NOT also skip a prop whose name
+      // equals the type VALUE (e.g. `gauge: 0.8` on `type: gauge`) — that dropped
+      // real config. Matches the scene-node capture.
+      if (!known_widget_key(key))
+        w.props.entries.emplace_back(key, to_value(kv.second));
+    }
+  if (!has_widget_type(*ctx.app, type))
+    ctx.warn("ari: widget type '" + type +
+             "' has no registered handler (register_widget_type) — draws a placeholder");
+}
+
+// A CUSTOM widget type (§ extensibility), kept as Kind::Custom with its props and children, for a
+// registered emit fn (register_widget_type) to render. (No longer silently collapsed to an empty
+// group.) An unregistered type draws a labelled placeholder at emit; validation still warns if it
+// is a typo.
+CVC_ARI_NOINLINE void parse_custom(Ctx &ctx, const YAML::Node &n, const std::string &type,
+                                   const std::string &label, Widget &w) {
+  w.kind = Kind::Custom;
+  w.custom_type = type;
+  w.label = label;
+  w.bind = str(n, "bind");
+  w.on = action(n);
+  parse_seq(ctx, n["children"].IsDefined() ? n["children"] : n["items"], w.children);
+  custom_props(ctx, n, type, w);
+}
+
+// A map with no `type:` and no short-form key whose first key is not children: — a typo'd widget
+// (e.g. `- frobnicate: ...`), said so: a custom widget is declared with `type:`, so a lone unknown
+// key is more likely a mistake.
+CVC_ARI_NOINLINE void warn_unknown_widget_key(Ctx &ctx, const YAML::Node &n) {
+  std::string first_key;
+  for (const auto &kv : n) {
+    first_key = kv.first.Scalar();
+    break;
+  }
+  ctx.warn("ari: unrecognized widget key '" + first_key +
+           "' — not a known widget type; loaded as an empty group");
+}
+
+// §3.0.3b a group's layout (a grid / sized tracks) and size.
+CVC_ARI_NOINLINE void group_keys(const YAML::Node &n, Widget &w) {
+  w.layout = parse_layout(n["layout"]);
+  w.size = parse_size(n["size"]);
+}
+
+// A group or a panel, or a map with no widget type, `type` empty: a bare `{ children: [...] }` is a
+// valid anonymous group.
+CVC_ARI_NOINLINE void parse_group(Ctx &ctx, const YAML::Node &n, const std::string &type,
+                                  Widget &w) {
+  if (type.empty() && !has(n, "children") && n.size() > 0)
+    warn_unknown_widget_key(ctx, n);
+  parse_seq(ctx, n["children"], w.children); // `w` is a group already
+  group_keys(n, w);
+}
+
+// The widget `n` is, built in `w`: a word or a text, an include: or a load: entry, a kind with no
+// widgets of its own (parse_leaf), or one with some, which goes on down. Every function on the way
+// down keeps a small frame (§6.7); parse_leaf, which never goes down, holds the rest.
+void parse_widget_impl(Ctx &ctx, const YAML::Node &n, Widget &w) {
   if (n.IsScalar()) {
-    const std::string s = n.Scalar();
-    if (s == "separator")
-      return separator();
-    if (s == "windows_menu")
-      return windows_menu();
-    if (s == "clock") // §5.22: the tray's clock, placed here among a menubar's tray icons
-      return tray_clock();
-    if (s == "bell") // §5.24: the tray's bell, placed here among a menubar's tray icons
-      return tray_bell();
-    if (s == "spinner")
-      return spinner("");
-    return text(s);
+    parse_scalar_widget(n, w);
+    return;
   }
   if (!n.IsMap()) {
     ctx.warn("ari: a widget list item is neither a map nor a scalar — ignored");
-    return group({});
+    return; // an empty group
   }
 
   // §12 modularization: `include: <unit>` instantiates an in-document `units:` template with
   // its args substituted. Handled before the widget-type dispatch (include is not a widget kind).
-  if (n["include"].IsDefined())
-    return expand_include(ctx, n);
+  if (n["include"].IsDefined()) {
+    expand_include(ctx, n, w);
+    return;
+  }
   // §12 module mount: `load: <uri>` mounts an external .ari fragment as an isolated, scoped
   // sub-module. Also handled before the widget-type dispatch (load is not a widget kind).
-  if (n["load"].IsDefined())
-    return expand_load(ctx, n);
+  if (n["load"].IsDefined()) {
+    expand_load(ctx, n, w);
+    return;
+  }
+  // docs/roadmap/ARIADNE_SHELL.md 4.2 `mounts: <key>`: the mounts the Runtime makes at run time,
+  // one per child of the key. Not a widget type either: the loader reads only the slot.
+  if (n["mounts"].IsDefined()) {
+    parse_mounts(ctx, n, w);
+    return;
+  }
 
   std::string label;
   const std::string type = widget_type(n, label);
-
-  if (type == "separator")
-    return separator();
-  if (type == "menubar") {
-    Widget w;
-    w.kind = Kind::Menubar;
-    w.children = parse_seq(ctx, has(n, "children") ? n["children"] : n["items"]);
-    w.collapse = menu_collapse_setting(ctx, has(n, "collapse") ? n["collapse"] : YAML::Node());
-    return w;
-  }
-  if (type == "menu")
-    return menu(label, parse_seq(ctx, has(n, "items") ? n["items"] : n["children"]));
-  if (type == "windows_menu") // §5.9: `windows_menu: View` puts the built-in Windows menu here
-    return windows_menu_setting(label);
-  if (type == "tray_icon") { // an icon at the menubar's right end
-    Widget w = tray_icon(label, str(n, "badge"), action(n),
-                         has(n, "items") ? parse_seq(ctx, n["items"]) : std::vector<Widget>{});
-    w.tone = str(n, "tone");
-    // §5.22 `icon:` a picture in place of the glyph (a URI, a published image, or an expression),
-    // round, the bar's height: the glyph shows until it is ready.
-    w.button_icon = str(n, "icon");
-    w.media_auth = str(n, "auth");
-    return w;
-  }
-  if (type == "menu_item") {
-    if (has(n, "bind")) {
-      Widget w = menu_toggle(label, str(n, "bind"), flag(n, "def"));
-      w.on = action(n); // optional: fired after each toggle's write
-      return w;
-    }
-    const std::string on = action(n);
-    if (on.empty())
-      ctx.warn("ari: menu_item '" + label + "' has neither bind: nor on: — it does nothing");
-    return menu_action(label, on);
-  }
-  if (type == "window" || type == "overlay") {
-    Widget w = window(label, parse_seq(ctx, n["children"]));
-    w.id = str(n, "id");
-    w.bind =
-        str(n, "bind"); // optional: a computed/state-bound VISIBLE TITLE (else the `window:` label)
-    parse_pos(n, w);
-    w.size = parse_size(n["size"]);                  // §3.0.3b window sizing (%/px/auto)
-    w.layout = parse_layout(n["layout"]);            // §3.0.3b window-body layout (grid/tracks)
-    w.frame_border = parse_frame_border(n["frame"]); // §3.0.3b border width
-    w.closable = flag(n, "closable", true);          // §5.9 a close (X) button + tree.<id>.open
-    w.maximizable = flag(n, "maximizable", true);    // §5.9 a maximize button + .maximized
-    w.start_maximized = start_maximized(ctx, n, label); // §5.9 maximized: true | phone
-    w.resizable = flag(n, "resizable", true);        // §5.9 the user resizes it by an edge
-    return w;
-  }
-  if (type == "text") {
-    Widget w = has(n, "bind") ? text_bound(label, str(n, "bind")) : text(label);
-    // Its `color:` (§5.26) is parse_widget's, as a radio's, a button's and a menu item's.
-    // §5.11 emoji: a state path holding a map of shortcode names to picture URIs: a `:name:` in
-    // the text that it names is drawn as that picture.
-    w.emoji = str(n, "emoji");
-    // §5.20 runs: rich text. A list written here (a run a string, or {text, style, href,
-    // on_click, tooltip}), or a state path / an expression giving one at run time.
-    if (has(n, "runs")) {
-      w.has_runs = true;
-      const YAML::Node r = n["runs"];
-      if (r.IsSequence()) {
-        for (const YAML::Node &e : r) {
-          TextRunSpec s;
-          if (e.IsScalar()) {
-            s.text = e.Scalar();
-          } else if (e.IsMap()) {
-            s.text = str(e, "text");
-            s.style = str(e, "style");
-            s.href = str(e, "href");
-            s.on_click = str(e, "on_click");
-            s.tooltip = str(e, "tooltip");
-          } else {
-            ctx.warn("ari: text '" + label + "': a run is a string or {text, style, href, ...}");
-            continue;
-          }
-          w.runs.push_back(std::move(s));
-        }
-      } else if (r.IsScalar()) {
-        w.runs_src = r.Scalar();
-      } else {
-        ctx.warn("ari: text '" + label + "': runs: is a list, a state path or an expression");
-      }
-      w.on_link = str(n, "on_link");
-      const double ml = num(n, "max_lines", 0.0);
-      w.text_max_lines = ml > 0.0 ? static_cast<int>(ml) : 0;
-      w.wrap = flag(n, "wrap", true);
-      // size: N (px), the widest it wraps at; [N, h] takes N
-      const YAML::Node sz = n["size"];
-      if (sz && sz.IsScalar())
-        w.size.w = parse_extent(sz);
-      else
-        w.size = parse_size(sz);
-    }
-    return w;
-  }
-  if (type == "spinner") { // an activity indicator the host turns by its frame clock
-    Widget w = spinner(label, str(n, "bind"));
-    const std::string glyphs = str(n, "glyphs", "braille");
-    if (glyphs == "ascii")
-      w.ascii_glyphs = true;
-    else if (glyphs != "braille")
-      ctx.warn("ari: spinner '" + label + "': glyphs '" + glyphs +
-               "' is not braille or ascii — braille");
-    return w;
-  }
-  if (type == "progress") { // a read-only bar: bind's number over [lo, hi]
-    const std::string bind = str(n, "bind");
-    check_bind(ctx, "progress", label, bind);
-    const double lo = num(n, "lo", 0.0), hi = num(n, "hi", 1.0);
-    if (lo >= hi)
-      ctx.warn("ari: progress '" + label + "' has lo >= hi");
-    return progress(label, bind, lo, hi, str(n, "overlay"));
-  }
-  if (type == "plot") { // a read-only line graph: bind's comma-separated numbers
-    const std::string bind = str(n, "bind");
-    check_bind(ctx, "plot", label, bind);
-    const double lo = num(n, "lo", 0.0), hi = num(n, "hi", 0.0);
-    const double height = num(n, "height", 60.0);
-    if (!(height > 0.0))
-      ctx.warn("ari: plot '" + label + "' height must be > 0 — 60");
-    return plot(label, bind, lo, hi, str(n, "overlay"), height > 0.0 ? height : 60.0);
-  }
-  if (type == "chart") { // read-only curves: a plot subtree (host.set_plot's) and/or series:
-    Widget w = chart(label, str(n, "bind"));
-    if (const YAML::Node ser = n["series"]; ser && !ser.IsSequence()) {
-      ctx.warn("ari: chart '" + label + "' series: must be a list — ignored");
-    } else if (ser) {
-      for (const YAML::Node &e : ser) {
-        ChartSeriesBind sb;
-        if (e.IsScalar())
-          sb.bind = e.Scalar();
-        else if (e.IsMap())
-          sb = {str(e, "bind"), str(e, "label"), str(e, "style")};
-        if (sb.bind.empty()) {
-          ctx.warn("ari: chart '" + label + "' has a series with no bind: — skipped");
-          continue;
-        }
-        w.chart_series.push_back(std::move(sb));
-      }
-    }
-    if (w.bind.empty() && w.chart_series.empty())
-      ctx.warn("ari: chart '" + label + "' has neither bind: nor series: — it draws nothing");
-    // log_y: a boolean, or a state path / computed expression read each frame (a boolean spelling
-    // reads the same whatever flag()'s default).
-    if (const YAML::Node v = n["log_y"]; v && v.IsScalar()) {
-      const bool t = flag(n, "log_y", true), f = flag(n, "log_y", false);
-      w.log_y = t == f ? (t ? "1" : "0") : v.Scalar();
-    }
-    const std::string legend = str(n, "legend", "top");
-    if (legend == "right")
-      w.legend = ChartLegend::Right;
-    else if (legend == "none")
-      w.legend = ChartLegend::Off;
-    else if (legend != "top")
-      ctx.warn("ari: chart '" + label + "' legend: '" + legend +
-               "' is not top, right or none — top");
-    w.x_label = str(n, "x_label");
-    w.cursor = str(n, "cursor");
-    w.pick = str(n, "pick");
-    const double height = num(n, "height", 160.0);
-    if (!(height > 0.0))
-      ctx.warn("ari: chart '" + label + "' height must be > 0 — 160");
-    w.plot_height = height > 0.0 ? height : 160.0;
-    w.on = action(n); // optional: fired after a pick's write
-    return w;
-  }
-  if (type == "heatmap") { // a grid of cells from a subtree, coloured by a ramp
-    return parse_heatmap(ctx, n, label);
-  }
-  if (type == "settings") { // an editor for every key under a state subtree, from its metadata
-    Widget w = settings(label, std::string());
-    w.settings_roots.clear();
-    const auto strings = [&](const char *key) {
-      std::vector<std::string> out;
-      const YAML::Node v = n[key];
-      if (v && v.IsScalar()) {
-        out.push_back(v.Scalar());
-      } else if (v && v.IsSequence()) {
-        for (const YAML::Node &e : v)
-          if (e.IsScalar())
-            out.push_back(e.Scalar());
-          else
-            ctx.warn("ari: settings '" + label + "' " + key + ": entries must be text — skipped");
-      } else if (v) {
-        ctx.warn("ari: settings '" + label + "' " + key + ": must be text or a list — ignored");
-      }
-      return out;
-    };
-    for (std::string &r : strings("root"))
-      if (!r.empty())
-        w.settings_roots.push_back(std::move(r));
-    if (w.settings_roots.empty())
-      ctx.warn("ari: settings '" + label + "' has no root: — it shows nothing");
-    w.settings_filter = strings("filter");
-    // groups: each entry a key (its place in the order), {key: title}, or {key: {title, help,
-    // open}}.
-    if (const YAML::Node gs = n["groups"]; gs && !gs.IsSequence()) {
-      ctx.warn("ari: settings '" + label + "' groups: must be a list — ignored");
-    } else if (gs) {
-      for (const YAML::Node &e : gs) {
-        SettingsGroupSpec g;
-        if (e.IsScalar()) {
-          g.key = e.Scalar();
-        } else if (e.IsMap() && e.size() == 1) {
-          const auto kv = *e.begin();
-          g.key = kv.first.Scalar();
-          if (kv.second.IsScalar()) {
-            g.title = kv.second.Scalar();
-          } else if (kv.second.IsMap()) {
-            g.title = str(kv.second, "title");
-            g.help = str(kv.second, "help");
-            g.open = flag(kv.second, "open", false);
-          }
-        }
-        if (g.key.empty()) {
-          ctx.warn("ari: settings '" + label +
-                   "' has a groups: entry that names no key (key, {key: title} or {key: {title, "
-                   "help, open}}) — skipped");
-          continue;
-        }
-        w.settings_groups.push_back(std::move(g));
-      }
-    }
-    w.settings_search = flag(n, "search", false);
-    w.settings_readouts = flag(n, "readouts", true);
-    w.settings_open = flag(n, "open", false);
-    w.commit_on_release = commit_on_release(ctx, n, label);
-    w.on = action(n); // optional: after each committed write or reset
-    return w;
-  }
-  if (type == "checkbox") {
-    const std::string bind = str(n, "bind");
-    check_bind(ctx, "checkbox", label, bind);
-    Widget w = checkbox(label, bind, flag(n, "def"));
-    w.on = action(n); // optional: fired after each committed write, like input_text's
-    return w;
-  }
-  if (type == "slider_int") {
-    const std::string bind = str(n, "bind");
-    check_bind(ctx, "slider_int", label, bind);
-    const int lo = static_cast<int>(num(n, "lo", 0)), hi = static_cast<int>(num(n, "hi", 100));
-    if (lo >= hi)
-      ctx.warn("ari: slider_int '" + label + "' has lo >= hi");
-    Widget w = slider_int(label, bind, lo, hi, static_cast<int>(num(n, "def", 0)));
-    w.range_from_key = range_from_key(ctx, n, "slider_int", label);
-    w.commit_on_release = commit_on_release(ctx, n, label);
-    w.on = action(n); // fired on the commit edge (drag end / key step), not every drag frame
-    return w;
-  }
-  if (type == "slider_float") {
-    const std::string bind = str(n, "bind");
-    check_bind(ctx, "slider_float", label, bind);
-    const double lo = num(n, "lo", 0.0), hi = num(n, "hi", 1.0);
-    if (lo >= hi)
-      ctx.warn("ari: slider_float '" + label + "' has lo >= hi");
-    Widget w = slider_float(label, bind, lo, hi, num(n, "def", 0.0), str(n, "fmt", "%.3f"));
-    w.range_from_key = range_from_key(ctx, n, "slider_float", label);
-    w.log_scale = flag(n, "log", false);
-    if (w.log_scale && !(lo > 0.0))
-      ctx.warn("ari: slider_float '" + label + "' has log: true and lo <= 0; drawn linear");
-    w.log_scale = w.log_scale && lo > 0.0;
-    w.commit_on_release = commit_on_release(ctx, n, label);
-    w.on = action(n);
-    return w;
-  }
-  if (type == "combo" || type == "radio" || type == "radio_row") { // a radio is a combo shown open
-    const std::string bind = str(n, "bind");
-    check_bind(ctx, type, label, bind);
-    std::vector<std::string> opts;
-    const YAML::Node o = n["options"];
-    // options: a SEQUENCE is a static list; a SCALAR is a §4 computed expression (a list)
-    // re-evaluated each frame.
-    std::string opts_expr;
-    if (o && o.IsSequence()) {
-      for (const YAML::Node &e : o)
-        if (e.IsScalar())
-          opts.push_back(e.Scalar());
-    } else if (o && o.IsScalar()) {
-      opts_expr = o.Scalar();
-    }
-    if (opts.empty() && opts_expr.empty())
-      ctx.warn("ari: " + type + " '" + label + "' has no options:");
-    // values: a parallel list mapping each option label -> a stored value (e.g. an int key). Each
-    // entry is stringified (a YAML int/float/string all become the stored string).
-    std::vector<std::string> values;
-    if (const YAML::Node v = n["values"]; v && v.IsSequence())
-      for (const YAML::Node &e : v)
-        if (e.IsScalar())
-          values.push_back(e.Scalar());
-    Widget w = combo(label, bind, std::move(opts), str(n, "default", str(n, "def")));
-    w.options_expr = opts_expr;
-    w.on = action(n); // optional: fired after each pick's write
-    if (type != "combo") {
-      w.kind = Kind::Radio;
-      w.radio_row = type == "radio_row";
-    }
-    if (!values.empty() && !opts_expr.empty())
-      ctx.warn("ari: " + type + " '" + label +
-               "' has both computed options: and values: — values ignored");
-    else if (!values.empty() && values.size() != w.options.size())
-      ctx.warn("ari: " + type + " '" + label + "' has " + std::to_string(values.size()) +
-               " values: for " + std::to_string(w.options.size()) +
-               " options: — value mapping ignored");
-    else
-      w.values = std::move(values);
-    return w;
-  }
-  if (type == "tabs") { // a tab bar bound to a key: over its children, or over options: alone
-    Widget w;
-    w.kind = Kind::Tabs;
-    w.label = label;
-    w.bind = str(n, "bind");
-    w.on = action(n); // optional: fired after the user picks another tab
-    w.sdef = str(n, "default", str(n, "def"));
-    const YAML::Node kids = n["children"];
-    if (kids && kids.IsSequence() && kids.size() > 0) {
-      // One tab a child, titled by its `tab:`, else its label, else its place.
-      for (const YAML::Node &k : kids) {
-        Widget c = parse_widget(ctx, k);
-        // A group keeps no label of its own: read the child's label: (or title:) from the node.
-        std::string title =
-            k.IsMap() ? str(k, "tab", str(k, "label", str(k, "title"))) : std::string();
-        if (title.empty())
-          title = c.label;
-        if (title.empty())
-          title = "Tab " + std::to_string(w.children.size() + 1);
-        w.tab_titles.push_back(title);
-        w.children.push_back(std::move(c));
-      }
-    } else {
-      const YAML::Node o = n["options"];
-      if (o && o.IsSequence()) {
-        for (const YAML::Node &e : o)
-          if (e.IsScalar())
-            w.options.push_back(e.Scalar());
-      } else if (o && o.IsScalar()) {
-        w.options_expr = o.Scalar();
-      }
-      if (const YAML::Node v = n["values"]; v && v.IsSequence() && w.options_expr.empty()) {
-        for (const YAML::Node &e : v)
-          if (e.IsScalar())
-            w.values.push_back(e.Scalar());
-        if (w.values.size() != w.options.size()) {
-          ctx.warn("ari: tabs '" + label + "' has " + std::to_string(w.values.size()) +
-                   " values: for " + std::to_string(w.options.size()) +
-                   " options: — value mapping ignored");
-          w.values.clear();
-        }
-      }
-      if (w.options.empty() && w.options_expr.empty())
-        ctx.warn("ari: tabs '" + label + "' has neither children: nor options:");
-    }
-    return w;
-  }
-  if (type == "list") { // rows of a state array, one selected, with Add / Remove
-    Widget w;
-    w.kind = Kind::List;
-    w.label = label;
-    w.bind = str(n, "bind");
-    check_bind(ctx, "list", label, w.bind);
-    w.list_field = str(n, "field", "name");
-    w.list_current = str(n, "current");
-    w.list_add = flag(n, "add", false);
-    w.list_remove = flag(n, "remove", false);
-    w.list_rows = std::max(1, static_cast<int>(num(n, "rows", 6.0)));
-    if (const YAML::Node ni = n["new_item"]; ni && ni.IsMap()) {
-      for (const auto &kv : ni)
-        if (kv.first.IsScalar() && kv.second.IsScalar())
-          w.list_new.emplace_back(kv.first.Scalar(), kv.second.Scalar());
-    } else if (ni) {
-      ctx.warn("ari: list '" + label + "' has a new_item: that is not a map of fields — ignored");
-    }
-    w.on = action(n); // optional: fired after the user selects a row
-    w.on_add = str(n, "on_add");
-    w.on_remove = str(n, "on_remove");
-    return w;
-  }
-  if (type == "input_text") {
-    const std::string bind = str(n, "bind");
-    check_bind(ctx, "input_text", label, bind);
-    // on: is optional (send-on-commit), so unlike button we do not warn when it is absent.
-    Widget w = input_text(label, bind, action(n), str(n, "default", str(n, "def")));
-    w.password = flag(n, "password", false); // shown masked
-    return w;
-  }
-  if (type == "text_view") { // a scrollable text buffer: bind's text, its lines split on '\n'
-    const std::string bind = str(n, "bind");
-    check_bind(ctx, "text_view", label, bind);
-    Widget w = text_view(label, bind, str(n, "on_top"));
-    w.view_height = num(n, "height", 0.0);
-    if (!(w.view_height >= 0.0)) {
-      ctx.warn("ari: text_view '" + label + "' height must be >= 0 — 0 (the rest of the window)");
-      w.view_height = 0.0;
-    }
-    w.follow = flag(n, "follow", true);
-    w.wrap = flag(n, "wrap", true);
-    return w;
-  }
-  if (type == "message_input") { // a field to post a message: Enter sends it to on:
-    const std::string bind = str(n, "bind");
-    check_bind(ctx, "message_input", label, bind);
-    Widget w = message_input(label, bind, action(n));
-    if (w.on.empty())
-      ctx.warn("ari: message_input '" + label + "' has no on: — what is sent goes nowhere");
-    w.hint = str(n, "hint");
-    w.multiline = flag(n, "multiline", true);
-    const double lines = num(n, "max_lines", 4.0), length = num(n, "max_length", 0.0);
-    if (!(lines >= 1.0))
-      ctx.warn("ari: message_input '" + label + "' max_lines must be >= 1 — 4");
-    if (!(length >= 0.0))
-      ctx.warn("ari: message_input '" + label + "' max_length must be >= 0 — no cap");
-    w.max_lines = lines >= 1.0 ? static_cast<int>(lines) : 4;
-    w.max_length = length >= 0.0 ? static_cast<int>(length) : 0;
-    w.send = str(n, "send");
-    w.live = flag(n, "live", false);   // the draft written to bind: as it is typed
-    w.on_change = str(n, "on_change"); // ... and this run each time, event.text the draft
-    return w;
-  }
-  if (type == "input_int") {
-    const std::string bind = str(n, "bind");
-    check_bind(ctx, "input_int", label, bind);
-    const int lo = static_cast<int>(num(n, "lo", 0)), hi = static_cast<int>(num(n, "hi", 0));
-    if (lo > hi)
-      ctx.warn("ari: input_int '" + label + "' has lo > hi");
-    return input_int(label, bind, lo, hi, static_cast<int>(num(n, "def", 0)), action(n));
-  }
-  if (type == "tf_editor") { // §10 a transfer-function editor bound to a cvc::tf::model key
-    const std::string bind = str(n, "bind");
-    check_bind(ctx, "tf_editor", label, bind);
-    Widget w = tf_editor(label, bind);
-    w.on = action(n); // fired after each committed model write, like input_text's
-    // Every other key is the editor's config (interactive_updates, height, layers, preset, the
-    // overlay source overrides, ...): kept as props, which the Runtime reads each frame.
-    if (n.IsMap())
-      for (const auto &kv : n) {
-        if (!kv.first.IsScalar())
-          continue;
-        const std::string key = kv.first.Scalar();
-        if (key != "tf_editor" && !known_widget_key(key))
-          w.props.entries.emplace_back(key, to_value(kv.second));
-      }
-    if (const Value *layers = w.props.find("layers");
-        layers && layers->kind == Value::Kind::Sequence)
-      for (const Value &l : layers->items)
-        if (l.scalar != "histogram" && l.scalar != "contour_spectrum" && l.scalar != "contour_tree")
-          ctx.warn("ari: tf_editor '" + label + "' has an unknown layer '" + l.scalar +
-                   "' (histogram | contour_spectrum | contour_tree)");
-    if (const Value *preset = w.props.find("preset"); preset && !preset->scalar.empty()) {
-      const auto &names = cvc::tf::model::preset_names();
-      if (std::find(names.begin(), names.end(), preset->scalar) == names.end())
-        ctx.warn("ari: tf_editor '" + label + "' has an unknown preset '" + preset->scalar + "'");
-    }
-    return w;
-  }
-  if (type == "color") { // §G7 an RGB picker bound to an "r,g,b" key
-    const std::string bind = str(n, "bind");
-    check_bind(ctx, "color", label, bind);
-    Widget w = color_widget(label, bind, str(n, "default", str(n, "def")));
-    w.on = action(n);
-    // fmt: rgb (a field per channel, the default) or hex (one "#rrggbb" field).
-    w.fmt = str(n, "fmt", "rgb");
-    if (w.fmt != "rgb" && w.fmt != "hex") {
-      ctx.warn("ari: color '" + label + "': fmt '" + w.fmt + "' is not rgb or hex -- rgb");
-      w.fmt = "rgb";
-    }
-    return w;
-  }
-  if (type == "image") { // a host-published image, or a picture by URI (§5.11)
-    // size: W (a width; the height follows the picture), "N%" (that share of the line's width) or
-    // [W, H] (a box the picture is fitted to).
-    double w_px = 256.0, h_px = 0.0, fill = 0.0;
-    parse_media_size(n["size"], w_px, h_px, fill);
-    Widget w = image_widget(label, str(n, "src"), w_px);
-    w.img_h = h_px;
-    w.img_fill = fill;
-    w.img_max_h = num(n, "max_height", 0.0);
-    w.bind = str(n, "bind"); // optional: the image name or URI comes from this key instead of src
-    w.media_auth = str(n, "auth");
-    w.media_status = str(n, "status");
-    if (has(n, "fit") && !media::parse_fit(str(n, "fit"), w.img_fit))
-      ctx.warn("ari: image '" + label + "': fit: '" + str(n, "fit") +
-               "' is not contain, cover or fill — using contain");
-    if (has(n, "shape") && !media::parse_shape(str(n, "shape"), w.img_shape))
-      ctx.warn("ari: image '" + label + "': shape: '" + str(n, "shape") +
-               "' is not rect or circle — using rect");
-    if (!w.media_auth.empty() && !w.src.empty() && w.src[0] != '(' && !media::is_uri(w.src))
-      ctx.warn("ari: image '" + label + "': auth: is for a picture by URL (src: https://...)");
-    w.fullscreen_control = flag(n, "fullscreen", false); // §5.13 a click shows it alone
-    w.badge = str(n, "badge");                           // §5.11 a label over the picture ("+3")
-    w.save_menu = flag(n, "save", true); // §5.29 false: no Save image... in its context menu
-    return w;
-  }
-  if (type == "video" || type == "audio") { // §5.13 a player: a source, controls, state keys
-    Widget w;
-    w.kind = type == "video" ? Kind::Video : Kind::Audio;
-    w.label = label;
-    w.src = str(n, "src");
-    w.media_auth = str(n, "auth");
-    w.poster = str(n, "poster");
-    w.bind = str(n, "bind");
-    w.img_size = type == "video" ? 480.0 : 320.0;
-    w.img_h = type == "video" ? 270.0 : 0.0;
-    parse_media_size(n["size"], w.img_size, w.img_h, w.img_fill);
-    w.img_max_h = num(n, "max_height", 0.0);
-    if (has(n, "fit") && !media::parse_fit(str(n, "fit"), w.img_fit))
-      ctx.warn("ari: " + type + " '" + label + "': fit: '" + str(n, "fit") +
-               "' is not contain, cover or fill — using contain");
-    // controls: false is a decorative picture (an avatar, a banner): it plays by itself, looping,
-    // silent, unless the document says otherwise.
-    w.controls = flag(n, "controls", true);
-    w.autoplay = flag(n, "autoplay", !w.controls);
-    w.loop = flag(n, "loop", !w.controls);
-    w.muted = flag(n, "muted", !w.controls);
-    if (has(n, "shape") && !media::parse_shape(str(n, "shape"), w.img_shape))
-      ctx.warn("ari: " + type + " '" + label + "': shape: '" + str(n, "shape") +
-               "' is not rect or circle — using rect");
-    w.media_status = str(n, "status");
-    w.fullscreen_control = flag(n, "fullscreen", false); // §5.13 a Full screen button
-    if (w.fullscreen_control && w.kind == Kind::Audio)
-      ctx.warn("ari: audio '" + label + "': fullscreen: is for a picture (image:, video:)");
-    w.badge = str(n, "badge"); // §5.11 a label over the picture
-    w.save_menu = flag(n, "save", true); // §5.29 false: no Save video... in its context menu
-    if (!w.badge.empty() && w.kind == Kind::Audio)
-      ctx.warn("ari: audio '" + label + "': badge: is for a picture (image:, video:)");
-    if (w.src.empty())
-      ctx.warn("ari: " + type + " '" + label + "' has no src: — it plays nothing");
-    return w;
-  }
-  if (type == "button") {
-    const std::string on = action(n);
-    if (on.empty())
-      ctx.warn("ari: button '" + label + "' has no on: action");
-    Widget b = button(label, on);
-    // §5.27 a picture in place of the label, and the pressed-in look of the chosen one
-    b.button_icon = str(n, "icon");
-    b.media_auth = str(n, "auth");
-    b.icon_size = static_cast<float>(std::max(0.0, num(n, "icon_size", 0.0)));
-    if (has(n, "selected")) {
-      const YAML::Node s = n["selected"];
-      const std::string v = s.IsScalar() ? s.Scalar() : std::string();
-      if (v == "true" || v == "yes" || v == "on")
-        b.selected = "true";
-      else if (v == "false" || v == "no" || v == "off")
-        b.selected = "false"; // one of a row, never the chosen one: drawn raised with the others
-      else if (v.empty())
-        b.selected.clear();
-      else if (v.front() == '(') // an expression, read each frame
-        b.selected = v;
-      else
-        ctx.warn("ari: button '" + label + "': selected: '" + v +
-                 "' is not true, false or an expression");
-    }
-    if (!b.button_icon.empty() && label.empty())
-      ctx.warn("ari: button with icon: has no label: it shows nothing where the picture can't");
-    return b;
-  }
-
-  if (!type.empty() && type != "group" && type != "panel") {
-    // A CUSTOM widget type (§ extensibility) — preserved as Kind::Custom carrying its
-    // props + children, for a registered emit fn (register_widget_type) to render.
-    // (No longer silently collapsed to an empty group.) An unregistered type draws a
-    // labelled placeholder at emit; validation still warns if it is a typo.
-    Widget c;
-    c.kind = Kind::Custom;
-    c.custom_type = type;
-    c.label = label;
-    c.bind = str(n, "bind");
-    c.on = action(n);
-    const YAML::Node kids = n["children"].IsDefined() ? n["children"] : n["items"];
-    c.children = parse_seq(ctx, kids);
-    c.props.kind = Value::Kind::Map;
-    if (n.IsMap())
-      for (const auto &kv : n) {
-        if (!kv.first.IsScalar())
-          continue;
-        const std::string key = kv.first.Scalar();
-        // known_widget_key already excludes "type"; do NOT also skip a prop whose name
-        // equals the type VALUE (e.g. `gauge: 0.8` on `type: gauge`) — that dropped
-        // real config. Matches the scene-node capture.
-        if (!known_widget_key(key))
-          c.props.entries.emplace_back(key, to_value(kv.second));
-      }
-    if (!has_widget_type(*ctx.app, type))
-      ctx.warn("ari: widget type '" + type +
-               "' has no registered handler (register_widget_type) — draws a placeholder");
-    return c;
-  }
-  // Here `type` is empty (no `type:` and no short-form key) or group/panel. A bare
-  // `{ children: [...] }` is a valid anonymous group; a map with some OTHER first key
-  // and no `type:` is a typo'd widget (e.g. `- frobnicate: ...`) — a custom widget is
-  // declared with `type:` (which returned a Kind::Custom above), so a lone unknown key
-  // is more likely a mistake.
-  if (type.empty() && !has(n, "children") && n.size() > 0) {
-    std::string first_key;
-    for (const auto &kv : n) {
-      first_key = kv.first.Scalar();
-      break;
-    }
-    ctx.warn("ari: unrecognized widget key '" + first_key +
-             "' — not a known widget type; loaded as an empty group");
-  }
-  Widget g = group(parse_seq(ctx, n["children"]));
-  g.layout = parse_layout(n["layout"]); // §3.0.3b: a group can be a grid / sized tracks
-  g.size = parse_size(n["size"]);
-  return g;
+  if (type == "menubar")
+    parse_menubar(ctx, n, w);
+  else if (type == "menu")
+    parse_menu(ctx, n, label, w);
+  else if (type == "tray_icon") // an icon at the menubar's right end
+    parse_tray_icon(ctx, n, label, w);
+  else if (type == "window" || type == "overlay")
+    parse_window(ctx, n, label, w);
+  else if (type == "tabs")
+    parse_tabs(ctx, n, label, w);
+  else if (parse_leaf(ctx, n, type, label, w))
+    return;
+  else if (!type.empty() && type != "group" && type != "panel")
+    parse_custom(ctx, n, type, label, w);
+  else
+    parse_group(ctx, n, type, w);
 }
 
 // Build the kind-specific widget, then attach the fields common to EVERY kind. Keeps
 // per-kind branches focused on their own params and guarantees a new shared field is
 // wired for all kinds at once. §4 read-lane: visible_when is a state_exec predicate the
 // Runtime re-evaluates each frame (empty = always visible).
-// True if any widget in the subtree (excluding the root) carries a `repeat`.
+// True if any widget in the subtree (excluding the root) carries a `repeat`. A loop over a list of
+// the widgets still to look in, not a call a level (§6.7).
 bool any_descendant_repeats(const Widget &w) {
-  for (const Widget &c : w.children) {
-    if (!c.repeat.empty() || any_descendant_repeats(c))
-      return true;
+  std::vector<const Widget *> todo{&w};
+  while (!todo.empty()) {
+    const Widget *at = todo.back();
+    todo.pop_back();
+    for (const Widget &c : at->children) {
+      if (!c.repeat.empty())
+        return true;
+      todo.push_back(&c);
+    }
   }
   return false;
 }
@@ -1940,79 +2255,240 @@ std::string start_maximized(Ctx &ctx, const YAML::Node &n, const std::string &la
   return std::string();
 }
 
-Widget parse_widget(Ctx &ctx, const YAML::Node &n) {
-  Widget w = parse_widget_impl(ctx, n);
-  // Assign each common field only when the node actually carries it. For a plain widget the
-  // node IS its own definition (so an absent key = the "" default, unchanged). But for an
-  // `include:` node, parse_widget_impl already returned the EXPANDED unit widget with these
-  // fields set from the TEMPLATE — an unconditional overwrite here would erase them (the
-  // include node has none). Present-guarding preserves the template's fields; an include site
-  // that DOES set one overrides for that instance.
-  if (n.IsMap()) {
-    // `id:` names any widget (the window branch reads it too): the stable identity a backend keys
-    // per-instance state on and the core persists view state under (tree.<id>.*). An include site
-    // may override the unit's.
-    if (has(n, "id"))
-      w.id = str(n, "id");
-    if (has(n, "visible_when"))
-      w.visible_when = str(n, "visible_when");
-    if (has(n, "enabled_when"))
-      w.enabled_when = str(n, "enabled_when");
-    if (has(n, "disabled_when"))
-      w.disabled_when = str(n, "disabled_when");
-    if (has(n, "tooltip"))
-      w.tooltip = str(n, "tooltip"); // literal, or a computed expr (starts with '(')
-    if (has(n, "autofocus"))
-      w.autofocus = flag(n, "autofocus", false);
-    if (has(n, "repeat"))
-      w.repeat = str(n, "repeat"); // §3: a count expression -> emit this template N times
-    if (has(n, "background"))
-      parse_background(ctx, n["background"], w);
-    // §5.26 a colour, written here or computed each frame. The other kinds that take a `color:`
-    // key (the colour picker, whose label it is, a tf_editor, a custom type) read their own.
-    if (has(n, "color") &&
-        (w.kind == Kind::Text || w.kind == Kind::Radio || w.kind == Kind::Button ||
-         w.kind == Kind::MenuItemAction || w.kind == Kind::MenuItemToggle))
-      parse_item_color(ctx, n["color"], w);
-    if (has(n, "on_click"))
-      w.on_click = str(n, "on_click"); // §4.6 widget-level click handler (any kind); like `on`
-    if (has(n, "on_hover"))
-      w.on_hover = str(n, "on_hover"); // §4.6 continuous: fires each frame the item is hovered
-    if (has(n, "on_drag"))
-      w.on_drag = str(n, "on_drag"); // §4.6 continuous: fires each frame the item is dragged
-    if (has(n, "on_drag_start"))
-      w.on_drag_start = str(n, "on_drag_start"); // §4.6 edge: gesture begin (item activated)
-    if (has(n, "on_drag_end"))
-      w.on_drag_end = str(n, "on_drag_end"); // §4.6 edge: gesture end (item deactivated)
-    if (has(n, "on_hover_end"))
-      w.on_hover_end = str(n, "on_hover_end"); // §4.6 edge: the pointer left the item
-    if (has(n, "hover")) { // §4.6 a group drawn lit while the pointer is over it
-      const std::string h = str(n, "hover");
-      if (h == "highlight")
-        w.hover_highlight = true;
-      else if (h != "none")
-        ctx.warn("ari: hover: '" + h + "' is not highlight or none — ignored");
-    }
-    // §5.30 a right-click menu over a window, a group or a viewport (a scene view: any custom
-    // widget is one item, and a viewport adds its pick to the menu's event).
-    if (has(n, "context_menu")) {
-      if (w.kind == Kind::Window || w.kind == Kind::Group || w.kind == Kind::Custom)
-        parse_context_menu(ctx, n["context_menu"], w,
-                           "'" + (w.id.empty() ? w.label : w.id) + "': ");
-      else
-        ctx.warn("ari: '" + (w.id.empty() ? w.label : w.id) +
-                 "': context_menu: goes on a window, a group, a viewport or the document — "
-                 "ignored here");
-    }
+// The keys any widget takes, from `n` onto `w` after its kind's own; a right-click menu is
+// widget_context_menu's. Each is assigned only when the node actually carries it. For a plain
+// widget the node IS its own definition (so an absent key = the "" default, unchanged). But for an
+// `include:` node, parse_widget_impl already built the EXPANDED unit widget with these
+// fields set from the TEMPLATE — an unconditional overwrite here would erase them (the
+// include node has none). Present-guarding preserves the template's fields; an include site
+// that DOES set one overrides for that instance.
+CVC_ARI_NOINLINE void common_keys(Ctx &ctx, const YAML::Node &n, Widget &w) {
+  // `id:` names any widget (the window branch reads it too): the stable identity a backend keys
+  // per-instance state on and the core persists view state under (tree.<id>.*). An include site
+  // may override the unit's.
+  if (has(n, "id"))
+    w.id = str(n, "id");
+  if (has(n, "visible_when"))
+    w.visible_when = str(n, "visible_when");
+  if (has(n, "enabled_when"))
+    w.enabled_when = str(n, "enabled_when");
+  if (has(n, "disabled_when"))
+    w.disabled_when = str(n, "disabled_when");
+  if (has(n, "tooltip"))
+    w.tooltip = str(n, "tooltip"); // literal, or a computed expr (starts with '(')
+  if (has(n, "autofocus"))
+    w.autofocus = flag(n, "autofocus", false);
+  if (has(n, "repeat"))
+    w.repeat = str(n, "repeat"); // §3: a count expression -> emit this template N times
+  if (has(n, "background"))
+    parse_background(ctx, n["background"], w);
+  // §5.26 a colour, written here or computed each frame. The other kinds that take a `color:`
+  // key (the colour picker, whose label it is, a tf_editor, a custom type) read their own.
+  if (has(n, "color") && (w.kind == Kind::Text || w.kind == Kind::Radio || w.kind == Kind::Button ||
+                          w.kind == Kind::MenuItemAction || w.kind == Kind::MenuItemToggle))
+    parse_item_color(ctx, n["color"], w);
+  if (has(n, "on_click"))
+    w.on_click = str(n, "on_click"); // §4.6 widget-level click handler (any kind); like `on`
+  if (has(n, "on_hover"))
+    w.on_hover = str(n, "on_hover"); // §4.6 continuous: fires each frame the item is hovered
+  if (has(n, "on_drag"))
+    w.on_drag = str(n, "on_drag"); // §4.6 continuous: fires each frame the item is dragged
+  if (has(n, "on_drag_start"))
+    w.on_drag_start = str(n, "on_drag_start"); // §4.6 edge: gesture begin (item activated)
+  if (has(n, "on_drag_end"))
+    w.on_drag_end = str(n, "on_drag_end"); // §4.6 edge: gesture end (item deactivated)
+  if (has(n, "on_hover_end"))
+    w.on_hover_end = str(n, "on_hover_end"); // §4.6 edge: the pointer left the item
+  if (has(n, "hover")) {                     // §4.6 a group drawn lit while the pointer is over it
+    const std::string h = str(n, "hover");
+    if (h == "highlight")
+      w.hover_highlight = true;
+    else if (h != "none")
+      ctx.warn("ari: hover: '" + h + "' is not highlight or none — ignored");
   }
-  // Nested repeat is single-level: only one `{i}` token exists, so an inner repeat cannot
-  // reference the outer index. Surface it rather than let it silently alias state.
-  // A repeated mount is not nested: the module's repeats are its own, at its instance's
-  // sub-prefix, so its {i} never needed the outer one.
+}
+
+// §5.30 a right-click menu over a window, a group or a viewport (a scene view: any custom
+// widget is one item, and a viewport adds its pick to the menu's event).
+CVC_ARI_NOINLINE void widget_context_menu(Ctx &ctx, const YAML::Node &n, Widget &w) {
+  if (w.kind == Kind::Window || w.kind == Kind::Group || w.kind == Kind::Custom)
+    parse_context_menu(ctx, n["context_menu"], w, "'" + (w.id.empty() ? w.label : w.id) + "': ");
+  else
+    ctx.warn("ari: '" + (w.id.empty() ? w.label : w.id) +
+             "': context_menu: goes on a window, a group, a viewport or the document — "
+             "ignored here");
+}
+
+// Nested repeat is single-level: only one `{i}` token exists, so an inner repeat cannot
+// reference the outer index. Surface it rather than let it silently alias state.
+// A repeated mount is not nested: the module's repeats are its own, at its instance's
+// sub-prefix, so its {i} never needed the outer one.
+CVC_ARI_NOINLINE void warn_nested_repeat(Ctx &ctx, const Widget &w) {
   if (!w.repeat.empty() && w.scope.empty() && any_descendant_repeats(w))
     ctx.warn("ari: nested 'repeat' is not supported (a single {i} index) — the inner repeat "
              "cannot see the outer index");
-  return w;
+}
+
+// §6.7 the widget the parse is in: what to say where the nesting limit stops it.
+struct Place {
+  std::string source; // the file ("" for a document given as a string)
+  YAML::Mark mark = YAML::Mark::null_mark();
+};
+
+// The keys and indices from `from` down to `to`, a widget a few levels inside it (children: 3,
+// context_menu: items: 0), onto `out`: false when it is not there.
+bool tokens_to(const YAML::Node &from, const YAML::Node &to, std::vector<std::string> &out,
+               int levels = 3) {
+  if (from.is(to))
+    return true;
+  if (levels == 0)
+    return false;
+  if (from.IsMap()) {
+    for (const auto &kv : from) {
+      if (!kv.first.IsScalar())
+        continue;
+      out.push_back(kv.first.Scalar());
+      if (tokens_to(kv.second, to, out, levels - 1))
+        return true;
+      out.pop_back();
+    }
+  } else if (from.IsSequence()) {
+    for (std::size_t i = 0; i < from.size(); ++i) {
+      out.push_back(std::to_string(i));
+      if (tokens_to(from[i], to, out, levels - 1))
+        return true;
+      out.pop_back();
+    }
+  }
+  return false;
+}
+
+// Where the widget or scene node at `path[i]` is written: its own position, in its Ctx's file; or,
+// in an include:'s expansion (a copy, whose positions are all line 1, column 1), the same place in
+// the unit, in the unit's file (the unit's top where the include fills slots, which moves the
+// unit's items); a scene node in a use:'s expansion, the same place in the prototype. It is in an
+// expansion when an include: (or use:) entry is above it in the same document: a load: entry
+// between starts a document of its own, read from its file.
+Place place_of(const std::vector<Nesting::Level> &path, std::size_t i) {
+  const Nesting::Level &at = path[i];
+  for (std::size_t top = i; top > 0; --top) {
+    const Nesting::Level &site = path[top - 1];
+    if (site.ctx != at.ctx)
+      break; // the load: entry of the fragment `at` is in
+    if (!site.node->IsMap())
+      continue;
+    // A scene node's use: names one of the document's prototypes (only scene nodes are parsed
+    // once they are collected, so a widget's path never finds one).
+    const bool use = has(*site.node, "use") && site.ctx->prototypes.count(str(*site.node, "use"));
+    if (!use && !has(*site.node, "include"))
+      continue;
+    const std::string name = str(*site.node, use ? "use" : "include");
+    const std::map<std::string, YAML::Node> &templates =
+        use ? site.ctx->prototypes : site.ctx->units;
+    const auto unit = templates.find(name);
+    if (unit == templates.end()) // (it expanded, so it is there)
+      return {site.ctx->source, YAML::Mark::null_mark()};
+    const auto file = use ? site.ctx->unit_sources.end() : site.ctx->unit_sources.find(name);
+    Place p{file != site.ctx->unit_sources.end() ? file->second : site.ctx->source,
+            unit->second.Mark()};
+    if (!use && has(*site.node, "slots"))
+      return p;
+    std::vector<std::string> tokens;
+    for (std::size_t k = top; k < i; ++k)
+      if (!tokens_to(*path[k].node, *path[k + 1].node, tokens))
+        return p;
+    if (const YAML::Mark m = mark_at(unit->second, tokens, false); !m.is_null())
+      p.mark = m;
+    return p;
+  }
+  return {at.ctx->source, at.node->Mark()};
+}
+
+// `p` as a compiler writes a place: file:line:column ("line L:C" for a string), or "".
+std::string place_text(const Place &p) {
+  if (p.mark.is_null())
+    return p.source;
+  const std::string at = std::to_string(p.mark.line + 1) + ":" + std::to_string(p.mark.column + 1);
+  return p.source.empty() ? "line " + at : p.source + ":" + at;
+}
+
+// §6.7 refuse `n`, the first widget (or with `scene`, scene node) past the nesting limit: the parse
+// stops, and the load fails with an error at `n`, which counts the include:s and load:s (a scene
+// node's use:s) on the way down and names each that goes into another file.
+CVC_ARI_NOINLINE void refuse_nesting(Ctx &ctx, const YAML::Node &n, bool scene = false) {
+  Nesting &nest = *ctx.nesting;
+  nest.path.push_back({&n, &ctx});
+  const Place deepest = place_of(nest.path, nest.path.size() - 1);
+  std::size_t includes = 0, loads = 0, uses = 0;
+  std::string way;
+  for (std::size_t k = 0; scene && k + 1 < nest.path.size(); ++k)
+    if (nest.path[k].node->IsMap() && has(*nest.path[k].node, "use"))
+      ++uses;
+  for (std::size_t k = 0; !scene && k + 1 < nest.path.size(); ++k) {
+    const YAML::Node &e = *nest.path[k].node;
+    const bool include = e.IsMap() && has(e, "include"), load = e.IsMap() && has(e, "load");
+    if (!include && !load)
+      continue;
+    ++(include ? includes : loads);
+    const Place site = place_of(nest.path, k);
+    std::string into = nest.path[k + 1].ctx->source; // a fragment's file
+    if (include) {
+      const Ctx &c = *nest.path[k].ctx;
+      const auto file = c.unit_sources.find(str(e, "include"));
+      into = file != c.unit_sources.end() ? file->second : c.source;
+    }
+    if (into == site.source)
+      continue;
+    way += (way.empty() ? "" : ", ") + place_text(site) + " " + (include ? "include: " : "load: ") +
+           str(e, include ? "include" : "load") + (include ? " (in " + into + ")" : "");
+  }
+  nest.path.pop_back();
+  const std::string at = place_text(deepest);
+  if (scene)
+    nest.error = "ari: " + (at.empty() ? "" : at + ": ") + "a scene node nested deeper than " +
+                 std::to_string(nest.limit) +
+                 " levels, the most a document may (each scene node and use: a level; "
+                 "docs/ARIADNE.md §6.7), with " +
+                 std::to_string(uses) + " use: on the way";
+  else
+    nest.error = "ari: " + (at.empty() ? "" : at + ": ") + "a widget nested deeper than " +
+                 std::to_string(nest.limit) +
+                 " levels, the most a document may (each widget, include: and load: a level; "
+                 "docs/ARIADNE.md §6.7), with " +
+                 std::to_string(includes) + " include: and " + std::to_string(loads) +
+                 " load: on the way" + (way.empty() ? "" : ", by way of " + way);
+  nest.source = deepest.source;
+  nest.line = deepest.mark.is_null() ? 0 : deepest.mark.line + 1;
+  nest.column = deepest.mark.is_null() ? 0 : deepest.mark.column + 1;
+  nest.refused = true;
+}
+
+// One widget, built in `w`, then the keys any widget takes. A level of the document (§6.7): past
+// the limit it is refused, and the parse stops.
+void parse_widget(Ctx &ctx, const YAML::Node &n, Widget &w) {
+  if (!ctx.nesting)
+    ctx.nesting = std::make_shared<Nesting>();
+  Nesting &nest = *ctx.nesting;
+  if (nest.refused)
+    return;
+  if (nest.path.size() >= nest.limit) {
+    refuse_nesting(ctx, n);
+    return;
+  }
+  nest.path.push_back({&n, &ctx});
+  struct Leave {
+    std::vector<Nesting::Level> &path;
+    ~Leave() { path.pop_back(); }
+  } leave{nest.path};
+  parse_widget_impl(ctx, n, w);
+  if (nest.refused)
+    return;
+  if (n.IsMap()) {
+    common_keys(ctx, n, w);
+    if (has(n, "context_menu"))
+      widget_context_menu(ctx, n, w);
+  }
+  warn_nested_repeat(ctx, w);
 }
 
 // §12: merge a `units:` map (name -> raw widget template) into the unit table. Stored RAW so
@@ -2408,34 +2884,38 @@ YAML::Node instantiate_unit(Ctx &ctx, const YAML::Node &unit, const YAML::Node &
   return inst;
 }
 
-// §12: expand `include: <unit>` — instantiate a units: template with its `args:` substituted.
-Widget expand_include(Ctx &ctx, const YAML::Node &n) {
-  const std::string name = str(n, "include");
+// §12 the unit `include: <name>` names, as a widget to parse, into `inst`: a clone of its template
+// with its `args:` substituted and its slots filled, checked against the schema. False (with a
+// warning) when there is no such unit, or it is already being expanded.
+CVC_ARI_NOINLINE bool instantiate_include(Ctx &ctx, const YAML::Node &n, const std::string &name,
+                                          YAML::Node &inst) {
   const auto it = ctx.units.find(name);
   if (it == ctx.units.end()) {
     ctx.warn("ari: include: unknown unit '" + name + "' (no such units: entry)");
-    return group({});
+    return false;
   }
   // Refuse to re-enter a unit already on the expansion stack: this catches direct/indirect
   // recursion (a→b→a) AND a fan-out bomb (a unit including itself N times) — a depth cap alone
   // would let the expansion count explode exponentially before tripping.
   if (!ctx.expanding.insert(name).second) {
     ctx.warn("ari: include: recursive unit '" + name + "' — expansion refused");
-    return group({});
+    return false;
   }
-  const YAML::Node inst = instantiate_unit(ctx, it->second, n["args"], n["slots"], name);
+  inst.reset(instantiate_unit(ctx, it->second, n["args"], n["slots"], name));
   // §14 the expansion is a widget: checked as one. A clone has no positions, so they are looked up
   // in the template (in the unit's own file); what that cannot place, at the include site.
   const auto src = ctx.unit_sources.find(name);
   check_schema(ctx, inst, /*widget=*/true, src != ctx.unit_sources.end() ? src->second : ctx.source,
                "include " + name, it->second, n.Mark(), ctx.source);
-  Widget w = parse_widget(ctx, inst);
-  ctx.expanding.erase(name);
-  // §12/§3.0.3b geometry override at the include site: a window `include:` may carry its own
-  // pos/size/layout/frame to place and size the shared panel WITHOUT forking the unit — so a demo
-  // arranges reusable panels (e.g. tile stage_lighting / camera_controls / sim_transport) while the
-  // component stays layout-agnostic. Applied only when the instantiated root is a window/overlay
-  // (the panel case); each key overrides only if present, so an unspecified axis keeps the unit's.
+  return true;
+}
+
+// §12/§3.0.3b geometry override at the include site: a window `include:` may carry its own
+// pos/size/layout/frame to place and size the shared panel WITHOUT forking the unit — so a demo
+// arranges reusable panels (e.g. tile stage_lighting / camera_controls / sim_transport) while the
+// component stays layout-agnostic. Applied only when the instantiated root is a window/overlay
+// (the panel case); each key overrides only if present, so an unspecified axis keeps the unit's.
+CVC_ARI_NOINLINE void include_site_keys(Ctx &ctx, const YAML::Node &n, Widget &w) {
   if (w.kind == Kind::Window) {
     if (n["pos"])
       parse_pos(n, w);
@@ -2454,7 +2934,18 @@ Widget expand_include(Ctx &ctx, const YAML::Node &n) {
     if (n["resizable"])
       w.resizable = flag(n, "resizable", true);
   }
-  return w;
+}
+
+// §12: expand `include: <unit>` — instantiate a units: template with its `args:` substituted, and
+// parse it in place of the include: entry, a level below it (§6.7).
+void expand_include(Ctx &ctx, const YAML::Node &n, Widget &w) {
+  const std::string name = str(n, "include");
+  YAML::Node inst;
+  if (!instantiate_include(ctx, n, name, inst))
+    return; // an empty group
+  parse_widget(ctx, inst, w);
+  ctx.expanding.erase(name);
+  include_site_keys(ctx, n, w);
 }
 
 // §12 load: mount depth cap — a fragment that loads a fragment that loads … this deep is
@@ -2505,51 +2996,58 @@ std::string default_mount_id(const std::string &uri) {
   return s.empty() ? "mount" : s;
 }
 
-// §12: mount a `load: <uri>` fragment — resolve + parse another .ari as an ISOLATED module and
-// return a scoped wrapper Group. The wrapper carries `scope = includes.<as>` (§12.1), so the
-// fragment's binds, reactive predicates, and (later) init: resolve under that sub-prefix; the
-// mount widget's OWN reactive fields (from this load: block, applied by parse_widget) stay in
-// the parent scope. `args:` substitute before parse like include:. The fragment parses in a
-// FRESH sub-Ctx (its units are its own, not the host's), based at its own directory so ITS
-// relative imports/loads resolve there. A resolved-URI cycle guard + depth cap stop recursion.
-Widget expand_load(Ctx &ctx, const YAML::Node &n) {
-  const std::string uri = str(n, "load");
-  if (uri.empty()) {
-    ctx.warn("ari: load: entry has no URI");
-    return group({});
-  }
+// §12 the fragment `load: <uri>` names, read: its URI, its canonical identity, and its YAML with
+// the mount's `args:` substituted, checked against the schema. False (with a warning) when it is
+// not mounted: no URI, not resolved, a cycle, past the depth or count caps, or YAML that does not
+// parse. A caller that asks (load_mount, through expand_load) is told in `outcome` why, where the
+// bytes came from and whether the fragment has a scene, and a fragment whose min_libcvc this build
+// is older than is not mounted.
+CVC_ARI_NOINLINE bool read_fragment(Ctx &ctx, const YAML::Node &n, std::string &uri,
+                                    std::string &canonical, YAML::Node &frag,
+                                    LoadOutcome *outcome) {
+  // A failure warns, as it always has, and tells a caller that asks why (load_mount).
+  const auto fail = [&](const std::string &why) {
+    ctx.warn(why);
+    if (outcome)
+      outcome->error = why;
+    return false;
+  };
+  uri = str(n, "load");
+  if (uri.empty())
+    return fail("ari: load: entry has no URI");
   const UriResult res = resolve(*ctx.app, uri, ctx.base_dir);
-  if (!res.ok) {
-    ctx.warn("ari: load '" + uri + "' could not be resolved: " + res.error);
-    return group({});
-  }
+  if (!res.ok)
+    return fail("ari: load '" + uri + "' could not be resolved: " + res.error);
+  if (outcome)
+    outcome->canonical = res.canonical;
   note_source(ctx, res.canonical); // §12.5 watch this mounted fragment for hot-reload
-  if (ctx.mounting.count(res.canonical)) {
-    ctx.warn("ari: load: mount cycle on '" + res.canonical + "' — refused");
-    return group({});
-  }
-  if (ctx.mounting.size() >= kMaxMountDepth) {
-    ctx.warn("ari: load: mount chain exceeds the maximum depth (" + std::to_string(kMaxMountDepth) +
-             ") — refused");
-    return group({});
-  }
+  if (ctx.mounting.count(res.canonical))
+    return fail("ari: load: mount cycle on '" + res.canonical + "' — refused");
+  if (ctx.mounting.size() >= kMaxMountDepth)
+    return fail("ari: load: mount chain exceeds the maximum depth (" +
+                std::to_string(kMaxMountDepth) + ") — refused");
   // Aggregate (document-wide) mount cap: the depth guard alone lets a BRANCHING mount graph fan
   // out K^depth (the cycle guard only blocks re-mounting an ancestor, not sibling reuse). Count
   // total mounts on a shared counter and refuse past the cap — the load: analogue of kMaxImports.
   if (!ctx.mount_count)
     ctx.mount_count = std::make_shared<int>(0);
-  if (*ctx.mount_count >= kMaxMounts) {
-    ctx.warn("ari: load: mount limit reached (" + std::to_string(kMaxMounts) +
-             " fragments) — refused");
-    return group({});
-  }
+  if (*ctx.mount_count >= kMaxMounts)
+    return fail("ari: load: mount limit reached (" + std::to_string(kMaxMounts) +
+                " fragments) — refused");
   ++*ctx.mount_count;
-  YAML::Node frag;
   try {
     frag = YAML::Load(res.content);
   } catch (const std::exception &e) {
-    ctx.warn("ari: load '" + uri + "' parse error: " + e.what());
-    return group({});
+    return fail("ari: load '" + uri + "' parse error: " + e.what());
+  }
+  if (outcome) {
+    if (frag.IsMap() && (frag["scene"] || frag["scenes"]))
+      outcome->has_scene = true;
+    // A mount at run time keeps the min_libcvc gate a top-level document has (§3.1a).
+    const Meta m = frag.IsMap() ? parse_meta(frag["meta"]) : Meta{};
+    if (!m.min_libcvc.empty() && !version_at_least(libcvc_version(), m.min_libcvc))
+      return fail("ari: load '" + uri + "' requires libcvc >= " + m.min_libcvc +
+                  " but this build is " + libcvc_version());
   }
   // Args substitute into the cloned fragment before parse (same single-pass rule as include:).
   std::map<std::string, std::string> args;
@@ -2561,18 +3059,25 @@ Widget expand_load(Ctx &ctx, const YAML::Node &n) {
   substitute_node(frag, args);
   // §14 a fragment is a document: its structure is checked, as its args made it.
   check_schema(ctx, frag, /*widget=*/false, res.canonical, "", frag, YAML::Mark::null_mark(), "");
+  canonical = res.canonical;
+  return true;
+}
+
+// §12 the ISOLATED sub-context fragment `frag` (at `canonical`) parses in, `sub`.
+CVC_ARI_NOINLINE void open_mount(Ctx &ctx, const YAML::Node &n, const std::string &uri,
+                                 const std::string &canonical, const YAML::Node &frag, Ctx &sub) {
   // Parse the fragment in an ISOLATED sub-context: fresh units (module boundary), based at the
   // fragment's own directory, carrying the mount stack (with this URI pushed) + the shared mount
   // counter for the cycle/depth/aggregate guards. Its warnings bubble up to the host document.
-  Ctx sub;
   sub.app = ctx.app;
-  sub.base_dir = std::filesystem::path(res.canonical).parent_path().string();
+  sub.base_dir = std::filesystem::path(canonical).parent_path().string();
   sub.mounting = ctx.mounting;
-  sub.mounting.insert(res.canonical);
+  sub.mounting.insert(canonical);
   sub.mount_count = ctx.mount_count;
+  sub.nesting = ctx.nesting; // §6.7 its widgets go on below the load: entry
   sub.sources = ctx.sources; // §12.5 the fragment's own imports/mounts feed the same watch list
   sub.source_stamps = ctx.source_stamps;
-  sub.source = res.canonical; // §14 its include:s' issues name it, and add to the one list
+  sub.source = canonical; // §14 its include:s' issues name it, and add to the one list
   sub.schema_issues = ctx.schema_issues;
   // §6.6: the functions the mount grants come first, then the module's imports' and its own.
   sub.functions = grant_functions(ctx, n["functions"], uri);
@@ -2580,9 +3085,15 @@ Widget expand_load(Ctx &ctx, const YAML::Node &n) {
     sub.granted.insert(f.name);
   parse_units(sub, frag); // the fragment's OWN import:/units:
   parse_own_functions(sub, frag, "load '" + uri + "': ");
-  Widget frag_root = parse_document(sub, frag);
-  for (const std::string &w : sub.warnings)
-    ctx.warn(w);
+}
+
+// §12 the mount, `w`, around its parsed fragment (its child): its id, scope and name, the scripts
+// and requirements the fragment carries for the Runtime, the holes and channels the mount grants,
+// and the needs the fragment declares. The fragment's warnings go to the host document's.
+CVC_ARI_NOINLINE void finish_mount(Ctx &ctx, const YAML::Node &n, const std::string &uri,
+                                   const YAML::Node &frag, Ctx &sub, Widget &w) {
+  for (const std::string &m : sub.warnings)
+    ctx.warn(m);
   // Mount id: explicit `as:`, else derived from the resource; sanitized, and disambiguated
   // against sibling mounts at this level so two fragments never collide onto one sub-prefix.
   // Reserved only NOW — after the fragment has actually loaded+parsed — so a mount that failed
@@ -2598,44 +3109,44 @@ Widget expand_load(Ctx &ctx, const YAML::Node &n) {
     ctx.warn("ari: load: duplicate mount id '" + as + "' — using '" + uniq + "'");
     as = uniq;
   }
-  // The wrapper carries the scope; the fragment is its child so the fragment's own root reactive
-  // fields evaluate at the sub-prefix, while the parent's load:-block fields land on the wrapper.
-  Widget wrapper = group({std::move(frag_root)});
-  wrapper.scope = "includes." + as;
+  w.scope = "includes." + as;
   // §5.25 its name as an application (its menubar's menu in the outer bar): its meta.name, else
   // the mount id.
-  wrapper.app_name = as;
+  w.app_name = as;
   if (frag.IsMap() && frag["meta"] && frag["meta"].IsMap() && frag["meta"]["name"] &&
       frag["meta"]["name"].IsScalar() && !frag["meta"]["name"].Scalar().empty())
-    wrapper.app_name = frag["meta"]["name"].Scalar();
+    w.app_name = frag["meta"]["name"].Scalar();
   // ... and the mount's own name for it, worked out each frame in the loader's scope (a key or an
   // expression; `{i}` its instance under repeat:), which names it when not empty.
   if (has(n, "name"))
-    wrapper.app_name_bind = str(n, "name");
-  wrapper.functions = make_function_scope(std::move(sub.functions)); // only these, even if none
+    w.app_name_bind = str(n, "name");
+  w.functions = make_function_scope(std::move(sub.functions)); // only these, even if none
   // §12: carry the fragment's own init: so the Runtime can run it once at the sub-prefix (the
   // loader is state-free; it captures the script, the Runtime executes it). A non-scalar init: is
   // a malformed script — warn (matching the top-level document path), never silently drop it.
   if (frag.IsMap() && frag["init"]) {
     if (frag["init"].IsScalar())
-      wrapper.init_script = frag["init"].Scalar();
+      w.init_script = frag["init"].Scalar();
     else
       ctx.warn("ari: load '" + uri +
                "': the fragment's init: must be a scalar state_exec script string — ignored");
   }
+  // Its state: too (§5.3), written at the sub-prefix just before that init: runs.
+  if (frag.IsMap())
+    w.state_seeds = parse_state(ctx, frag["state"], "load '" + uri + "': ");
   // Its on_tick: too, which the Runtime runs as the mount's own tick resident. The document-level
   // input lanes stay the document's: a module reacts to its own widgets, and the parent passes on
   // what else it needs through a link: hole (docs/ARIADNE.md §6.3).
   if (frag.IsMap() && frag["on_tick"]) {
     if (frag["on_tick"].IsScalar())
-      wrapper.tick_script = frag["on_tick"].Scalar();
+      w.tick_script = frag["on_tick"].Scalar();
     else
       ctx.warn("ari: load '" + uri +
                "': the fragment's on_tick: must be a scalar state_exec script string — ignored");
   }
   // §7.6 and its requires:, which AppRuntime checks against the host like the document's.
   if (frag.IsMap())
-    wrapper.requirements = parse_requires(ctx, frag["requires"], "load '" + uri + "': ");
+    w.requirements = parse_requires(ctx, frag["requires"], "load '" + uri + "': ");
   for (const char *lane : {"on_key", "on_pointer", "on_signal"})
     if (frag.IsMap() && frag[lane])
       ctx.warn("ari: load '" + uri + "': the fragment's " + lane +
@@ -2654,7 +3165,7 @@ Widget expand_load(Ctx &ctx, const YAML::Node &n) {
              "grant them with link: {args: {to: args, mode: ro}}");
   // §12 link: parent-scope holes — each entry becomes a transparent link node the Runtime plants
   // inside the mount's sub-prefix (created there, not here — the loader is state-free). Value form
-  // `name: target` (rw); map form `name: { to: target, mode: ro|rw }`.
+  // `name: target` (rw); map form `name: { to: target, mode: ro|rw }` (no mode: ro).
   if (const YAML::Node lk = n["link"]; lk && lk.IsMap()) {
     for (const auto &kv : lk) {
       if (!kv.first.IsScalar())
@@ -2668,7 +3179,7 @@ Widget expand_load(Ctx &ctx, const YAML::Node &n) {
         // Fail CLOSED: only the exact token "rw" (case-insensitive) is writable; a missing /
         // mistyped mode is treated as read-only, and an unrecognized one warns — a security
         // field must never fail open (a typo silently granting write).
-        std::string mode = str(v, "mode", "rw");
+        std::string mode = str(v, "mode", "ro");
         std::transform(mode.begin(), mode.end(), mode.begin(),
                        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
         h.writable = (mode == "rw");
@@ -2688,14 +3199,14 @@ Widget expand_load(Ctx &ctx, const YAML::Node &n) {
                  "' must not start with '/' (it would escape the mount) — skipped");
         continue;
       }
-      wrapper.links.push_back(std::move(h));
+      w.links.push_back(std::move(h));
     }
   }
   // §12 channels: grant — the messaging analogue of link:. Each entry grants the mounted child a
   // channel its parent exposes; it LOWERS into a transparent-link hole under the reserved
   // `channels.` subtree, so wire_holes plants it and intrinsics.cpp's resolve_channel follows it (a
   // granted channel resolves to the parent's key). Value form `local: parent` (rw); map form
-  // `local: { to: parent, mode: ro|rw }`. Fail-closed on mode, like link:.
+  // `local: { to: parent, mode: ro|rw }`. Fail-closed on mode, like link: (no mode: ro).
   if (const YAML::Node ch = n["channels"]; ch && ch.IsMap()) {
     for (const auto &kv : ch) {
       if (!kv.first.IsScalar())
@@ -2707,7 +3218,7 @@ Widget expand_load(Ctx &ctx, const YAML::Node &n) {
         target = v.Scalar();
       } else if (v.IsMap()) {
         target = str(v, "to");
-        std::string mode = str(v, "mode", "rw");
+        std::string mode = str(v, "mode", "ro");
         std::transform(mode.begin(), mode.end(), mode.begin(),
                        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
         writable = (mode == "rw");
@@ -2728,7 +3239,7 @@ Widget expand_load(Ctx &ctx, const YAML::Node &n) {
       h.name = "channels." + local;    // planted inside the mount's own channels. subtree
       h.target = "channels." + target; // resolved against the PARENT scope by wire_holes
       h.writable = writable;
-      wrapper.links.push_back(std::move(h));
+      w.links.push_back(std::move(h));
     }
   }
   // §12 needs: the fragment can DECLARE the hole names it expects the mount to grant (a scalar or
@@ -2745,7 +3256,7 @@ Widget expand_load(Ctx &ctx, const YAML::Node &n) {
           if (nn.IsScalar())
             need_names.push_back(nn.Scalar());
       for (const std::string &nm : need_names) {
-        const bool granted = std::any_of(wrapper.links.begin(), wrapper.links.end(),
+        const bool granted = std::any_of(w.links.begin(), w.links.end(),
                                          [&](const LinkHole &h) { return h.name == nm; });
         if (!granted)
           ctx.warn("ari: load '" + uri + "': fragment needs link '" + nm +
@@ -2753,52 +3264,110 @@ Widget expand_load(Ctx &ctx, const YAML::Node &n) {
       }
     }
   }
-  return wrapper;
 }
 
-Widget parse_document(Ctx &ctx, const YAML::Node &doc) {
-  std::vector<Widget> roots;
-  if (doc.IsSequence()) {
-    roots = parse_seq(ctx, doc);
-  } else if (doc.IsMap()) {
-    if (doc["menubar"].IsDefined()) {
-      Widget mb;
-      mb.kind = Kind::Menubar;
-      mb.children = parse_seq(ctx, doc["menubar"]);
-      mb.collapse = menu_collapse_setting(ctx, doc["menu_collapse"]); // §5.23
-      roots.push_back(std::move(mb));
-    }
-    for (const char *k : {"windows", "overlays"})
-      if (doc[k].IsDefined())
-        for (Widget &w : parse_seq(ctx, doc[k]))
-          roots.push_back(std::move(w));
-    const YAML::Node r = doc["root"].IsDefined() ? doc["root"] : doc["children"];
-    if (r.IsDefined())
-      for (Widget &w : parse_seq(ctx, r))
-        roots.push_back(std::move(w));
-    // §5.9: `windows_menu: false` turns the built-in Windows menu off; a string renames it.
-    const YAML::Node wm = doc["windows_menu"];
-    if (wm.IsDefined() && wm.IsScalar())
-      roots.push_back(windows_menu_setting(wm.Scalar()));
-    // §5.22: `clock: true|false` shows the tray's clock or not, whatever the host's default.
-    if (doc["clock"].IsDefined())
-      roots.push_back(tray_clock(flag(doc, "clock")));
-    // §5.24: `notifications: true|false` shows the tray's bell or not, whatever the host's default;
-    // `always` shows it with an empty feed too.
-    if (doc["notifications"].IsDefined()) {
-      const YAML::Node nv = doc["notifications"];
-      if (nv.IsScalar() && nv.Scalar() == "always") {
-        Widget bell = tray_bell(true);
-        bell.bell_always = true;
-        roots.push_back(std::move(bell));
-      } else {
-        roots.push_back(tray_bell(flag(doc, "notifications")));
-      }
-    }
-  } else {
-    ctx.warn("ari: document root is neither a map nor a sequence — nothing to load");
+// docs/roadmap/ARIADNE_SHELL.md 4.2: `mounts: <state key>` — one isolated mount per child of the
+// key, which the Runtime loads when the child appears (load_mount, through its host's loader) and
+// frees when it goes. The loader reads only the slot: `allow:` and `catalog:`, each a URI prefix,
+// a list of them, or `{ bind: <key> }`, and the document's directory, against which the entries'
+// relative URIs resolve. Built in `w`, as a widget is.
+void parse_mounts(Ctx &ctx, const YAML::Node &n, Widget &w) {
+  w.kind = Kind::Mounts;
+  w.bind = str(n, "mounts");
+  if (w.bind.empty() || w.bind.front() == '(') { // a key, not an expression
+    ctx.warn("ari: mounts: needs a state key (mounts: shell.apps) — nothing is mounted");
+    w.bind.clear();
   }
-  return group(std::move(roots));
+  const auto uris = [&](const char *key, std::vector<std::string> &list, std::string &bind) {
+    const YAML::Node v = n[key];
+    if (!v)
+      return;
+    if (v.IsScalar()) {
+      list.push_back(v.Scalar());
+    } else if (v.IsSequence()) {
+      for (const YAML::Node &e : v)
+        if (e.IsScalar())
+          list.push_back(e.Scalar());
+    } else if (v.IsMap() && v["bind"] && v["bind"].IsScalar()) {
+      bind = v["bind"].Scalar();
+    } else {
+      ctx.warn(std::string("ari: mounts: ") + key +
+               ": is a URI prefix, a list of them or { bind: <key> } — ignored");
+    }
+  };
+  auto spec = std::make_shared<MountsSpec>();
+  uris("allow", spec->allow, spec->allow_bind);
+  uris("catalog", spec->catalog, spec->catalog_bind);
+  spec->base = ctx.base_dir;
+  w.mounts = std::move(spec);
+}
+
+// §12: mount a `load: <uri>` fragment — resolve + parse another .ari as an ISOLATED module, in `w`:
+// a group that carries `scope = includes.<as>` (§12.1), so the fragment's binds, reactive
+// predicates, and init: resolve under that sub-prefix, with the fragment's own tree its child; the
+// mount widget's OWN reactive fields (from this load: block, applied by parse_widget) stay in the
+// parent scope. `args:` substitute before parse like include:. The fragment parses in a FRESH
+// sub-Ctx (its units are its own, not the host's), based at its own directory so ITS relative
+// imports/loads resolve there. A resolved-URI cycle guard + depth cap stop recursion. Its widgets
+// are a level below the load: entry (§6.7).
+void expand_load(Ctx &ctx, const YAML::Node &n, Widget &w, LoadOutcome *outcome) {
+  std::string uri, canonical;
+  YAML::Node frag;
+  if (!read_fragment(ctx, n, uri, canonical, frag, outcome))
+    return; // an empty group
+  Ctx sub;
+  open_mount(ctx, n, uri, canonical, frag, sub);
+  w.children.emplace_back();
+  parse_document(sub, frag, w.children.back());
+  finish_mount(ctx, n, uri, frag, sub, w);
+}
+
+// A document's settings that are widgets in its group, after its own widgets: the Windows menu's,
+// the tray clock's and the tray bell's.
+CVC_ARI_NOINLINE void document_settings(const YAML::Node &doc, std::vector<Widget> &roots) {
+  // §5.9: `windows_menu: false` turns the built-in Windows menu off; a string renames it.
+  const YAML::Node wm = doc["windows_menu"];
+  if (wm.IsDefined() && wm.IsScalar())
+    roots.push_back(windows_menu_setting(wm.Scalar()));
+  // §5.22: `clock: true|false` shows the tray's clock or not, whatever the host's default.
+  if (doc["clock"].IsDefined())
+    roots.push_back(tray_clock(flag(doc, "clock")));
+  // §5.24: `notifications: true|false` shows the tray's bell or not, whatever the host's default;
+  // `always` shows it with an empty feed too.
+  if (doc["notifications"].IsDefined()) {
+    const YAML::Node nv = doc["notifications"];
+    if (nv.IsScalar() && nv.Scalar() == "always") {
+      Widget bell = tray_bell(true);
+      bell.bell_always = true;
+      roots.push_back(std::move(bell));
+    } else {
+      roots.push_back(tray_bell(flag(doc, "notifications")));
+    }
+  }
+}
+
+// A document's (or a fragment's) widgets, in `w`, its group: its menubar, windows, overlays and
+// root widgets, then its settings that are widgets.
+void parse_document(Ctx &ctx, const YAML::Node &doc, Widget &w) {
+  if (doc.IsSequence()) {
+    parse_seq(ctx, doc, w.children);
+    return;
+  }
+  if (!doc.IsMap()) {
+    ctx.warn("ari: document root is neither a map nor a sequence — nothing to load");
+    return;
+  }
+  if (doc["menubar"].IsDefined()) {
+    w.children.emplace_back();
+    Widget &mb = w.children.back(); // not used once w.children grows again
+    mb.kind = Kind::Menubar;
+    parse_seq(ctx, doc["menubar"], mb.children);
+    mb.collapse = menu_collapse_setting(ctx, doc["menu_collapse"]); // §5.23
+  }
+  for (const char *k : {"windows", "overlays"})
+    parse_seq(ctx, doc[k], w.children);
+  parse_seq(ctx, doc["root"].IsDefined() ? doc["root"] : doc["children"], w.children);
+  document_settings(doc, w.children);
 }
 
 void vec3(const YAML::Node &n, const char *key, float out[3]) {
@@ -3470,8 +4039,9 @@ void share_proto_meshes(Ctx &ctx, const YAML::Node &part, YAML::Node inst, const
 // node has replaces the prototype's, but for material:, which merges key by key, and children:,
 // which come after the prototype's. False, with a warning, for a name no prototype has or one
 // already being expanded (a cycle); `name` is left on the expansion stack for the caller to take
-// off after it has parsed `out`.
-bool expand_use(Ctx &ctx, const YAML::Node &n, YAML::Node &out, std::string &name) {
+// off after it has parsed `out`. Not inlined into parse_scene_node, which goes down the tree.
+CVC_ARI_NOINLINE bool expand_use(Ctx &ctx, const YAML::Node &n, YAML::Node &out,
+                                 std::string &name) {
   name = str(n, "use");
   const std::string at =
       "ari: scene node '" + str(n, "node", str(n, "id")) + "': use: '" + name + "'";
@@ -3574,17 +4144,10 @@ void unit_rgb(Ctx &ctx, const YAML::Node &v, float out[3], const std::string &wh
     ctx.warn("ari: " + what + " has a channel outside 0..1 — clamped");
 }
 
-SceneNode parse_scene_node(Ctx &ctx, const YAML::Node &n) {
-  if (n.IsMap() && n["use"]) { // a prototype's instance: parsed as the node it stands for
-    YAML::Node inst;
-    std::string name;
-    if (expand_use(ctx, n, inst, name)) {
-      SceneNode sn = parse_scene_node(ctx, inst);
-      ctx.using_protos.erase(name);
-      return sn;
-    }
-  }
-  SceneNode sn;
+// A scene node's own keys, into `sn`: all but its children: and repeat: (parse_scene_node). Never
+// on the way down a scene tree, so its locals, most of a scene level's, are not on the stack a
+// level (§6.7).
+CVC_ARI_NOINLINE void scene_node_keys(Ctx &ctx, const YAML::Node &n, SceneNode &sn) {
   sn.id = str(n, "node", str(n, "id"));
   sn.type = str(n, "type", "geometry");
   sn.world = str(n, "world");
@@ -3936,10 +4499,10 @@ SceneNode parse_scene_node(Ctx &ctx, const YAML::Node &n) {
       if (!known_scene_node_key(key) || (own_source && key == "source"))
         sn.props.entries.emplace_back(key, to_value(kv.second));
     }
-  const YAML::Node kids = n["children"];
-  if (kids && kids.IsSequence())
-    for (const YAML::Node &c : kids)
-      sn.children.push_back(parse_scene_node(ctx, c));
+}
+
+// A scene node's repeat:, once its children are parsed (check_scene_repeat reads them).
+CVC_ARI_NOINLINE void scene_node_repeat(Ctx &ctx, const YAML::Node &n, SceneNode &sn) {
   if (const YAML::Node rep = n["repeat"]) {
     if (rep.IsScalar())
       sn.repeat = rep.Scalar(); // §5.4: a count, a state key or an expression
@@ -3949,6 +4512,52 @@ SceneNode parse_scene_node(Ctx &ctx, const YAML::Node &n) {
   }
   if (!sn.repeat.empty())
     check_scene_repeat(ctx, sn);
+}
+
+// One scene node, built in `sn`: its keys, then its children, each a level below it. A level of
+// the document (§6.7), and so is a use: (the prototype's node goes on a level below it): past the
+// limit it is refused, and the parse stops. Its frame holds only what it needs on the way down.
+void parse_scene_node(Ctx &ctx, const YAML::Node &n, SceneNode &sn) {
+  if (!ctx.nesting)
+    ctx.nesting = std::make_shared<Nesting>();
+  Nesting &nest = *ctx.nesting;
+  if (nest.refused)
+    return;
+  if (nest.path.size() >= nest.limit) {
+    refuse_nesting(ctx, n, /*scene=*/true);
+    return;
+  }
+  nest.path.push_back({&n, &ctx});
+  struct Leave {
+    std::vector<Nesting::Level> &path;
+    ~Leave() { path.pop_back(); }
+  } leave{nest.path};
+  if (n.IsMap() && n["use"]) { // a prototype's instance: parsed as the node it stands for
+    YAML::Node inst;
+    std::string name;
+    if (expand_use(ctx, n, inst, name)) {
+      parse_scene_node(ctx, inst, sn);
+      ctx.using_protos.erase(name);
+      return;
+    }
+  }
+  scene_node_keys(ctx, n, sn);
+  const YAML::Node kids = n["children"];
+  if (kids && kids.IsSequence()) {
+    sn.children.reserve(kids.size());
+    for (const YAML::Node &c : kids) {
+      sn.children.emplace_back();
+      parse_scene_node(ctx, c, sn.children.back());
+    }
+  }
+  if (nest.refused)
+    return;
+  scene_node_repeat(ctx, n, sn);
+}
+
+SceneNode parse_scene_node(Ctx &ctx, const YAML::Node &n) {
+  SceneNode sn;
+  parse_scene_node(ctx, n, sn);
   return sn;
 }
 
@@ -4509,6 +5118,75 @@ LintConfig parse_lint(Ctx &ctx, const YAML::Node &l) {
   return cfg;
 }
 
+namespace {
+// One level of a `state:` block into `out`: `at` is the path so far (empty at the top).
+void collect_state(Ctx &ctx, const YAML::Node &n, const std::string &at, const std::string &where,
+                   StateSeeds &out, std::set<std::string> &seen) {
+  for (const auto &kv : n) {
+    if (!kv.first.IsScalar() || kv.first.Scalar().empty()) {
+      ctx.warn("ari: " + where + "state:" + (at.empty() ? "" : " '" + at + "'") +
+               ": a key that is not a name — left out");
+      continue;
+    }
+    const std::string key = kv.first.Scalar();
+    // A leading '/' is the app root (§7.1), so only a top-level key may start with one; and no
+    // segment may be empty (a.b..c, a trailing dot).
+    const std::string seg = key[0] == '/' ? key.substr(1) : key;
+    if ((key[0] == '/' && !at.empty()) || seg.empty() || seg.front() == '.' || seg.front() == '/' ||
+        seg.back() == '.' || seg.find("..") != std::string::npos) {
+      ctx.warn("ari: " + where + "state: '" + (at.empty() ? key : at + "." + key) +
+               "' is not a state path — left out");
+      continue;
+    }
+    const std::string path = at.empty() ? key : at + "." + key;
+    const YAML::Node &v = kv.second;
+    std::string text;
+    if (v.IsMap()) {
+      collect_state(ctx, v, path, where, out, seen);
+      continue;
+    }
+    if (v.IsScalar()) {
+      text = v.Scalar();
+    } else if (v.IsSequence()) { // a list of scalars, joined as a position key is: 1,2,3
+      bool ok = true, first = true;
+      for (const YAML::Node &e : v) {
+        if (!e.IsScalar()) {
+          ok = false;
+          break;
+        }
+        text += (first ? "" : ",") + e.Scalar();
+        first = false;
+      }
+      if (!ok) {
+        ctx.warn("ari: " + where + "state: '" + path +
+                 "': a list's items are scalars (a list is written joined by commas) — left out");
+        continue;
+      }
+    } // else null (`key:` with nothing after it): written as ""
+    if (!seen.insert(path).second)
+      ctx.warn("ari: " + where + "state: '" + path + "' is given twice — the later value is used");
+    out.emplace_back(path, std::move(text));
+  }
+}
+} // namespace
+
+// A document's or a module's `state:` (§5.3): a map of state paths to the literal values the host
+// writes before init: runs. A map's keys are path segments (one may hold dots), a top-level key
+// may start with '/' for the app root, a scalar is written as it is spelled, a list of scalars
+// joined by commas, and nothing as "". `where` starts each warning, as for requires:.
+StateSeeds parse_state(Ctx &ctx, const YAML::Node &n, const std::string &where) {
+  StateSeeds out;
+  if (!n || n.IsNull())
+    return out;
+  if (!n.IsMap()) {
+    ctx.warn("ari: " + where + "state: is a map of state keys to their values — ignored");
+    return out;
+  }
+  std::set<std::string> seen;
+  collect_state(ctx, n, "", where, out, seen);
+  return out;
+}
+
 // A document's or a module's `requires:` (§7.6): a sequence of names, or {name, optional} maps.
 // The loader only parses it; AppRuntime::load checks it against the host. `where` starts each
 // warning ("load 'x.ari': " for a module's).
@@ -4627,13 +5305,19 @@ void refs_from_script(const std::string &script, std::vector<std::string> &out) 
   } catch (...) {
   }
 }
-// Recurse the widget tree collecting each widget's action-program (`on:`) channel refs, and each
-// mount's on_tick:.
-void refs_from_widget(const Widget &w, std::vector<std::string> &out) {
-  refs_from_script(w.on, out);
-  refs_from_script(w.tick_script, out);
-  for (const Widget &c : w.children)
-    refs_from_widget(c, out);
+// Walk the widget tree collecting each widget's action-program (`on:`) channel refs, and each
+// mount's on_tick:, in tree order. A loop over a list of the widgets still to visit, not a call a
+// level (§6.7).
+void refs_from_widget(const Widget &root, std::vector<std::string> &out) {
+  std::vector<const Widget *> todo{&root};
+  while (!todo.empty()) {
+    const Widget *w = todo.back();
+    todo.pop_back();
+    refs_from_script(w->on, out);
+    refs_from_script(w->tick_script, out);
+    for (auto c = w->children.rbegin(); c != w->children.rend(); ++c)
+      todo.push_back(&*c);
+  }
 }
 
 // Run the §12 channel lint against a fully-built LoadResult (root + scripts populated). Sets
@@ -4743,7 +5427,13 @@ std::vector<DataSpec> parse_data(Ctx &ctx, const YAML::Node &n) {
     if (e.IsScalar()) {
       d.uri = e.Scalar();
     } else if (e.IsMap()) {
-      d.uri = str(e, "uri");
+      if (const YAML::Node u = e["uri"]; u && u.IsMap()) { // { arg: <name> }: from the command line
+        d.uri_arg = str(u, "arg");
+        if (d.uri_arg.empty())
+          ctx.warn("ari: data." + d.name + ": uri: is a URI or { arg: <name> } — ignored");
+      } else {
+        d.uri = str(e, "uri");
+      }
       d.path = str(e, "path");
       d.as = str(e, "as");
       d.generate = str(e, "generate");
@@ -4770,7 +5460,7 @@ std::vector<DataSpec> parse_data(Ctx &ctx, const YAML::Node &n) {
                  " is not a generator this build has — ignored");
         continue;
       }
-    } else if (d.uri.empty()) {
+    } else if (d.uri.empty() && d.uri_arg.empty()) {
       ctx.warn("ari: data." + d.name + " names no uri (or generate:) — ignored");
       continue;
     }
@@ -4780,6 +5470,22 @@ std::vector<DataSpec> parse_data(Ctx &ctx, const YAML::Node &n) {
     out.push_back(std::move(d));
   }
   return out;
+}
+
+// §6.7 a load whose parse went past the nesting limit (a widget's or a scene node's) fails: no
+// tree, no scenes, and the error where it went past. Not inlined: load_node's frame is under the
+// whole parse, and this one's temporaries need not be.
+CVC_ARI_NOINLINE void fail_nesting(Ctx &ctx, LoadResult &r) {
+  r.root = Widget{};
+  r.scene = Scene{};
+  r.scenes.clear();
+  r.error = ctx.nesting->error;
+  r.error_source = ctx.nesting->source;
+  r.error_line = ctx.nesting->line;
+  r.error_column = ctx.nesting->column;
+  r.warnings = std::move(ctx.warnings);
+  if (ctx.schema_issues)
+    r.schema_issues = *ctx.schema_issues;
 }
 
 // Parse an already-loaded YAML node into a LoadResult, applying the meta gate. `base_dir` is
@@ -4795,6 +5501,7 @@ LoadResult load_node(cvc::app &app, const YAML::Node &doc,
   ctx.base_dir = base_dir;
   ctx.sources = std::make_shared<std::vector<std::string>>(); // §12.5 hot-reload watch list
   ctx.source_stamps = std::make_shared<std::map<std::string, std::int64_t>>();
+  ctx.nesting = std::make_shared<Nesting>(); // §6.7 how deep the document's widgets nest
   ctx.source = self_path;
   if (have_jsonschema())
     ctx.schema_issues = std::make_shared<std::vector<SchemaIssue>>();
@@ -4880,12 +5587,18 @@ LoadResult load_node(cvc::app &app, const YAML::Node &doc,
 
   parse_units(ctx, doc); // §12: collect units: templates BEFORE the body (so include: resolves)
   parse_own_functions(ctx, doc, ""); // §6.6, BEFORE the body: a load: grants out of them
-  r.root = parse_document(ctx, doc);
+  parse_document(ctx, doc, r.root);
+  if (doc.IsMap() && doc["context_menu"]) // §5.30 over the main view: the document root's
+    parse_context_menu(ctx, doc["context_menu"], r.root, "the document's ");
+  // §6.7 a document nested deeper than the loader goes fails: its parse stopped at the first
+  // widget past the limit.
+  if (ctx.nesting->refused) {
+    fail_nesting(ctx, r);
+    return r;
+  }
   // Its own name, as a mount's is its loaded document's (§5.25): the Runtime mirrors it to
   // ariadne.name, which names the document's own rows in a Processes view.
   r.root.app_name = r.meta.name;
-  if (doc.IsMap() && doc["context_menu"]) // §5.30 over the main view: the document root's
-    parse_context_menu(ctx, doc["context_menu"], r.root, "the document's ");
   r.functions = ctx.functions;
   r.root.functions = make_function_scope(ctx.functions);
   if (doc.IsMap()) {
@@ -4965,6 +5678,11 @@ LoadResult load_node(cvc::app &app, const YAML::Node &doc,
       for (Scene &sc : r.scenes)
         sc.assets.push_back(a);
     }
+    // §6.7 a scene nested deeper than the loader goes fails the load too, as a widget tree does.
+    if (ctx.nesting->refused) {
+      fail_nesting(ctx, r);
+      return r;
+    }
     // init: a state_exec script the host runs once at load (cvc::ariadne::run_init).
     // The loader only captures the text — it has no app and never runs the DSL.
     const YAML::Node in = doc["init"];
@@ -4972,6 +5690,8 @@ LoadResult load_node(cvc::app &app, const YAML::Node &doc,
       r.init_script = in.Scalar();
     else if (in && !in.IsScalar())
       ctx.warn("ari: init: must be a scalar state_exec script string — ignored");
+    // state: (§5.3) the values the host writes under the prefix just before init: runs.
+    r.state_seeds = parse_state(ctx, doc["state"]);
 
     // §7.1/§4.6 document-level resident handlers: scalar state_exec scripts, captured like init:.
     // The host wires each to a Runtime setter: on_tick -> set_tick_program (per frame), on_key ->
@@ -5080,6 +5800,56 @@ LoadResult load_string(cvc::app &app, const std::string &yaml) {
     r.error = std::string("ari: load error: ") + e.what();
     return r;
   }
+}
+
+MountResult load_mount(cvc::app &app, const MountRequest &req) {
+  MountResult r;
+  try {
+    // As load_node's context, at the directory of the document that holds the slot, and with a
+    // fresh mount stack: the fragment is mounted exactly as a static `load:` with `as:` and
+    // `args:` would be (expand_load), so its guards, resolver and component paths are the same.
+    Ctx ctx;
+    ctx.app = &app;
+    ctx.base_dir = req.base_dir;
+    ctx.sources = std::make_shared<std::vector<std::string>>();
+    ctx.source_stamps = std::make_shared<std::map<std::string, std::int64_t>>();
+    ctx.nesting = std::make_shared<Nesting>(); // §6.7 how deep the mount's widgets nest
+    if (have_jsonschema())
+      ctx.schema_issues = std::make_shared<std::vector<SchemaIssue>>();
+    YAML::Node site(YAML::NodeType::Map);
+    site["load"] = req.uri;
+    site["as"] = req.as;
+    if (!req.args.empty()) {
+      YAML::Node args(YAML::NodeType::Map);
+      for (const auto &[k, v] : req.args)
+        args[k] = v;
+      site["args"] = args;
+    }
+    LoadOutcome outcome;
+    Widget wrapper;
+    expand_load(ctx, site, wrapper, &outcome);
+    r.canonical = outcome.canonical;
+    r.has_scene = outcome.has_scene;
+    r.warnings = std::move(ctx.warnings);
+    if (ctx.schema_issues)
+      r.schema_issues = *ctx.schema_issues;
+    r.sources = *ctx.sources;
+    r.source_stamps = *ctx.source_stamps;
+    if (!outcome.error.empty()) {
+      r.error = outcome.error;
+      return r;
+    }
+    if (ctx.nesting->refused) { // §6.7 nested deeper than a document may: its parse stopped
+      r.error = ctx.nesting->error;
+      return r;
+    }
+    r.wrapper = std::move(wrapper);
+    r.ok = true;
+  } catch (const std::exception &e) {
+    r.ok = false;
+    r.error = std::string("ari: load '") + req.uri + "': " + e.what();
+  }
+  return r;
 }
 
 LoadResult load_file(cvc::app &app, const std::string &path) {
@@ -5204,6 +5974,11 @@ LoadResult unavailable() {
 
 LoadResult load_string(cvc::app &, const std::string &) { return unavailable(); }
 LoadResult load_file(cvc::app &, const std::string &) { return unavailable(); }
+MountResult load_mount(cvc::app &, const MountRequest &) {
+  MountResult r;
+  r.error = unavailable().error;
+  return r;
+}
 ValidationResult validate_string(cvc::app &, const std::string &) {
   ValidationResult v;
   v.error = unavailable().error;

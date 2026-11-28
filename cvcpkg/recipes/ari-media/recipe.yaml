@@ -1,7 +1,7 @@
 schema_version: 1
 recipe:
   name: ari-media
-  upstream_version: "4.0.9"
+  upstream_version: "4.0.10"
   cvc_revision: 1
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
@@ -33,12 +33,12 @@ patches: []
 depends:
   build:
     - name: libcvc
-      version: "==4.0.9"
+      version: "==4.0.10"
     - name: sdl3
     - name: ffmpeg-lgpl
   runtime:
     - name: libcvc
-      version: "==4.0.9"
+      version: "==4.0.10"
     - name: sdl3
     - name: ffmpeg-lgpl
   host_tools:
@@ -55,6 +55,14 @@ build:
         MACOSX_DEPLOYMENT_TARGET: "13.0"
     - platform: windows
       script: build.ps1
+    # The BSDs build on the cvcpkg.org fleet from the release tag's tarball, against the fleet's
+    # libcvc (see the libcvc recipe's matrix).
+    - platform: freebsd
+      script: build.sh
+    - platform: openbsd
+      script: build.sh
+    - platform: netbsd
+      script: build.sh
 
 package:
   # Just bin/ari-media (bin/ari-media.exe on Windows); cvcMedia is linked into it.

@@ -70,37 +70,51 @@ std::vector<cascade> make_cascades(const std::vector<double> &tiles_m, std::uint
   return cs;
 }
 
-h0_field build_h0(int n, const cascade &c, const sea_state &s) {
+h0_builder::h0_builder(int n, const cascade &c, const sea_state &s) : _n(n), _c(c), _s(s) {
   if (n < 2 || (n & (n - 1)) != 0)
     throw std::invalid_argument("build_h0: n must be a power of two, got " + std::to_string(n));
   if (!(c.tile_m > 0.0))
     throw std::invalid_argument("build_h0: the tile must be positive");
-  h0_field f;
-  f.n = n;
-  f.tile_m = c.tile_m;
-  const std::size_t count = std::size_t(n) * n;
-  const double dk = kTau / c.tile_m;
-  std::vector<double> h(count * 2, 0.0); // h0(k) at each texel
-  for (int r = 0; r < n; ++r) {
-    const double ky = texel_k(r, n, c.tile_m);
+  _h.assign(std::size_t(n) * std::size_t(n) * 2, 0.0);
+}
+
+bool h0_builder::step(int rows) {
+  const int n = _n;
+  const int end = rows <= 0 ? n : std::min(n, _row + rows);
+  const double dk = kTau / _c.tile_m;
+  for (int r = _row; r < end; ++r) {
+    const double ky = texel_k(r, n, _c.tile_m);
     for (int col = 0; col < n; ++col) {
-      const double kx = texel_k(col, n, c.tile_m);
+      const double kx = texel_k(col, n, _c.tile_m);
       const double kLen = det::hypot(kx, ky);
-      if (kLen <= 1e-6 || kLen < c.k_min || kLen >= c.k_max)
+      if (kLen <= 1e-6 || kLen < _c.k_min || kLen >= _c.k_max)
         continue;
-      const double S = spectrum(kx, ky, s);
+      const double S = spectrum(kx, ky, _s);
       if (!(S > 0.0))
         continue;
       double gx, gy;
-      gaussian(c.seed, col, r, gx, gy);
+      gaussian(_c.seed, col, r, gx, gy);
       // E|g|^2 = 2, so E|h0(k)|^2 = S dk^2 / 2: with its partner conj h0(-k) the texel's mode
       // holds S dk^2 of the surface's variance (see h0.h).
-      const double amp = 0.5 * std::sqrt(S) * dk * c.amplitude;
+      const double amp = 0.5 * std::sqrt(S) * dk * _c.amplitude;
       const std::size_t i = (std::size_t(r) * n + col) * 2;
-      h[i] = gx * amp;
-      h[i + 1] = gy * amp;
+      _h[i] = gx * amp;
+      _h[i + 1] = gy * amp;
     }
   }
+  _row = end;
+  return done();
+}
+
+h0_field h0_builder::take() {
+  if (!done())
+    step(0);
+  const int n = _n;
+  h0_field f;
+  f.n = n;
+  f.tile_m = _c.tile_m;
+  const std::size_t count = std::size_t(n) * n;
+  const std::vector<double> &h = _h;
   // The conjugate partner: texel (c, r) also holds conj h0(-k), -k at ((n - c) % n, (n - r) % n).
   f.texels.assign(count * 4, 0.0f);
   for (int r = 0; r < n; ++r)
@@ -112,7 +126,15 @@ h0_field build_h0(int n, const cascade &c, const sea_state &s) {
       f.texels[i * 4 + 2] = float(h[m * 2]);
       f.texels[i * 4 + 3] = float(-h[m * 2 + 1]);
     }
+  _h.clear();
+  _h.shrink_to_fit();
   return f;
+}
+
+h0_field build_h0(int n, const cascade &c, const sea_state &s) {
+  h0_builder b(n, c, s);
+  b.step(0);
+  return b.take();
 }
 
 } // namespace ocean

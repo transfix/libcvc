@@ -23,7 +23,7 @@ import: cvc://cars_panels.ari
 
 meta:
   name: Cars (your controller)
-  min_libcvc: 3.7.11
+  min_libcvc: 4.0.9
 
 data:
   city:
@@ -32,32 +32,34 @@ data:
     as: city_bundle
     load: lazy
 
-init: |
-  (begin
-    (state-set "run.world" "data")
-    (state-set "run.uri" "cvcpkg://cy-pca/scene-austin-south-small")
-    (state-set "run.data_path" "share/cvc-scenes/austin_south")
-    (state-set "run.crop" "600")
-    (state-set "run.cars" "6")
-    (state-set "run.controller" "yours")
-    (state-set "run.ticks" "1")
-    (state-set "run.regoal" "1")
-    (state-set "run.paused" "0")
-    (state-set "nav_plant.vehicle" "humvee")
-    (state-set "view.camera" "follow")
-    (state-set "view.car" "0")
-    (state-set "view.horizon" "3")
-    (state-set "view.raster_m" "60")
-    (state-set "show.plans" "1")
-    (state-set "world.seed" "7")
-    (state-set "world.half" "400")
-    (state-set "world.amp" "25")
-    (state-set "world.water_level" "-4")
-    (state-set "world.buildings" "120")
-    (state-set "world.trees" "200")
-    (state-set "world.rocks" "40")
-    (state-set "world.terrain" "fbm")
-    (state-set "world.city" "districts"))
+state:   # the starting values (docs/ARIADNE.md §5.3)
+  run:
+    world: data
+    uri: cvcpkg://cy-pca/scene-austin-south-small
+    data_path: share/cvc-scenes/austin_south
+    crop: 600
+    cars: 6
+    controller: yours
+    ticks: 1
+    regoal: 1
+    paused: 0
+  nav_plant.vehicle: humvee
+  view:
+    camera: follow
+    car: 0
+    horizon: 3
+    raster_m: 60
+  show.plans: 1
+  world:
+    seed: 7
+    half: 400
+    amp: 25
+    water_level: -4
+    buildings: 120
+    trees: 200
+    rocks: 40
+    terrain: fbm
+    city: districts
 
 menubar:
   - menu: Run

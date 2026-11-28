@@ -344,7 +344,10 @@ public:
   // With physics: the room's static objects (the ground, the cube, ...), from the room scene at
   // STAMP (scene_stamp; a pump compares it to the tree's). Avatars stand still until the first
   // set_statics with a written stamp (there is nothing to stand on). WATER: the world's water
-  // with them (OW5j: world_replica's), which a boat's model floats on; the avatars do not use it.
+  // with them (OW5j: world_replica's), which a boat's model floats on, and the avatars too in a
+  // world of the holon's own (OW9a: a dynamic avatar floats and is dragged in it as in the relay's
+  // world, the water of each tick's step in a replay as set_water keeps it by tick). An attached
+  // world (attach_world) has its own water.
   void set_statics(const std::vector<avatar_static> &statics, const section_stamp &stamp,
                    const std::vector<cvc::physics::field> &water = {});
   // ... at REVISION of no epoch (a host with no room tree).
@@ -389,6 +392,9 @@ public:
   // With physics: PID's energy now (on a client, the local avatar's is its prediction). False
   // without physics or for a pid with no body.
   bool energy(const std::string &pid, avatar_energy &out) const;
+  // With physics: PID's motion as of its last drive (walker@2: walking, wading or swimming; always
+  // walking under walker@1). False without physics or for a pid with no body.
+  bool motion(const std::string &pid, avatar_motion &out) const;
   // CLIENT: the server's reserve for the local avatar PID as of SERVER_TICK. The prediction is
   // corrected by how far it was off at that tick (its log of what it predicted then), and the
   // inputs replayed since keep their spending on top; with no log entry for that tick it takes
@@ -547,9 +553,9 @@ public:
   std::uint64_t vehicle_ground_revision() const { return _vground_rev; }
   // The world's water from the step that ends past FROM_TICK on (OW5q): the relay's sea took a new
   // keyframe, which its storms grew (world_replica::water, after water_from_tick). A boat's model
-  // floats on it from that step, and on the water before it in a replay from before it; one made
-  // later has it too. REVISION names it (world_replica::water_revision); set_statics starts the
-  // water afresh with its own.
+  // and the avatars float on it from that step, and on the water before it in a replay from
+  // before it; a boat's model made later has it too. REVISION names it
+  // (world_replica::water_revision); set_statics starts the water afresh with its own.
   void set_water(const std::vector<cvc::physics::field> &water, std::uint64_t from_tick,
                  std::uint64_t revision);
   std::uint64_t water_revision() const { return _water_rev; }
@@ -712,8 +718,10 @@ private:
   void world_rules_for(std::uint64_t tick);
   // The veto's policy-free part (non-finite moves and yaws; set_intent keeps this), and its
   // policy part (the vertical and the speed cap; each step applies it under its tick's policy).
+  // DIVES (a walker@2 avatar with physics, OW9c): move.z without allow_vertical is a swimmer's
+  // dive or rise, kept from -1 to 1 rather than dropped.
   static avatar_intent finite_intent(const avatar_intent &in);
-  static avatar_intent veto(const avatar_intent &in, const avatar_policy &p);
+  static avatar_intent veto(const avatar_intent &in, const avatar_policy &p, bool dives = false);
   // Without physics: an avatar standing at `feet` under the rules at `tick` moves as `in` asks
   // plus its drift in the rules' wind (avatar_wind_drift), the same on the server and in a
   // client's prediction, at the tick's time.
@@ -771,6 +779,14 @@ private:
   std::vector<cvc::physics::field> _water;  // ... and the water with them (a boat's model's)
   std::vector<timed_water> _water_after;    // ... and since, by tick (set_water, OW5q)
   std::uint64_t _water_rev = 0;
+  // The water in the avatar world (OW9a): which of the above, as of which change to them. The
+  // water a step ends in is put there before it (avatar_water_for), so a replay from before a
+  // change runs in the water before it.
+  std::uint64_t _water_gen = 0;                        // bumped by set_statics and set_water
+  std::uint64_t _avatar_water_gen = ~std::uint64_t{0}; // _water_gen when it was put there
+  std::size_t _avatar_water_index = 0;                 // 0: _water; i: _water_after[i - 1]
+  bool _water_trimmed = false; // _water_after lost its oldest: _water is older than any kept
+  void avatar_water_for(std::uint64_t tick);
   SceneWorld *_scene = nullptr;             // SERVER: the world attached (attach_world)
   const void *_scene_world = nullptr;       // ... its physics world when the avatars went in
   void scene_step();                        // SERVER with a world attached: the due steps

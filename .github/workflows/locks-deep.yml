@@ -258,14 +258,14 @@ jobs:
           python3 -I tools/locks_model/state_word.py --suite deep
 
   # The router protocol's model (tools/locks_model/router.py; S2.md S2-Q10, S2-Q15, td 4.6,
-  # 8.4): its deep suite, every interleaving of the groups' steps at its deep bounds (42 checks,
-  # about 13 minutes on the lead's Windows box, the largest 4.0 million states, 1.5 GB). The quick
+  # 8.4): its deep suite, every interleaving of the groups' steps at its deep bounds (49 checks,
+  # about 18 minutes on the lead's Windows box, the largest 9.5 million states, 3.5 GB). The quick
   # suite runs in CTest (state_exec_router_model_test). No C++ build; a ref without the model
   # stops at once.
   router-model:
     name: locks deep / router model
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 

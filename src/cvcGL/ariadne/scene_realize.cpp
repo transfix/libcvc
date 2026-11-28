@@ -2672,8 +2672,10 @@ cvc::world_clock::step_result tick_scene(RealizedScene &realized, vtkRenderer *r
   for (SceneDataBinding &d : realized.data_nodes) {
     if (d.texture) // a data node's terrain's live texture
       d.texture->tick();
-    if (d.world) // a world dataset's drawing: its job, its install, its LOD for this camera
+    if (d.world) { // a world dataset's drawing: its job, its install, its LOD for this camera
+      data_world_set_air(*d.world, realized.world ? realized.world->wind() : nullptr); // F4
       data_world_tick(*d.world, renderer);
+    }
   }
   cvc::world_clock::step_result clock_step;
   // §9 time — drive the authoritative simulation clock FIRST, so every ticker below (and any

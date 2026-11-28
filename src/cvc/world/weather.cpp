@@ -222,7 +222,11 @@ bool weather::scheduled(long k, storm_cell &c) const {
 bool weather::authored(const weather_event &e, storm_cell &c) const {
   if (e.type != weather_event::kind::storm)
     return false;
+#if defined(__cpp_lib_bit_cast)
   const std::uint64_t bits = std::bit_cast<std::uint64_t>(e.t);
+#else // NetBSD's libstdc++ (gcc 10) has no std::bit_cast; its clang has the builtin
+  const std::uint64_t bits = __builtin_bit_cast(std::uint64_t, e.t);
+#endif
   const std::uint64_t el = bits ^ AUTHORED_SALT;
   c = storm_cell();
   c.id = storm_cell::AUTHORED | (bits & ~storm_cell::AUTHORED);
@@ -553,43 +557,34 @@ double weather::front_reach(double r) const {
          (1.0 + std::max(0.0, m_p.front_width));
 }
 
+bool weather::front_cell_of(const storm_cell &c, cvc::algo::front_cell &out) const {
+  const double speed = m_p.front_speed;
+  if (!(speed > 0.0) || !(c.r > 0.0))
+    return false;
+  // The downdraft comes with the rain: none below its onset, a full cell's at full intensity.
+  const double onset = std::min(0.999, std::max(0.0, m_p.rain_onset));
+  const double strength = smooth((c.intensity - onset) / (1.0 - onset));
+  if (!(strength > 0.0))
+    return false;
+  out.x = c.x;
+  out.y = c.y;
+  out.r = c.r;
+  out.vx = c.vx;
+  out.vy = c.vy;
+  out.out = speed * strength;
+  out.ahead = std::max(1e-6, m_p.front_ahead);
+  out.behind = std::max(1e-6, m_p.front_behind);
+  out.width = std::max(1e-6, m_p.front_width);
+  return true;
+}
+
 void weather::gust_front(const weather_now &w, double x, double y, double &vx, double &vy) const {
   vx = vy = 0.0;
-  const double speed = m_p.front_speed;
-  if (!(speed > 0.0) || w.cells.empty())
-    return;
-  const double onset = std::min(0.999, std::max(0.0, m_p.rain_onset));
-  const double ahead = std::max(1e-6, m_p.front_ahead), behind = std::max(1e-6, m_p.front_behind);
-  const double width = std::max(1e-6, m_p.front_width), most = std::max(ahead, behind);
-  for (const storm_cell &c : w.cells) {
-    // The downdraft comes with the rain: none below its onset, a full cell's at full intensity.
-    const double strength = smooth((c.intensity - onset) / (1.0 - onset));
-    if (!(strength > 0.0) || !(c.r > 0.0))
-      continue;
-    const double dx = x - c.x, dy = y - c.y, d2 = dx * dx + dy * dy;
-    const double reach = c.r * most * (1.0 + width);
-    if (!(d2 > 0.0) || d2 >= reach * reach)
-      continue;
-    const double d = std::sqrt(d2);
-    // The front's edge this way, front_ahead of the radius along the cell's motion, front_behind
-    // against it, between them by the cosine of the angle off the motion (a still cell's is round).
-    const double m = std::sqrt(c.vx * c.vx + c.vy * c.vy);
-    const double along = m > 0.0 ? (dx * c.vx + dy * c.vy) / (d * m) : 0.0;
-    const double share = 0.5 * (ahead + behind) + 0.5 * (ahead - behind) * along;
-    // Out from the centre: rising to the edge (q (2 - q), flat there), then dying away over
-    // front_width of the edge's distance ((1 - u^2)^2, flat at both ends), so the wind is smooth.
-    const double q = d / (c.r * share);
-    double shape = q * (2.0 - q);
-    if (q > 1.0) {
-      const double u = (q - 1.0) / width;
-      if (u >= 1.0)
-        continue;
-      shape = (1.0 - u * u) * (1.0 - u * u);
-    }
-    const double out = speed * strength * shape * (share / most);
-    vx += out * dx / d;
-    vy += out * dy / d;
-  }
+  // Each cell's outflow (cvc/algo/gust_front.h: the shape the sea and the shaders read too).
+  cvc::algo::front_cell f;
+  for (const storm_cell &c : w.cells)
+    if (front_cell_of(c, f))
+      cvc::algo::add_gust_front(f, x, y, vx, vy);
 }
 
 std::uint64_t weather::digest(const weather_now &w) {

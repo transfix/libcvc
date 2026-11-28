@@ -79,15 +79,17 @@ void catmull_rom(double t, double w[4]) {
   w[3] = 0.5 * (t3 - t2);
 }
 
-// fmod(f, g) of an integer-valued f, as a long long: below 2^53 f fits one, and its integer
-// remainder is fmod's exact one (fmod is slow, and a read builds several stencils).
+// An integer-valued f as a long long congruent to it modulo g (a power of two): below 2^53 f
+// fits one; past that fmod's remainder, which is exact.
 long long wrap_floor(double f, int g) {
   if (std::fabs(f) < 9007199254740992.0)
-    return static_cast<long long>(f) % g;
+    return static_cast<long long>(f);
   return static_cast<long long>(std::fmod(f, double(g)));
 }
 
-// A 4 x 4 Catmull-Rom stencil on a periodic grid x grid lattice of a tile.
+// A 4 x 4 Catmull-Rom stencil on a periodic grid x grid lattice of a tile; grid is a power of two
+// (sea_surface checks it), so a lattice index wraps by a mask, the remainder modulo grid of any
+// two's-complement integer: a wrap by % is two integer divisions, slow, and a read builds several.
 struct stencil {
   int ix[4], iy[4];
   double wx[4], wy[4];
@@ -98,11 +100,11 @@ struct stencil {
     const double flx = std::floor(fx), fly = std::floor(fy);
     catmull_rom(fx - flx, wx);
     catmull_rom(fy - fly, wy);
-    // Wrap without overflow for any finite coordinate: reduce the floor modulo g first.
-    const long long cx = wrap_floor(flx, g), cy = wrap_floor(fly, g);
+    // Wrap without overflow for any finite coordinate.
+    const long long cx = wrap_floor(flx, g), cy = wrap_floor(fly, g), mask = g - 1;
     for (int i = 0; i < 4; ++i) {
-      ix[i] = int(((cx - 1 + i) % g + g) % g);
-      iy[i] = int(((cy - 1 + i) % g + g) % g);
+      ix[i] = int((cx - 1 + i) & mask);
+      iy[i] = int((cy - 1 + i) & mask);
     }
   }
   double operator()(const std::vector<double> &f) const {
@@ -148,11 +150,28 @@ struct sea_surface_frame {
   std::vector<sea_surface::band_frame> bands;
   // With source_cell_m: the move x - x0 at the lattice corners found so far at this time, keyed
   // by the corner's index pair. Each is a pure function of the corner and t, so the order in
-  // which reads fill them (and from which threads) changes no value.
-  // (Reads of the found corners share the lock: a step's cells read them from several threads.)
-  mutable std::shared_mutex lattice_mutex;
-  mutable std::unordered_map<std::uint64_t, std::array<double, 2>> lattice;
+  // which reads fill them (and from which threads) changes no value. They are kept in shards, a
+  // block of kBlock x kBlock corners to a shard (lattice_shard), each under its own lock: a step's
+  // cells and hulls read them from several threads, each mostly its own body's corners, so the
+  // threads seldom share a lock, and a read's four corners are mostly in one shard.
+  struct shard {
+    mutable std::shared_mutex mutex;
+    mutable std::unordered_map<std::uint64_t, std::array<double, 2>> corners;
+  };
+  static constexpr int kBlock = 8;
+  static constexpr std::size_t kShards = 64;
+  std::array<shard, kShards> lattice;
 };
+
+namespace {
+// The shard of corner (i, j): its block's, hashed.
+std::size_t lattice_shard(std::int64_t i, std::int64_t j) {
+  const auto bi = static_cast<std::uint64_t>(i >> 3), bj = static_cast<std::uint64_t>(j >> 3);
+  static_assert(sea_surface_frame::kBlock == 8, "the block is 2^3 corners a side");
+  const std::uint64_t h = (bi * 0x9e3779b97f4a7c15ull) ^ (bj * 0xc2b2ae3d27d4eb4full);
+  return static_cast<std::size_t>(h >> 58); // the top 6 bits: kShards
+}
+} // namespace
 
 sea_surface::sea_surface(std::vector<sea_cascade> cascades, const sea_params &p,
                          std::shared_ptr<const shore_grid> grid,
@@ -438,6 +457,10 @@ sea_surface::point_forcing sea_surface::forcing_at(const frame &f, double x, dou
   if (!_forcing)
     return pf;
   pf.gust = cvc::algo::wind_gust(f.gust, x, y);
+  if (_forcing->fronts) // F4: the fronts where this wave is
+    if (const std::shared_ptr<const sea_fronts> fr = _forcing->fronts->at(f.t);
+        fr && !fr->cells.empty())
+      pf.gust *= cvc::algo::front_wind_ratio(fr->cells, fr->ux, fr->uy, fr->ref, x, y);
   if (_forcing->fetch) {
     pf.fetch = _forcing->fetch->sample(x, y);
     pf.fetch_from = _forcing->fetch_from ? _forcing->fetch_from->sample(x, y) : pf.fetch;
@@ -549,14 +572,23 @@ std::array<double, 2> sea_surface::find_source(const frame &f, double x, double 
     return (std::uint64_t(std::uint32_t(i)) << 32) | std::uint64_t(std::uint32_t(j));
   };
   std::array<double, 2> o[4];
-  bool have[4] = {false, false, false, false};
-  {
-    std::shared_lock<std::shared_mutex> lock(f.lattice_mutex);
-    for (int k = 0; k < 4; ++k) {
-      const auto it = f.lattice.find(key(i0 + (k & 1), j0 + (k >> 1)));
-      if (it != f.lattice.end()) {
-        o[k] = it->second;
-        have[k] = true;
+  bool have[4] = {false, false, false, false}, looked[4] = {false, false, false, false};
+  std::size_t in[4];
+  for (int k = 0; k < 4; ++k)
+    in[k] = lattice_shard(i0 + (k & 1), j0 + (k >> 1));
+  for (int k = 0; k < 4; ++k) { // each shard the four corners are in, locked once
+    if (looked[k])
+      continue;
+    const sea_surface_frame::shard &sh = f.lattice[in[k]];
+    std::shared_lock<std::shared_mutex> lock(sh.mutex);
+    for (int m = k; m < 4; ++m) {
+      if (looked[m] || in[m] != in[k])
+        continue;
+      looked[m] = true;
+      const auto it = sh.corners.find(key(i0 + (m & 1), j0 + (m >> 1)));
+      if (it != sh.corners.end()) {
+        o[m] = it->second;
+        have[m] = true;
       }
     }
   }
@@ -567,8 +599,9 @@ std::array<double, 2> sea_surface::find_source(const frame &f, double x, double 
     const double cx = double(i) * h, cy = double(j) * h;
     const std::array<double, 2> p = source_exact(f, cx, cy, t);
     o[k] = {cx - p[0], cy - p[1]};
-    std::unique_lock<std::shared_mutex> lock(f.lattice_mutex);
-    f.lattice.emplace(key(i, j), o[k]);
+    const sea_surface_frame::shard &sh = f.lattice[in[k]];
+    std::unique_lock<std::shared_mutex> lock(sh.mutex);
+    sh.corners.emplace(key(i, j), o[k]);
   }
   const double ox =
       (o[0][0] * (1.0 - u) + o[1][0] * u) * (1.0 - v) + (o[2][0] * (1.0 - u) + o[3][0] * u) * v;

@@ -1,0 +1,462 @@
+# nav_fleet_swarm.ari — a swarm of Humvees over a small world, seen from above: one fleet of the
+# world's vehicles (docs/ARIADNE.md, "Fleets"), 240 of them in six teams, each in its team's colour,
+# crossing the world with no global plan, each team to its rally point, on the cvc::nav runtime.
+# Every 15 s of world time the rally points swap across a ring, so the teams cross the middle
+# through each other and back.
+#
+# Two worlds, the panel's terrain and blocks switching them (the fleet is laid out again on the
+# new one):
+#   terrain  the terrain lab's world, small (300 m): relief, trees, rocks and a roads-first city,
+#            generated at load; what stands on it is the navigator's grid (the default). New
+#            terrain generates another from a new seed;
+#   blocks   a city of 6 x 6 blocks of 26 m with 12 m streets and four plazas, 240 m across.
+# The fleet is drawn at scale: one mesh for all of it, the nearest few their own nodes (entity
+# layers, the fleets roadmap's FL2). The sun casts shadows: the world's baked once, the moving
+# vehicles' each frame.
+#
+# The vehicles are nav's kinematic bicycle, cheap enough for all 256 on one thread, kept from
+# passing through each other (collide: nav's de-overlap pushes any two too close apart after each
+# step). Vehicles sets how many (the fleet is laid out again). Plant puts the fleet, or one team,
+# on Jolt, where each is a vehicle with wheels and suspension that collides as a body; Jolt steps
+# them on worker threads where there are threads (natively, and in a browser built with them),
+# and about 40 is where its step starts to cost the frame. Drag to orbit, the wheel to zoom;
+# Overhead (H) puts the camera back above the world, Chase follows a vehicle. The panel's fps is
+# the frame rate (quality.frame_ms).
+#
+# Run (the Humvee model and the trained policy come from cvcpkg.org; without the network the
+# vehicles are boxes and the built-in net drives):
+#   arigl --net-allow https://cvcpkg.org nav_fleet_swarm.ari
+#   arigl snapshot --net-allow https://cvcpkg.org --png swarm.png --frames 600 --width 1280 #     --height 720 nav_fleet_swarm.ari --no-ui
+
+meta:
+  name: Fleet swarm (Ariadne)
+  author: cvc
+  min_libcvc: 4.0.9
+
+requires:
+  - gl.scene                       # the swarm and the world are the point: a scene renderer
+  - scene.physics                  # the world's vehicles step on its physics clock
+  - {name: gl.scene.shaders, optional: true}   # the terrain's bump preset; unshaded without
+  - {name: net, optional: true}    # the Humvee and the trained policy from cvcpkg.org; without it,
+                                   # boxes and the built-in net
+
+customs:
+  - node: generated_world          # the terrain world
+    required: true
+  - node: entity_layer             # the fleet at scale; without it, the implicit layer
+    required: false
+
+args:
+  speed: {type: float, default: 1.0, help: "world seconds per wall second"}
+  ui: {type: bool, default: true, help: "--no-ui: no panel (a capture)"}
+  bench: {type: bool, help: "print the frame time every 120 frames"}
+
+data:
+  humvee:                          # the Humvee model (cvcpkg.org), fetched when the fleet is drawn
+    uri: cvcpkg://cy-pca/vehicle-humvee
+    path: share/cvc-scenes/shared
+    load: lazy
+
+world:
+  vehicles:
+    archetypes:
+      car:
+        vehicle: humvee            # its size and limits
+        # The parted Humvee (vehicle-humvee 1.0.0+cvc.5): a chassis, a wheel and the rig that
+        # places four of them, so the wheels roll and the front pair steer on the vehicles near
+        # the camera; in its team's colour (a box until the model is here).
+        look: { data: humvee, chassis: humvee/chassis.glb, wheel: humvee/wheel.glb,
+                rig: humvee/rig.json, texture: false }
+        controllers: [nav@1, none]
+    start:
+      - fleet: swarm
+        archetype: car
+        plant: kinematic           # nav's bicycle: cheap enough for every vehicle on one thread
+        count: 240                 # Vehicles (the panel) changes it
+        spawn: scattered
+        seed: 7
+        rally: { count: 6 }        # six teams, each to its rally point, hsv-coloured
+        policy: trained            # the published CoefMLP once it is here; the built-in net meanwhile
+        collide: true              # kept apart: they don't pass through each other
+        keys: summary
+
+functions: |
+  ; A state key's text, "" while it is unset.
+  (defun sv (k) (let ((v (state-get k))) (if (= v nil) "" v)))
+  ; A state key's number, 0 while it is unset.
+  (defun num (k) (let ((v (sv k))) (if (= v "") 0.0 (float v))))
+  ; A bool document argument.
+  (defun arg-on (name) (= (sv (str-concat "args." name)) "true"))
+  ; The camera above the city: an orbit high over its centre, looking down at the whole of it.
+  (defun overhead ()
+    (let ((far (if (= (sv "scene.world.source") "blocks") "490" "610")))
+    (begin
+      (state-set "viewers.main.camera.track.target" "")
+      (state-set "viewers.main.camera.mode" "0")
+      (state-set "viewers.main.camera.orbit.center.x" "0")
+      (state-set "viewers.main.camera.orbit.center.y" "0")
+      (state-set "viewers.main.camera.orbit.center.z" "0")
+      (state-set "viewers.main.camera.orbit.azimuth" "-90")
+      (state-set "viewers.main.camera.orbit.elevation" "72")
+      (state-set "viewers.main.camera.orbit.distance" far))))
+  ; What drives the fleet, in a few words.
+  (defun drives ()
+    (let ((w (string.split (sv "vehicles.fleets.swarm.drives") " ")))
+      (if (= (nth w 0) "trained") "the trained policy"
+          (if (and (> (length w) 1) (= (nth w 1) "loading")) "loading the trained policy..."
+              "the built-in net"))))
+  ; Six rally points around the city, on its street crossings: x y pairs.
+  (defun rally-points () (list -76 -76 76 -76 114 0 76 76 -76 76 -114 0))
+  ; A team's rally point at turn k: across the ring each turn, so the six teams cross the city's
+  ; middle through each other, and back.
+  (defun set-rally (team k)
+    (let ((p (rally-points)) (j (% (+ team (* 3 k)) 6))
+          (at (str-concat "vehicles.fleets.swarm.rally." (str team))))
+      (begin
+        (state-set (str-concat at ".x") (str (nth p (* 2 j))))
+        (state-set (str-concat at ".y") (str (nth p (+ 1 (* 2 j))))))))
+  ; Team t's beacon on its rally point, as the fleet publishes it.
+  (defun place-beacon (team)
+    (let ((at (str-concat "vehicles.fleets.swarm.rally." (str team))))
+      (if (!= (sv (str-concat at ".x")) "")
+          (state-set (str-concat "graphics.root.children.rally_" (str team) ".position")
+                     (str-concat (sv (str-concat at ".x")) "," (sv (str-concat at ".y")) ",0")))))
+  (defun place-beacons ()
+    (begin (place-beacon 0) (place-beacon 1) (place-beacon 2)
+           (place-beacon 3) (place-beacon 4) (place-beacon 5)))
+  (defun move-rallies (k)
+    (begin (set-rally 0 k) (set-rally 1 k) (set-rally 2 k)
+           (set-rally 3 k) (set-rally 4 k) (set-rally 5 k)))
+  ; The chase camera behind the fleet's first vehicle (its own node while it is followed).
+  (defun chase ()
+    (begin
+      (state-set "viewers.main.camera.track.target" "vehicle_1")
+      (state-set "viewers.main.camera.track.back" "22")
+      (state-set "viewers.main.camera.track.height" "12")
+      (state-set "viewers.main.camera.track.look_ahead" "8")
+      (state-set "viewers.main.camera.track.min_speed" "0.5")
+      (state-set "viewers.main.camera.mode" "2")))
+
+init: |
+  (begin
+    (state-set "sim.speed" (sv "args.speed"))
+    (state-set "ui.frames" "0")
+    (state-set "ui.fps" "")
+    (state-set "ui.rally_k" "")
+    (state-set "ui.world_was" "")
+    (state-set "ui.beacons" "1")
+    (if (not (arg-on "ui")) (state-set "tree.fleet_panel.open" "0")))
+
+on_tick: |
+  (let ((n (+ 1 (int (sv "ui.frames"))))
+        (ms (sv "quality.frame_ms")))
+    (begin
+      (state-set "ui.frames" (str n))
+      ; Once the scene's first framing has run, the camera goes above the city, and again when the
+      ; world changes (the fleet is laid out on the new one).
+      (if (= n 20) (overhead))
+      (if (and (> n 20) (!= (sv "scene.world.source") (sv "ui.world_was")))
+          (begin (state-set "ui.world_was" (sv "scene.world.source"))
+                 (state-set "ui.rally_k" "")
+                 (overhead)))
+      (if (= (% n 30) 0) (state-set "ui.drives" (drives)))
+      (if (= (% n 10) 0) (place-beacons))
+      ; Every 15 s of world time the rally points swap across the ring (and at once after a
+      ; restart lays the fleet out again).
+      (let ((k (str (int (/ (num "sim.time") 15.0)))))
+        (if (and (!= (sv "vehicles.fleets.swarm.placed") "") (!= k (sv "ui.rally_k")))
+            (begin (state-set "ui.rally_k" k) (move-rallies (int k)))))
+      ; The frame rate, from the runtime's frame time (a window's mean).
+      (if (and (= (% n 15) 0) (!= ms ""))
+          (state-set "ui.fps" (str (int (+ 0.5 (/ 1000.0 (math.max 0.1 (float ms))))))))
+      (if (and (arg-on "bench") (= (% n 120) 0))
+          (print (str-concat "fleet_swarm: " ms " ms a frame, physics step "
+                             (sv "physics.stats.step_ms") " ms, "
+                             (sv "vehicles.fleets.swarm.placed") " placed")))))
+
+keys:
+  pause:
+    label: Pause the world
+    key: P
+    on: (state-set "sim.paused" (if (= (state-get "sim.paused") "1") "0" "1"))
+  overhead:
+    label: The camera above the city
+    key: H
+    on: (overhead)
+
+windows:
+  - window: Fleet swarm
+    id: fleet_panel
+    pos: [10, 30]
+    size: [290, 500]
+    closable: true
+    children:
+      - text: "fps"
+        bind: ui.fps
+      - text: "placed"
+        bind: vehicles.fleets.swarm.placed
+      - text: "arrived"
+        bind: vehicles.fleets.swarm.arrived
+      - text: "driven by"
+        bind: ui.drives
+      - separator
+      # The world: the terrain lab's or the block city, and a new terrain from a new seed (the
+      # fleet is laid out again on it).
+      - type: group
+        layout: { kind: horizontal }
+        children:
+          - button: terrain
+            on: (state-set "scene.world.source" "terrain")
+            enabled_when: (!= (state-get "scene.world.source") "terrain")
+            tooltip: "the terrain lab's world, small: hills, trees, rocks and a city"
+          - button: blocks
+            on: (state-set "scene.world.source" "blocks")
+            enabled_when: (!= (state-get "scene.world.source") "blocks")
+            tooltip: "a city of 6 x 6 blocks on a flat ground"
+          - button: New terrain
+            on: (begin
+                  (state-set "scene.world.source" "terrain")
+                  (state-set "world.request" "randomize"))
+            enabled_when: (!= (state-get "world.busy") "1")
+            tooltip: "the terrain world generated again from a new seed"
+      - text: "world"
+        bind: world.status
+      - slider_int: vehicles
+        bind: vehicles.fleets.swarm.size
+        lo: 1
+        hi: 256
+        commit: release
+        tooltip: "how many: the fleet is laid out again (all 256 kinematic; about 40 on Jolt)"
+      - slider_float: world speed
+        bind: sim.speed
+        lo: 0.25
+        hi: 8.0
+        log: true
+        fmt: "%.2fx"
+        tooltip: "world seconds per wall second"
+      - combo: plant
+        bind: vehicles.fleets.swarm.plant
+        options: ["kinematic", "kinematic, 0: jolt", "jolt"]
+        tooltip: "kinematic: nav's bicycle (cheap: all 256); jolt: each a Jolt vehicle that
+          collides with the others and the world (about 40 before it costs the frame); or one
+          team on Jolt"
+      - combo: policy
+        bind: vehicles.fleets.swarm.policy
+        options: [trained, builtin]
+        tooltip: "the published trained CoefMLP, or the built-in net"
+      - checkbox: collide
+        bind: vehicles.fleets.swarm.collide
+        tooltip: "kept apart (nav's de-overlap on the kinematic plant); off, they pass through
+          each other. On Jolt they collide as bodies."
+      - checkbox: targets
+        bind: ui.beacons
+        tooltip: "a beacon on each team's rally point"
+      - checkbox: shadows
+        bind: shadows.enabled
+        tooltip: "the sun's shadows: the city's baked once, the moving vehicles' each frame"
+      - combo: sense
+        bind: vehicles.fleets.swarm.sense
+        options: [known, fog]
+        tooltip: "known: the city's map; fog: each vehicle senses what it passes"
+      - separator
+      - button: Restart
+        on: (begin
+              (state-set "vehicles.fleets.swarm.restart.request"
+                         (str (+ 1 (int (sv "vehicles.fleets.swarm.restart.request")))))
+              (state-set "ui.rally_k" ""))
+        tooltip: "every vehicle back at its start"
+      - button: New seed
+        on: (begin
+              (state-set "vehicles.fleets.swarm.reseed.request"
+                         (str (+ 1 (int (sv "vehicles.fleets.swarm.reseed.request")))))
+              (state-set "ui.rally_k" ""))
+        tooltip: "a new scatter of starts and goals"
+      - button: Overhead
+        on: (overhead)
+      - button: Chase
+        on: (chase)
+
+scene:
+  chrome: false
+  clock: { scale: 1.0 }
+  physics: {}
+  world: { source: terrain, cell: 2 }  # the world on at the start; World (the panel) switches
+  background: { top: [0.62, 0.74, 0.90], bottom: [0.86, 0.89, 0.92] }
+  # The sun's shadows over what the camera looks at (the terrain lab's): the ground, buildings and
+  # trees bake once, and the vehicles, moving, each frame (cvcGL's static shadow cache).
+  shadows:
+    enabled: true
+    resolution: 2048
+    update_interval: 2
+    focus: { follow: camera, min_radius: 120, max_radius: 420, per_distance: 3, lead: 0.5,
+             lift: 20, ground: world }
+  # The terrain lab's afternoon: a low warm sun, the one shadow caster, and a cool fill.
+  lights:
+    - light: sun
+      rig: three_point
+      sun: true
+      stage: { center: [0, 0, 20], radius: 220 }
+      key: { intensity: 1.3, azimuth: -60, elevation: 34, cone: 62 }
+      fill: 0.18
+      back: 0
+      wash: 0
+      warmth: 0.5
+      environment: 0.25
+      ambient: 0.25
+  nodes:
+    # The fleet at scale (entity_view.h): its finer rungs only for a Humvee 45 px across or more on
+    # screen (a chase camera's), so from above every one is the coarsest, a few hundred triangles.
+    - node: fleet
+      type: entity_layer
+      lod: { near_cap: 8, px: [90, 45, 20] }
+    # Where each team is headed: a beacon in its colour (the fleet's hsv(t / 6, 0.74, 0.98)), a
+    # translucent pillar to stand clear of the hills and a ball on top, on its rally point (on_tick).
+    # In no world: drawn over either.
+    - node: rally_0
+      type: group
+      visible: { bind: ui.beacons, default: true }
+      transform: { position: [0, 0, -200] }   # out of sight until the fleet has its rally points
+      children:
+        - { node: rally_0_pillar, source: { box: { size: [1.6, 1.6, 50] } }, transform: { position: [0, 0, 15] },
+            material: { color: [0.98, 0.255, 0.255], opacity: 0.5 }, casts_shadow: false }
+        - { node: rally_0_ball, source: { sphere: 3.5 }, transform: { position: [0, 0, 42] },
+            material: { color: [0.98, 0.255, 0.255] }, casts_shadow: false }
+    - node: rally_1
+      type: group
+      visible: { bind: ui.beacons, default: true }
+      transform: { position: [0, 0, -200] }   # out of sight until the fleet has its rally points
+      children:
+        - { node: rally_1_pillar, source: { box: { size: [1.6, 1.6, 50] } }, transform: { position: [0, 0, 15] },
+            material: { color: [0.98, 0.98, 0.255], opacity: 0.5 }, casts_shadow: false }
+        - { node: rally_1_ball, source: { sphere: 3.5 }, transform: { position: [0, 0, 42] },
+            material: { color: [0.98, 0.98, 0.255] }, casts_shadow: false }
+    - node: rally_2
+      type: group
+      visible: { bind: ui.beacons, default: true }
+      transform: { position: [0, 0, -200] }   # out of sight until the fleet has its rally points
+      children:
+        - { node: rally_2_pillar, source: { box: { size: [1.6, 1.6, 50] } }, transform: { position: [0, 0, 15] },
+            material: { color: [0.255, 0.98, 0.255], opacity: 0.5 }, casts_shadow: false }
+        - { node: rally_2_ball, source: { sphere: 3.5 }, transform: { position: [0, 0, 42] },
+            material: { color: [0.255, 0.98, 0.255] }, casts_shadow: false }
+    - node: rally_3
+      type: group
+      visible: { bind: ui.beacons, default: true }
+      transform: { position: [0, 0, -200] }   # out of sight until the fleet has its rally points
+      children:
+        - { node: rally_3_pillar, source: { box: { size: [1.6, 1.6, 50] } }, transform: { position: [0, 0, 15] },
+            material: { color: [0.255, 0.98, 0.98], opacity: 0.5 }, casts_shadow: false }
+        - { node: rally_3_ball, source: { sphere: 3.5 }, transform: { position: [0, 0, 42] },
+            material: { color: [0.255, 0.98, 0.98] }, casts_shadow: false }
+    - node: rally_4
+      type: group
+      visible: { bind: ui.beacons, default: true }
+      transform: { position: [0, 0, -200] }   # out of sight until the fleet has its rally points
+      children:
+        - { node: rally_4_pillar, source: { box: { size: [1.6, 1.6, 50] } }, transform: { position: [0, 0, 15] },
+            material: { color: [0.255, 0.255, 0.98], opacity: 0.5 }, casts_shadow: false }
+        - { node: rally_4_ball, source: { sphere: 3.5 }, transform: { position: [0, 0, 42] },
+            material: { color: [0.255, 0.255, 0.98] }, casts_shadow: false }
+    - node: rally_5
+      type: group
+      visible: { bind: ui.beacons, default: true }
+      transform: { position: [0, 0, -200] }   # out of sight until the fleet has its rally points
+      children:
+        - { node: rally_5_pillar, source: { box: { size: [1.6, 1.6, 50] } }, transform: { position: [0, 0, 15] },
+            material: { color: [0.98, 0.255, 0.98], opacity: 0.5 }, casts_shadow: false }
+        - { node: rally_5_ball, source: { sphere: 3.5 }, transform: { position: [0, 0, 42] },
+            material: { color: [0.98, 0.255, 0.98] }, casts_shadow: false }
+    # The terrain lab's world, small: cvc::world's relief, L-system trees, rocks and a roads-first
+    # city, generated at load. Its ground, buildings, trees and rocks are the navigator's grid. No
+    # water: the fleet's plant drives on the ground (the water level is under it).
+    - node: land
+      type: generated_world
+      world: terrain
+      seed: 5
+      half: 150                    # a 300 m square
+      preset: standard
+      city: districts
+      trees: 110
+      rocks: 30
+      buildings: 60
+      amp: 16                      # gentle hills
+      water_level: -2              # just under the relief: grass, no lakes
+      water: 0
+      edge: wall
+      color: material
+      look: soft
+      material: { opaque: true }
+      shader: { preset: terrain_bump }
+      body: {}
+    # The block city: 6 x 6 blocks of 26 m, 12 m streets and four plazas, 240 m across, on a flat
+    # ground. What stands on a flat ground blocks its grid (SceneWorld::grid_of_world_on).
+    - node: ground
+      world: blocks
+      source: { box: { size: [260, 260, 1] } }
+      transform: { position: [0, 0, -0.5] }
+      material: { color: [0.36, 0.37, 0.39] }   # the streets' asphalt
+      body: static
+    - { node: block_00, world: blocks, body: static, material: { color: [0.62, 0.56, 0.50] },
+        source: { box: { size: [26, 26, 19.0] } }, transform: { position: [-95, -95, 9.50] } }
+    - { node: block_01, world: blocks, body: static, material: { color: [0.46, 0.48, 0.54] },
+        source: { box: { size: [26, 26, 27.2] } }, transform: { position: [-57, -95, 13.60] } }
+    - { node: block_02, world: blocks, body: static, material: { color: [0.62, 0.56, 0.50] },
+        source: { box: { size: [26, 26, 8.1] } }, transform: { position: [-19, -95, 4.05] } }
+    - { node: block_03, world: blocks, body: static, material: { color: [0.46, 0.48, 0.54] },
+        source: { box: { size: [26, 26, 25.4] } }, transform: { position: [19, -95, 12.70] } }
+    - { node: block_04, world: blocks, body: static, material: { color: [0.62, 0.56, 0.50] },
+        source: { box: { size: [26, 26, 21.5] } }, transform: { position: [57, -95, 10.75] } }
+    - { node: block_05, world: blocks, body: static, material: { color: [0.46, 0.48, 0.54] },
+        source: { box: { size: [26, 26, 9.4] } }, transform: { position: [95, -95, 4.70] } }
+    - { node: block_10, world: blocks, body: static, material: { color: [0.54, 0.60, 0.56] },
+        source: { box: { size: [26, 26, 29.9] } }, transform: { position: [-95, -57, 14.95] } }
+    - { node: block_11, world: blocks, body: static, material: { color: [0.70, 0.64, 0.52] },
+        source: { box: { size: [26, 26, 8.5] } }, transform: { position: [-57, -57, 4.25] } }
+    - { node: block_12, world: blocks, body: static, material: { color: [0.54, 0.60, 0.56] },
+        source: { box: { size: [26, 26, 27.0] } }, transform: { position: [-19, -57, 13.50] } }
+    - { node: block_13, world: blocks, body: static, material: { color: [0.70, 0.64, 0.52] },
+        source: { box: { size: [26, 26, 15.0] } }, transform: { position: [19, -57, 7.50] } }
+    - { node: block_15, world: blocks, body: static, material: { color: [0.70, 0.64, 0.52] },
+        source: { box: { size: [26, 26, 24.4] } }, transform: { position: [95, -57, 12.20] } }
+    - { node: block_20, world: blocks, body: static, material: { color: [0.64, 0.50, 0.44] },
+        source: { box: { size: [26, 26, 16.2] } }, transform: { position: [-95, -19, 8.10] } }
+    - { node: block_21, world: blocks, body: static, material: { color: [0.50, 0.54, 0.60] },
+        source: { box: { size: [26, 26, 21.4] } }, transform: { position: [-57, -19, 10.70] } }
+    - { node: block_23, world: blocks, body: static, material: { color: [0.50, 0.54, 0.60] },
+        source: { box: { size: [26, 26, 20.5] } }, transform: { position: [19, -19, 10.25] } }
+    - { node: block_24, world: blocks, body: static, material: { color: [0.64, 0.50, 0.44] },
+        source: { box: { size: [26, 26, 18.0] } }, transform: { position: [57, -19, 9.00] } }
+    - { node: block_25, world: blocks, body: static, material: { color: [0.50, 0.54, 0.60] },
+        source: { box: { size: [26, 26, 19.6] } }, transform: { position: [95, -19, 9.80] } }
+    - { node: block_30, world: blocks, body: static, material: { color: [0.46, 0.48, 0.54] },
+        source: { box: { size: [26, 26, 8.8] } }, transform: { position: [-95, 19, 4.40] } }
+    - { node: block_31, world: blocks, body: static, material: { color: [0.62, 0.56, 0.50] },
+        source: { box: { size: [26, 26, 27.1] } }, transform: { position: [-57, 19, 13.55] } }
+    - { node: block_32, world: blocks, body: static, material: { color: [0.46, 0.48, 0.54] },
+        source: { box: { size: [26, 26, 14.1] } }, transform: { position: [-19, 19, 7.05] } }
+    - { node: block_34, world: blocks, body: static, material: { color: [0.46, 0.48, 0.54] },
+        source: { box: { size: [26, 26, 21.7] } }, transform: { position: [57, 19, 10.85] } }
+    - { node: block_35, world: blocks, body: static, material: { color: [0.62, 0.56, 0.50] },
+        source: { box: { size: [26, 26, 12.7] } }, transform: { position: [95, 19, 6.35] } }
+    - { node: block_40, world: blocks, body: static, material: { color: [0.70, 0.64, 0.52] },
+        source: { box: { size: [26, 26, 24.4] } }, transform: { position: [-95, 57, 12.20] } }
+    - { node: block_42, world: blocks, body: static, material: { color: [0.70, 0.64, 0.52] },
+        source: { box: { size: [26, 26, 28.8] } }, transform: { position: [-19, 57, 14.40] } }
+    - { node: block_43, world: blocks, body: static, material: { color: [0.54, 0.60, 0.56] },
+        source: { box: { size: [26, 26, 15.2] } }, transform: { position: [19, 57, 7.60] } }
+    - { node: block_44, world: blocks, body: static, material: { color: [0.70, 0.64, 0.52] },
+        source: { box: { size: [26, 26, 14.6] } }, transform: { position: [57, 57, 7.30] } }
+    - { node: block_45, world: blocks, body: static, material: { color: [0.54, 0.60, 0.56] },
+        source: { box: { size: [26, 26, 29.1] } }, transform: { position: [95, 57, 14.55] } }
+    - { node: block_50, world: blocks, body: static, material: { color: [0.50, 0.54, 0.60] },
+        source: { box: { size: [26, 26, 27.8] } }, transform: { position: [-95, 95, 13.90] } }
+    - { node: block_51, world: blocks, body: static, material: { color: [0.64, 0.50, 0.44] },
+        source: { box: { size: [26, 26, 21.5] } }, transform: { position: [-57, 95, 10.75] } }
+    - { node: block_52, world: blocks, body: static, material: { color: [0.50, 0.54, 0.60] },
+        source: { box: { size: [26, 26, 8.2] } }, transform: { position: [-19, 95, 4.10] } }
+    - { node: block_53, world: blocks, body: static, material: { color: [0.64, 0.50, 0.44] },
+        source: { box: { size: [26, 26, 25.1] } }, transform: { position: [19, 95, 12.55] } }
+    - { node: block_54, world: blocks, body: static, material: { color: [0.50, 0.54, 0.60] },
+        source: { box: { size: [26, 26, 24.9] } }, transform: { position: [57, 95, 12.45] } }
+    - { node: block_55, world: blocks, body: static, material: { color: [0.64, 0.50, 0.44] },
+        source: { box: { size: [26, 26, 8.1] } }, transform: { position: [95, 95, 4.05] } }

@@ -43,7 +43,7 @@ From the table:
 | `params_to_state(p, node)` | `param_table.h` | One key per field under `node`, with its properties |
 | `params_from_state<P>(node)` | `param_table.h` | Reads the keys back. A missing key is seeded with its default (and its properties). A value that does not parse is an error, not replaced by the default. The result is validated, so `errors` lists all a caller must report |
 | `params_describe_state<P>(node)` | `param_table.h` | Writes the properties only |
-| `param_field_infos<P>()`, `params_markdown<P>()` | `param_table.h` | The table as data, and as a Markdown table for a port's docs |
+| `param_field_infos<P>()`, `params_markdown<P>()` | `param_table.h` | The table as data, and as a Markdown table for a port's docs ([PORT_PARAMETERS.md](PORT_PARAMETERS.md) holds the ports' tables it printed) |
 | `add_param_options<P>(desc)`, `params_from_options<P>(vm)` | `param_cli.h` | The CLI flags (`--smooth-iterations`; a bool flag alone is true) with their help, for a `cvc` subcommand on boost::program_options. Legacy aliases are added by hand |
 | `params_from_value<P>(v)`, `params_to_dict(p)` | `param_dsl.h` | The dict an intrinsic takes as its parameters (nil: the defaults; an unknown key names the valid ones) |
 | `register_params<P>(app, name)`, `register_param_intrinsics(env, app)` | `param_dsl.h` | The app's registry of tables, behind `(params.defaults name)` and `(params.check name dict)` |

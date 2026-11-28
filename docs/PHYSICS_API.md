@@ -1050,14 +1050,15 @@ plans with its vehicles' own limits.
   agents are then on the kinematic bicycle (`fallback()` is true). Boats need Jolt: without it
   the name falls back to the kinematic bicycle as a preset does.
 
-The cvcGL nav demos take `--plant` (`kinematic`, `humvee`, `roboracer`), and the restart panel
-has a plant control. They use three Jolt worker threads natively and none in the browser.
+The cvcGL nav demos (C++ programs, since retired for their Ariadne documents) took `--plant`
+(`kinematic`, `humvee`, `roboracer`), and the restart panel had a plant control. They used three
+Jolt worker threads natively and none in the browser.
 
-- They default to Humvees on Jolt when the build has it (`nav_city_swarm`'s hundreds of agents
+- They defaulted to Humvees on Jolt when the build had it (`nav_city_swarm`'s hundreds of agents
   excepted). The navigator's A* routes and reactive drive still assume the bicycle's tight turns.
   In the Austin finale a Humvee (a 6.7 m turning circle) on A* routes wedges in a corner after
   act 2 replans it, upright and at full lock; 7 of its 8 Humvees end up wedged.
-- On a plant, `nav_finale` drives vehicle routes instead (`plan_vehicle_route` and
+- On a plant, `nav_finale` drove vehicle routes instead (`plan_vehicle_route` and
   `route_follower`, docs/NAV_VEHICLE.md). Its Humvees then drive 5387 m in 900 frames, against
   1903 m on A* routes, and none wedges.
 - `nav_material_demo` runs the bicycle and the Humvee side by side. The material layer keeps the
@@ -1454,10 +1455,13 @@ The parts:
   its triangles.
 - **Wading** (`vehicle.h`'s `wading_desc`). `vehicle_desc.wading` is a `pycvc.wading_desc`
   whose fields read and write in place (`d.wading.fording_depth = 1.52`); `as_dict()` gives
-  them all. `vehicle_state` adds `water_force` and `engine_flooded`, each wheel `water_depth`
-  and `water_drag`. `set_vehicle(id, desc)` tunes a running vehicle, wading's knobs included;
-  `wading.enabled` and `wading.displacement` are fixed when it is added. The binding's
-  `vehicles.<name>.tuning.wading.*` knobs do the same from the tree.
+  them all. `vehicle_state` adds `water_force`, `engine_flooded`, `water_inside` and
+  `water_inside_mass` (with a `flood_area`), each wheel `water_depth` and `water_drag`.
+  `set_vehicle(id, desc)` tunes a running vehicle, wading's knobs included; `wading.enabled`,
+  `wading.displacement` and whether `flood_area` is 0 are fixed when it is added. The
+  binding's `vehicles.<name>.tuning.wading.*` knobs do the same from the tree.
+  `dyn_bike_plant.wading(i)` (wet, engine_flooded, drag, lift and each axle's contact, grip and
+  depth) and `waded(i)` read the dynamic plant's water (`dyn_wading.h`).
 - **The wind** (`flow_velocity.h`). `wind_flow(speed_mps, dir_rad, gustiness, base_z)` is the
   scene's wind; `scene_wind_flow(speed, dir, gustiness=0.25, base_z=0)` is the one Ariadne's
   `wind.speed`, `wind.dir` (degrees) and `wind.gustiness` keys make. Both have `velocity(p,

@@ -489,6 +489,15 @@ struct SceneWorld::impl {
   // min_y, max_x, max_y): what grid() makes a terrain's or a flat ground's grid from.
   std::map<std::string, std::shared_ptr<const cvc::height_field>> fields;
   std::map<std::string, std::array<double, 4>> footprints;
+  // A static node's height range (min_z, max_z), beside its footprint: what stands on a flat
+  // ground (grid_of_world_on).
+  std::map<std::string, std::array<double, 2>> heights;
+  // A world's grid with what stands on its flat ground blocked, by world, while its ground's grid
+  // (`base`) is the one it was made from.
+  struct world_grid_cache {
+    std::shared_ptr<const cvc::nav::world_grid> base, grid;
+  };
+  std::map<std::string, world_grid_cache> world_grids;
 
   const world_def *find_world(const std::string &name) const {
     for (const world_def &w : worlds)
@@ -807,6 +816,19 @@ SceneWorld::build(cvc::app &app, const ScenePhysics &spec,
   // beside the stepping thread: the same values in the same order, so a run is the same.
   const unsigned hw = std::thread::hardware_concurrency();
   cfg.field_threads = hw > 1 ? static_cast<int>(std::min(3u, hw - 1)) : 0;
+  // Jolt's own workers inside each step, wherever there are threads (as the swarm's plant host
+  // has them): its vehicles' wheels and suspensions (step listeners, eight to a job), its
+  // collisions and its islands run on them beside the stepping thread. A run is the same on any
+  // number (Jolt is deterministic across them). Up to three natively; in a browser built with
+  // threads, up to two, which its pre-spawned pthread pool has room for. A Jolt world only: the
+  // null backend has no workers to give, and refuses a world that asks for them.
+  if (cfg.backend == ph::backend::jolt) {
+#if !defined(__EMSCRIPTEN__)
+    cfg.threads = hw > 2 ? static_cast<int>(std::min(3u, hw - 2)) : 0;
+#elif defined(__EMSCRIPTEN_PTHREADS__)
+    cfg.threads = hw > 2 ? static_cast<int>(std::min(2u, hw - 2)) : 0;
+#endif
+  }
 
   std::unique_ptr<SceneWorld> out(new SceneWorld());
   out->_impl->app = &app;
@@ -1030,17 +1052,26 @@ SceneWorld::build(cvc::app &app, const ScenePhysics &spec,
     ent.desc = d;
     ent.body = made;
     out->_impl->entries.push_back(std::move(ent));
-    // The node's footprint: its mesh's box, placed (a flat ground's grid covers it).
+    // The node's footprint: its mesh's box, placed (a flat ground's grid covers it); and a static
+    // one's height range (what stands on a flat ground blocks its grid).
     std::array<double, 4> &fp =
         out->_impl->footprints.emplace(n.id, std::array<double, 4>{1e300, 1e300, -1e300, -1e300})
             .first->second;
+    std::array<double, 2> zr{1e300, -1e300};
     for (int k = 0; k < 8; ++k) {
       const double x = (k & 1) ? e.maxx : e.minx, y = (k & 2) ? e.maxy : e.miny,
                    z = (k & 4) ? e.maxz : e.minz;
       const double *m = p.world.data();
       const double wx = m[0] * x + m[1] * y + m[2] * z + m[3];
       const double wy = m[4] * x + m[5] * y + m[6] * z + m[7];
+      const double wz = m[8] * x + m[9] * y + m[10] * z + m[11];
       fp = {std::min(fp[0], wx), std::min(fp[1], wy), std::max(fp[2], wx), std::max(fp[3], wy)};
+      zr = {std::min(zr[0], wz), std::max(zr[1], wz)};
+    }
+    if (!made.moves) {
+      std::array<double, 2> &h =
+          out->_impl->heights.emplace(n.id, std::array<double, 2>{1e300, -1e300}).first->second;
+      h = {std::min(h[0], zr[0]), std::max(h[1], zr[1])};
     }
   }
   return out;
@@ -1416,6 +1447,10 @@ void SceneWorld::sync(const cvc::world_clock &clock, std::vector<std::string> *w
   for (const auto &w : d.waters) // after the worlds: a regenerated ground is their ground
     w->tick(&clock);
   for (impl::tracked &t : d.tracked_nodes) {
+    // A revision built off the frame (a water's sea keyframe) that goes in by the clock's tick now:
+    // made now, so the step it is due at has it, however the frames fall (F4).
+    if (t.colliders->settle)
+      t.colliders->settle(clock.tick());
     d.take_dataset(t, warnings); // a dataset that is ready and new: its colliders
     // A change timed on the clock goes in at its step (follow), unless that step has gone by.
     const std::uint64_t at = t.colliders->from_tick;
@@ -1693,6 +1728,11 @@ void SceneWorld::sync_wind() {
   }
   if (d.vehicles) // the plants that do not feel the field (WorldVehicles::set_wind)
     d.vehicles->set_wind(d.wind_flow);
+  // The air into each runtime's slot (SceneColliders::air), here at a sync and within the steps
+  // alike: the water's ripples read the storms' fronts from it at each step (F4).
+  for (impl::tracked &t : d.tracked_nodes)
+    if (t.colliders->air && *t.colliders->air != d.wind_flow)
+      *t.colliders->air = d.wind_flow;
 }
 
 void SceneWorld::publish_front(const cvc::world_clock &clock) {
@@ -1748,14 +1788,66 @@ void SceneWorld::ground_of_world_on(std::shared_ptr<const cvc::nav::world_grid> 
   g.reset();
   made.reset();
   if (const impl::world_def *w = d.find_world(d.on)) {
-    const double cell = d.grid_cell > 0.0 ? d.grid_cell : 2.0;
-    for (const std::string &node : w->nodes) {
-      if (!g)
-        g = grid(node, cell, d.grid_half, nullptr);
+    g = grid_of_world_on(d.grid_cell > 0.0 ? d.grid_cell : 2.0, nullptr);
+    for (const std::string &node : w->nodes)
       if (!made)
         made = world_geometry(node);
-    }
   }
+}
+
+std::shared_ptr<const cvc::nav::world_grid>
+SceneWorld::grid_of_world_on(double cell, std::vector<std::string> *warnings) {
+  impl &d = *_impl;
+  const impl::world_def *w = d.find_world(d.on);
+  if (!w)
+    return nullptr;
+  std::shared_ptr<const cvc::nav::world_grid> g;
+  std::string ground;
+  for (const std::string &node : w->nodes)
+    if ((g = grid(node, cell, d.grid_half, warnings))) {
+      ground = node;
+      break;
+    }
+  // A generated world's grid, a dataset's or a terrain's has what stands on it already.
+  if (!g || world_geometry(ground) || d.fields.count(ground))
+    return g;
+  // A flat ground's: the world's other static nodes stand on it.
+  constexpr double kStands = 0.5; // over the ground (m): lower, a vehicle drives over it
+  std::vector<std::string> standing;
+  for (const std::string &node : w->nodes)
+    if (node != ground && d.footprints.count(node) && d.heights.count(node))
+      standing.push_back(node);
+  if (standing.empty())
+    return g;
+  impl::world_grid_cache &c = d.world_grids[w->name];
+  if (c.base == g && c.grid)
+    return c.grid;
+  auto out = std::make_shared<cvc::nav::world_grid>(*g);
+  const double h = out->cell();
+  if (h > 0.0)
+    for (const std::string &node : standing) {
+      const std::array<double, 4> &f = d.footprints.at(node);
+      const double top = d.heights.at(node)[1];
+      // The samples whose points lie under its footprint.
+      const int c0 = std::max(0, static_cast<int>(std::ceil((f[0] - out->min_x) / h - 1e-9)));
+      const int c1 =
+          std::min(out->cols - 1, static_cast<int>(std::floor((f[2] - out->min_x) / h + 1e-9)));
+      const int r0 = std::max(0, static_cast<int>(std::ceil((f[1] - out->min_y) / h - 1e-9)));
+      const int r1 =
+          std::min(out->rows - 1, static_cast<int>(std::floor((f[3] - out->min_y) / h + 1e-9)));
+      for (int r = r0; r <= r1; ++r)
+        for (int k = c0; k <= c1; ++k) {
+          const std::size_t i = static_cast<std::size_t>(r) * out->cols + k;
+          if (top - out->height[i] < kStands)
+            continue;
+          out->occupancy[i] = 1;
+          if (!out->solid.empty())
+            out->solid[i] = 1;
+        }
+    }
+  c.base = g;
+  c.grid = out;
+  return out;
 }
 
 void SceneWorld::vehicle_ground(std::shared_ptr<const cvc::nav::world_grid> &grid,
@@ -1885,11 +1977,8 @@ void SceneWorld::publish_worlds(bool force) {
           std::find(w->nodes.begin(), w->nodes.end(), node) != w->nodes.end() ? "1" : "0");
   std::string summary;
   if (ready && d.grid_cell > 0.0) {
-    for (const std::string &node : w->nodes) {
-      std::shared_ptr<const cvc::nav::world_grid> g =
-          grid(node, d.grid_cell, d.grid_half, &d.warnings);
-      if (!g)
-        continue;
+    if (std::shared_ptr<const cvc::nav::world_grid> g =
+            grid_of_world_on(d.grid_cell, &d.warnings)) {
       put("grid.rows", std::to_string(g->rows));
       put("grid.cols", std::to_string(g->cols));
       put("grid.cell", num(g->cell()));
@@ -1900,7 +1989,6 @@ void SceneWorld::publish_worlds(bool force) {
          << (100 * occupied / std::max<std::size_t>(1, std::size_t(g->rows) * g->cols))
          << "% blocked";
       summary = os.str();
-      break;
     }
   }
   put("grid.summary", summary);
@@ -1985,6 +2073,8 @@ std::uint64_t SceneWorld::follow(const cvc::world_clock &clock,
     bool gust = false;
     for (const auto &wf : d.weathers)
       gust = wf->switch_gust(tick) || gust;
+    for (const auto &wf : d.weathers) // a steering wind or time scale changed live (F4)
+      gust = wf->switch_steering(tick) || gust;
     if (gust)
       sync_wind();
     d.wake_in_fronts(tick, clock.fixed_dt());

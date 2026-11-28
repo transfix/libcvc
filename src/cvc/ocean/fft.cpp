@@ -97,11 +97,12 @@ void fft_plan::run(double *a, std::size_t stride, int sign) const {
 void fft_plan::run_block(double *re, double *im, int sign) const {
   const std::size_t n = std::size_t(_n), B = kBlock;
   const double sg = sign >= 0 ? 1.0 : -1.0;
+  const double *cs = _cos.data(), *sn = _sin.data();
   for (std::size_t len = 2; len <= n; len <<= 1) { // run()'s stages, kBlock transforms abreast
     const std::size_t half = len / 2, step = n / len;
     for (std::size_t i = 0; i < n; i += len)
       for (std::size_t j = 0; j < half; ++j) {
-        const double wr = _cos[j * step], wi = sg * _sin[j * step];
+        const double wr = cs[j * step], wi = sg * sn[j * step];
         double *pr = re + (i + j) * B, *pi = im + (i + j) * B;
         double *qr = re + (i + j + half) * B, *qi = im + (i + j + half) * B;
         for (std::size_t b = 0; b < B; ++b) { // run()'s butterfly, operation for operation
@@ -129,8 +130,11 @@ void fft_plan::run_2d(double *a, int sign) const {
   // place j takes element rev[j]) into a split real / imaginary buffer, kBlock values to a place,
   // transformed abreast by run()'s butterflies in run()'s order, and put back. Each value meets
   // the same operations as under run(), so the result is the same bits; the inner loop over the
-  // block vectorizes.
-  std::vector<double> re(n * kBlock), im(n * kBlock);
+  // block vectorizes. (Through raw pointers: an unoptimized build calls std::vector's operator[]
+  // for every element, and these loops touch each value twice a pass.)
+  std::vector<double> re_buf(n * kBlock), im_buf(n * kBlock);
+  double *re = re_buf.data(), *im = im_buf.data();
+  const int *rev = _rev.data();
   // The rows. A row of +0 transforms to itself bit for bit (every butterfly adds a +-0 product to
   // +0 and subtracts it from +0, which gives +0), so a block of them is left as it is: a band of a
   // few wavenumbers (the sea's long cascades) fills only a few rows.
@@ -138,13 +142,13 @@ void fft_plan::run_2d(double *a, int sign) const {
     if (all_plus_zero(a + r0 * n * 2, kBlock * n * 2))
       continue;
     for (std::size_t j = 0; j < n; ++j) {
-      const std::size_t src = std::size_t(_rev[j]) * 2;
+      const std::size_t src = std::size_t(rev[j]) * 2;
       for (std::size_t b = 0; b < kBlock; ++b) {
         re[j * kBlock + b] = a[(r0 + b) * n * 2 + src];
         im[j * kBlock + b] = a[(r0 + b) * n * 2 + src + 1];
       }
     }
-    run_block(re.data(), im.data(), sign);
+    run_block(re, im, sign);
     for (std::size_t j = 0; j < n; ++j)
       for (std::size_t b = 0; b < kBlock; ++b) {
         a[(r0 + b) * n * 2 + j * 2] = re[j * kBlock + b];
@@ -154,13 +158,13 @@ void fft_plan::run_2d(double *a, int sign) const {
   // The columns.
   for (std::size_t c0 = 0; c0 < n; c0 += kBlock) {
     for (std::size_t j = 0; j < n; ++j) {
-      const double *row = a + std::size_t(_rev[j]) * n * 2 + c0 * 2;
+      const double *row = a + std::size_t(rev[j]) * n * 2 + c0 * 2;
       for (std::size_t b = 0; b < kBlock; ++b) {
         re[j * kBlock + b] = row[b * 2];
         im[j * kBlock + b] = row[b * 2 + 1];
       }
     }
-    run_block(re.data(), im.data(), sign);
+    run_block(re, im, sign);
     for (std::size_t j = 0; j < n; ++j) {
       double *row = a + j * n * 2 + c0 * 2;
       for (std::size_t b = 0; b < kBlock; ++b) {

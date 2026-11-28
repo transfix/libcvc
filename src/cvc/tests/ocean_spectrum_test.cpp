@@ -235,6 +235,32 @@ TEST(OceanH0, ZeroOutsideTheBandAndHermitian) {
   }
 }
 
+// A sea keyframe built a few rows at a time (off the frame, F4) is build_h0's field to the bit,
+// however the rows are split.
+TEST(OceanH0, ABuilderStepByStepIsBuildH0) {
+  const int n = 64;
+  sea_state s;
+  s.wind.speed_mps = 17.5;
+  s.wind.dir_rad = 0.7;
+  s.wind.fetch_m = 80000.0;
+  for (const cascade &c : make_cascades({251.0, 83.0, 29.0}, 0xC0A57ull)) {
+    const h0_field whole = build_h0(n, c, s);
+    for (int rows : {1, 7, 64}) {
+      h0_builder b(n, c, s);
+      int steps = 0;
+      while (!b.step(rows))
+        ++steps;
+      EXPECT_EQ(b.rows_done(), n);
+      EXPECT_EQ(steps, (n + rows - 1) / rows - 1);
+      const h0_field parts = b.take();
+      EXPECT_EQ(parts.n, whole.n);
+      EXPECT_EQ(parts.tile_m, whole.tile_m);
+      EXPECT_EQ(parts.texels, whole.texels) << "rows " << rows;
+    }
+  }
+  EXPECT_THROW(h0_builder(48, cascade{}, s), std::invalid_argument);
+}
+
 TEST(OceanH0, IsBitIdenticalAcrossBuildsAndSeededPerCascade) {
   const int n = 128;
   const std::vector<cascade> cs = make_cascades({251.0, 83.0, 29.0}, 0xC0A57ull);

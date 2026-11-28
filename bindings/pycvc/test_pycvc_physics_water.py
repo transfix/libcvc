@@ -8,7 +8,9 @@ Python reads the same values as C++. The checks:
      point with the waves in it, a coast (shore_grid_mask, C6) and the refusals;
   2. wading (vehicle_desc.wading): a Humvee fords 0.5 m and its engine floods as its front axle
      meets 0.9 m, past its 0.76 m fording depth; with the deep-water kit (fording_depth 1.52, set
-     through the physics binding's tuning.wading knobs) it drives on through;
+     through the physics binding's tuning.wading knobs) it drives on through; a hard-doored one
+     (flood_area 0.1 m^2) fills over seconds to the level outside; the dynamic single track
+     wades (dyn_bike_plant.wading);
   3. the wind (wind_flow, physics_world.set_wind as Ariadne's scene wind keys): its digest and
      samples are C++'s pinned ones, and it pushes a light body downwind, gusts included;
   4. boats (hull_mesh, loft_hull, boat_desc, dyn_boat_desc, dyn_boat_plant): the tactical boat is
@@ -279,6 +281,8 @@ def test_wading():
     check(g.enabled and g.fording_depth == 0.76 and g.displacement == 0.12, "the Humvee wades")
     check(g.as_dict()["wheel_displacement"] == 0.8 and g.as_dict()["underbody_depth"] == 0.16,
           "its knobs as a dict")
+    check(g.flood_area == 0.0 and g.as_dict()["flood_area"] == 0.0,
+          "its open engine bay floods at once (flood_area 0)")
     d.wading.fording_depth = 1.52
     check(d.wading.fording_depth == 1.52, "an attribute of the description")
     check(pycvc.wading_desc().enabled is False and pycvc.wading_desc().displacement == 0.15,
@@ -323,6 +327,93 @@ def test_wading():
     bad = pycvc.vehicle_desc.humvee()
     bad.wading.fording_depth = -0.1
     expect_raises(lambda: w.add_vehicle(bad, position=(0.0, 20.0, 1.2)), "a negative fording depth")
+
+
+def test_flooding_over_time():
+    """AHardDooredHumveeFloodsOverSecondsAndDrainsOnTheWayOut: with a flood_area the cabin and
+    engine bay fill through their openings over seconds, toward the water's level outside."""
+    if not JOLT["available"]:
+        print("  Jolt is not available: the flooding run skipped")
+        return
+    depth = 0.7
+    d = pycvc.vehicle_desc.humvee()
+    d.wading.flood_area = 0.1
+    w = pycvc.physics_world()
+    m = w.add_material("ground", friction=0.9)
+    w.add_box((1500.0, 1500.0, 0.5), position=(0.0, 0.0, -0.5), motion="static", material=m)
+    w.add_field(uniform(1000.0, (-50.0, -50.0, -1.0), (15.0, 50.0, depth)))
+    car = w.add_vehicle(d, position=(0.0, 0.0, 1.2))
+    w.drive(car)
+    app = pycvc.make_app()
+    bind = pycvc.physics_binding(app, w, "physics")
+    bind.publish_vehicle("car", car)
+    bind.pull()
+    check(float(pycvc.state_get(app, "physics.vehicles.car.tuning.wading.flood_area")) == 0.1,
+          "the knob is seeded with its flood_area")
+    inside = []  # every 0.5 s for 60 s
+    for _ in range(121):
+        inside.append(w.vehicle_state(car)["water_inside"])
+        w.step(50)
+    s = w.vehicle_state(car)
+    he = d.half_extents()
+    plan = (1.0 - d.wading.displacement) * 4.0 * he[0] * he[1]
+    level = (depth - (s["position"][2] - he[2])) * plan
+    print("  hard doors (0.1 m^2) in 0.7 m: %.3f m^3 inside at 1 s, %.3f at 5 s, %.3f at 60 s "
+          "(level %.3f)" % (inside[2], inside[10], inside[-1], level))
+    check(all(inside[k] > inside[k - 1] for k in range(1, 41)), "it fills for 20 s")
+    check(inside[2] < 0.25 * inside[-1], "over seconds, not at once")
+    check(abs(inside[-1] - level) < 0.05 * level, "up to the water's level outside")
+    check(abs(s["water_inside_mass"] - 1000.0 * s["water_inside"]) < 1e-6 * s["water_inside_mass"],
+          "its mass at 1000 kg/m^3")
+    bind.push()
+    bind.flush()
+    check(float(pycvc.state_get(app, "physics.vehicles.car.water_inside")) == s["water_inside"],
+          "the binding publishes water_inside")
+    # The value tunes; whether it is 0 is fixed when the vehicle is added.
+    t = w.vehicle_desc_of(car)
+    t.wading.flood_area = 0.2
+    w.set_vehicle(car, t)
+    check(w.vehicle_desc_of(car).wading.flood_area == 0.2, "a larger opening")
+    t.wading.flood_area = 0.0
+    expect_raises(lambda: w.set_vehicle(car, t), "flood_area to 0 on a running vehicle")
+    pycvc.state_set(app, "physics.vehicles.car.tuning.wading.flood_area", "0")
+    bind.pull()
+    check(w.vehicle_desc_of(car).wading.flood_area == 0.2, "and from the tree, ignored")
+    del bind
+    gc.collect()
+
+
+def test_a_dynamic_plant_wades():
+    """dyn_bike_plant with a world wades in its water (dyn_wading.h): wading(i) and waded(i)."""
+    if not JOLT["available"]:
+        print("  Jolt is not available: the dynamic plant's wading skipped")
+        return
+    runs = {}
+    for wet in (False, True):
+        w = pycvc.physics_world()
+        m = w.add_material("ground", friction=0.9)
+        g = w.add_box((150.0, 150.0, 0.5), position=(0.0, 0.0, -0.5), motion="static", material=m)
+        if wet:
+            w.add_field(uniform(1000.0, (-100.0, -50.0, -1.0), (100.0, 50.0, 0.5)))
+        sim = open_sim((-60.0, 0.0), (60.0, 0.0))
+        plant = pycvc.dyn_bike_plant([pycvc.vehicle_desc.humvee()], world=w, ground_bodies=[g])
+        pycvc.nav_sim_world_set_plant(sim, plant)
+        for _ in range(60):
+            pycvc.nav_sim_world_step(sim)
+        runs[wet] = (plant.wading(0), plant.waded(0), plant.state(0)["x"] / S)
+        pycvc.nav_sim_world_set_plant(sim, None)
+    dry, wet = runs[False], runs[True]
+    print("  dyn Humvee in 0.5 m: lift %.0f N, drag %.1f kg/m, depth %.2f m at its front axle; "
+          "%.1f m in 3 s (dry %.1f m)" % (wet[0]["lift"], wet[0]["drag"],
+                                          wet[0]["tires"][0]["depth"], wet[2] + 60.0,
+                                          dry[2] + 60.0))
+    check(not dry[0]["wet"] and not dry[1] and dry[0]["lift"] == 0.0, "dry, it does not wade")
+    check(wet[0]["wet"] and wet[1] and len(wet[0]["tires"]) == 2, "in the lake it wades")
+    check(wet[0]["lift"] > 1000.0 and wet[0]["drag"] > 0.0, "the water lifts it and drags it")
+    check(all(abs(t["depth"] - 0.5) < 0.05 for t in wet[0]["tires"]),
+          "0.5 m over each axle's contact")
+    check(not wet[0]["engine_flooded"], "under its fording depth")
+    check(wet[2] < dry[2], "it goes slower in the water")
 
 
 # --- 3. the wind (flow_velocity.h; Ariadne's scene wind keys) ---------------------------------
@@ -667,7 +758,8 @@ def test_the_plant_host_reads_the_boats():
 
 
 def main():
-    for t in (test_the_wake, test_wading, test_the_wind, test_hulls, test_the_tactical_boat,
+    for t in (test_the_wake, test_wading, test_flooding_over_time, test_a_dynamic_plant_wades,
+              test_the_wind, test_hulls, test_the_tactical_boat,
               test_a_boat_field_by_field, test_the_plant_host_reads_the_boats):
         t()
         print("ok  " + t.__name__)

@@ -3684,9 +3684,11 @@ windows:
 
 // A document nested 40 levels deep, each level a unit included with args (a feed's window, view,
 // profile, card list, card, media grid, tile, ... and more), loads, and a terminal draws its
-// innermost widget. Loading and drawing recurse once a level: at Windows' default 1 MB main-thread
-// stack about 15 levels overflowed it (0xC00000FD), so the hosts and these tests link with 8 MB
-// there, as Linux has (CMake/CvcHostStack.cmake).
+// innermost widget. Loading recurses once a level (drawing no longer does:
+// ariadne_deep_nesting_test). It took about 100 KB of stack a level, and at Windows' default 1 MB
+// main-thread stack about 15 levels overflowed it (0xC00000FD), so the hosts and these tests link
+// with 8 MB there, as Linux has (CMake/CvcHostStack.cmake); it takes about 1 KB now, and a document
+// nests at most kMaxNesting levels (§6.7: this one is 82).
 TEST(AriadneLoader, ADocumentNested40DeepThroughIncludesLoadsAndDraws) {
   SKIP_WITHOUT_YAML();
   constexpr int kDepth = 40;
@@ -3736,6 +3738,204 @@ TEST(AriadneLoader, ADocumentNested40DeepThroughIncludesLoadsAndDraws) {
   rt.set_root(std::move(r.root));
   const std::string screen = b.render_to_string(rt, 60, 0);
   EXPECT_NE(screen.find("deepest " + std::to_string(kDepth - 1)), std::string::npos) << screen;
+}
+
+// ---- §6.7 how deep a document nests ------------------------------------------------------------
+//
+// Each widget is a level, and so is each include: and load: entry: the unit's or the fragment's
+// widgets go on a level below it. A document whose deepest widget is at kMaxNesting loads; one a
+// level deeper fails, its error at the first widget past the limit.
+
+// The 1-based number of the first line of `doc` that holds `needle` (0 when none does).
+int line_of(const std::string &doc, const std::string &needle) {
+  const std::size_t at = doc.find(needle);
+  return at == std::string::npos
+             ? 0
+             : 1 + static_cast<int>(std::count(doc.begin(), doc.begin() + at, '\n'));
+}
+
+// `inner` inside `n` groups written out inline, in flow style (each a level).
+std::string inline_groups(std::size_t n, const std::string &inner) {
+  std::string s;
+  for (std::size_t i = 0; i < n; ++i)
+    s += "{type: group, children: [";
+  s += inner;
+  for (std::size_t i = 0; i < n; ++i)
+    s += "]}";
+  return s;
+}
+
+// Units u0..u<units>: each but the last a group around an include: of the next, the last a group
+// around `groups` groups written inline around a text. The window's include: of u0 is level 1, so
+// the text is at level 2 * units + 3 + groups.
+std::string plain_nesting_doc(std::size_t units, std::size_t groups) {
+  std::string doc = "meta: { min_libcvc: \"0.0.0\" }\nwindows:\n  - include: u0\nunits:\n";
+  for (std::size_t i = 0; i < units; ++i)
+    doc += "  u" + std::to_string(i) + ": {type: group, children: [{include: u" +
+           std::to_string(i + 1) + "}]}\n";
+  doc += "  u" + std::to_string(units) + ": {type: group, children: [" +
+         inline_groups(groups, "{text: deepest}") + "]}\n";
+  return doc;
+}
+
+TEST(AriadneLoader, NestingLimitCountsPlainChildren) {
+  SKIP_WITHOUT_YAML();
+  // 30 units, then 193 groups inline: the text at 2 * 30 + 3 + 193 = 256. (One document's widgets
+  // alone cannot nest 256 deep: yaml-cpp parses at most about 500 levels of YAML, two a widget.)
+  ASSERT_EQ(kMaxNesting, 256u);
+  LoadResult r = fresh_load(plain_nesting_doc(30, 193));
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_NE(find(r.root, Kind::Text, "deepest"), nullptr);
+
+  // A group more: the text is at 257, refused where it is written in the unit.
+  const std::string doc = plain_nesting_doc(30, 194);
+  r = fresh_load(doc);
+  ASSERT_FALSE(r.ok);
+  EXPECT_TRUE(r.root.children.empty());
+  EXPECT_NE(r.error.find("a widget nested deeper than 256 levels"), std::string::npos) << r.error;
+  EXPECT_NE(r.error.find("with 31 include: and 0 load: on the way"), std::string::npos) << r.error;
+  EXPECT_EQ(r.error.find("by way of"), std::string::npos) << r.error; // all in the one document
+  const int line = line_of(doc, "  u30:");
+  const std::string row = doc.substr(doc.find("  u30:"));
+  const int column = 1 + static_cast<int>(row.find("{text: deepest}"));
+  EXPECT_EQ(r.error_source, "");
+  EXPECT_EQ(r.error_line, line);
+  EXPECT_EQ(r.error_column, column);
+  EXPECT_EQ(
+      r.error.rfind("ari: line " + std::to_string(line) + ":" + std::to_string(column) + ": ", 0),
+      0u)
+      << r.error;
+}
+
+// AriadneDeepNesting's include chain: units level0..level<n-1>, each a group around an include: of
+// the next, the last a group around a text, in a window: the text is at 2 * n + 2.
+std::string include_nesting_doc(std::size_t n) {
+  std::string doc = "meta: { min_libcvc: \"0.0.0\" }\nunits:\n";
+  for (std::size_t i = 0; i < n; ++i) {
+    doc += "  level" + std::to_string(i) + ":\n    type: group\n    children:\n";
+    if (i + 1 < n)
+      doc += "      - include: level" + std::to_string(i + 1) + "\n";
+    else
+      doc += "      - text: deepest\n";
+  }
+  return doc + "windows:\n  - window: Deep\n    children:\n      - include: level0\n";
+}
+
+TEST(AriadneLoader, NestingLimitCountsIncludes) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = fresh_load(include_nesting_doc(127)); // the text at 256
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_NE(find(r.root, Kind::Text, "deepest"), nullptr);
+
+  // 128 units: level127's group is at 257, refused at the unit's top in its template.
+  const std::string doc = include_nesting_doc(128);
+  r = fresh_load(doc);
+  ASSERT_FALSE(r.ok);
+  EXPECT_NE(r.error.find("a widget nested deeper than 256 levels"), std::string::npos) << r.error;
+  EXPECT_NE(r.error.find("with 128 include: and 0 load: on the way"), std::string::npos) << r.error;
+  EXPECT_EQ(r.error_line, line_of(doc, "  level127:") + 1); // its `type: group`
+  EXPECT_EQ(r.error_column, 5);
+}
+
+// Fragments level0.ari (the document) .. level<loads>.ari in a directory of their own: each holds
+// 15 groups written inline, around a load: of the next (the 16th level), and the last `last`
+// groups around a text. So the text is at 16 * loads + last + 1.
+struct LoadChain {
+  std::filesystem::path dir;
+  LoadChain(int loads, int last) {
+    dir = std::filesystem::temp_directory_path() /
+          ("ari_nesting_loads_" +
+           std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::filesystem::create_directories(dir);
+    for (int i = 0; i <= loads; ++i) {
+      std::ofstream out(dir / ("level" + std::to_string(i) + ".ari"));
+      out << "meta: { min_libcvc: \"0.0.0\" }\nchildren:\n  - ";
+      out << (i < loads ? inline_groups(15, "{load: level" + std::to_string(i + 1) + ".ari}")
+                        : inline_groups(last, "{text: deepest}"))
+          << "\n";
+    }
+  }
+  ~LoadChain() {
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+  }
+  std::string document() const { return (dir / "level0.ari").string(); }
+};
+
+TEST(AriadneLoader, NestingLimitCountsLoads) {
+  SKIP_WITHOUT_YAML();
+  {
+    const LoadChain chain(15, 15); // the text at 16 * 15 + 15 + 1 = 256
+    const LoadResult r = fresh_load_file(chain.document());
+    ASSERT_TRUE(r.ok) << r.error;
+    EXPECT_NE(find(r.root, Kind::Text, "deepest"), nullptr);
+  }
+  const LoadChain chain(15, 16); // at 257
+  const LoadResult r = fresh_load_file(chain.document());
+  ASSERT_FALSE(r.ok);
+  EXPECT_NE(r.error.find("a widget nested deeper than 256 levels"), std::string::npos) << r.error;
+  EXPECT_NE(r.error.find("with 0 include: and 15 load: on the way, by way of "), std::string::npos)
+      << r.error;
+  // Each load: goes into another file, so each is named, where it is written.
+  for (int i = 0; i < 15; ++i)
+    EXPECT_NE(r.error.find("level" + std::to_string(i) + ".ari:3:" + std::to_string(5 + 25 * 15) +
+                           " load: level" + std::to_string(i + 1) + ".ari"),
+              std::string::npos)
+        << r.error;
+  // The text, in the last fragment.
+  EXPECT_EQ(std::filesystem::path(r.error_source).filename().string(), "level15.ari");
+  EXPECT_EQ(r.error_line, 3);
+  EXPECT_EQ(r.error_column, 5 + 25 * 16);
+}
+
+// A scene of a use: of p0, prototypes p0..p<n-1> each a node whose child is a use: of the next, the
+// last a node around `inline_nodes` nodes written inline, around a node named deepest: each use:
+// and each node a level, so deepest is at 2n + inline_nodes + 1.
+std::string scene_nesting_doc(std::size_t n, std::size_t inline_nodes) {
+  std::string doc = "meta: { min_libcvc: \"0.0.0\" }\nprototypes:\n";
+  for (std::size_t i = 0; i + 1 < n; ++i)
+    doc += "  p" + std::to_string(i) + ": {node: n" + std::to_string(i) + ", children: [{use: p" +
+           std::to_string(i + 1) + "}]}\n";
+  std::string inner = "{node: deepest}";
+  for (std::size_t i = inline_nodes; i > 0; --i)
+    inner = "{node: c" + std::to_string(i - 1) + ", children: [" + inner + "]}";
+  doc += "  p" + std::to_string(n - 1) + ": {node: last, children: [" + inner + "]}\n";
+  return doc + "scene:\n  nodes: [{use: p0}]\n";
+}
+
+TEST(AriadneLoader, NestingLimitCountsSceneNodesAndUses) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = fresh_load(scene_nesting_doc(100, 55)); // deepest at 2 * 100 + 55 + 1 = 256
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_NE(find_scene_node(r.scene.nodes, "deepest"), nullptr);
+
+  // A node more: deepest is at 257, refused where it is written, in the last prototype.
+  const std::string doc = scene_nesting_doc(100, 56);
+  r = fresh_load(doc);
+  ASSERT_FALSE(r.ok);
+  EXPECT_TRUE(r.scene.nodes.empty());
+  EXPECT_NE(r.error.find("a scene node nested deeper than 256 levels"), std::string::npos)
+      << r.error;
+  EXPECT_NE(r.error.find("each scene node and use: a level"), std::string::npos) << r.error;
+  EXPECT_NE(r.error.find("with 100 use: on the way"), std::string::npos) << r.error;
+  const int line = line_of(doc, "  p99:");
+  const std::string row = doc.substr(doc.find("  p99:"));
+  EXPECT_EQ(r.error_source, "");
+  EXPECT_EQ(r.error_line, line);
+  EXPECT_EQ(r.error_column, 1 + static_cast<int>(row.find("{node: deepest}")));
+}
+
+// A scenes: entry's tree counts the same.
+TEST(AriadneLoader, NestingLimitCountsEveryScene) {
+  SKIP_WITHOUT_YAML();
+  std::string doc = scene_nesting_doc(120, 16); // deepest at 257
+  doc.replace(doc.find("scene:\n  nodes:"), 15, "scenes:\n  - scene: deep\n    nodes:");
+  const LoadResult r = fresh_load(doc);
+  ASSERT_FALSE(r.ok);
+  EXPECT_TRUE(r.scenes.empty());
+  EXPECT_NE(r.error.find("a scene node nested deeper than 256 levels"), std::string::npos)
+      << r.error;
+  EXPECT_EQ(r.error_line, line_of(doc, "  p119:"));
 }
 
 TEST(AriadneScene, ScalarScaleIsUniform) {
@@ -4349,6 +4549,74 @@ windows: [ { window: W, children: [] } ]
 )");
   ASSERT_TRUE(r.ok) << r.error;
   EXPECT_NE(r.init_script.find("state-set"), std::string::npos);
+}
+
+// state: (§5.3): flattened to (path, text) in document order, every value as it is spelled.
+TEST(AriadneState, BlockFlattenedInOrder) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = fresh_load(R"(
+meta: { min_libcvc: "0.0.0" }
+state:
+  run:
+    world: data
+    crop: 600
+    ratio: 1.50
+    deep: { er: x }
+  view.camera: follow
+  /app.theme: dark
+  pos: [1, 2.5, -3]
+  none: []
+  empty:
+  quoted: "a: b"
+  flag: yes
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  const StateSeeds want = {{"run.world", "data"},
+                           {"run.crop", "600"},
+                           {"run.ratio", "1.50"},
+                           {"run.deep.er", "x"},
+                           {"view.camera", "follow"},
+                           {"/app.theme", "dark"},
+                           {"pos", "1,2.5,-3"},
+                           {"none", ""},
+                           {"empty", ""},
+                           {"quoted", "a: b"},
+                           {"flag", "yes"}};
+  EXPECT_EQ(r.state_seeds, want);
+  for (const std::string &w : r.warnings)
+    EXPECT_EQ(w.find("state:"), std::string::npos) << w;
+}
+
+TEST(AriadneState, BadEntriesWarnAndAreLeftOut) {
+  SKIP_WITHOUT_YAML();
+  LoadResult list = fresh_load("meta: { min_libcvc: \"0.0.0\" }\nstate: [a, b]\n");
+  ASSERT_TRUE(list.ok) << list.error;
+  EXPECT_TRUE(list.state_seeds.empty());
+  EXPECT_TRUE(has_warning(list, "state: is a map of state keys to their values"));
+  LoadResult none = fresh_load("meta: { min_libcvc: \"0.0.0\" }\nstate:\n");
+  ASSERT_TRUE(none.ok) << none.error;
+  EXPECT_TRUE(none.state_seeds.empty());
+  EXPECT_FALSE(has_warning(none, "state:")); // an empty block seeds nothing, and is no mistake
+  LoadResult r = fresh_load(R"(
+meta: { min_libcvc: "0.0.0" }
+state:
+  run:
+    /abs: 1
+    ok: 2
+  a..b: 3
+  trailing.: 4
+  mixed: [1, { b: 2 }]
+  twice: { a: 1 }
+  twice.a: 2
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  const StateSeeds want = {{"run.ok", "2"}, {"twice.a", "1"}, {"twice.a", "2"}};
+  EXPECT_EQ(r.state_seeds, want);
+  EXPECT_TRUE(has_warning(r, "state: 'run./abs' is not a state path"));
+  EXPECT_TRUE(has_warning(r, "state: 'a..b' is not a state path"));
+  EXPECT_TRUE(has_warning(r, "state: 'trailing.' is not a state path"));
+  EXPECT_TRUE(has_warning(r, "state: 'mixed': a list's items are scalars"));
+  EXPECT_TRUE(has_warning(r, "state: 'twice.a' is given twice — the later value is used"));
 }
 
 // tests: (`ari test`): name -> program, captured in document order and never run by the loader.
@@ -5006,6 +5274,21 @@ TEST(AriadneComponents, ShippedComponentsLoadClean) {
     EXPECT_TRUE(src.ok && fs::equivalent(fs::path(src.canonical), e.path(), eq_ec))
         << "cvc://components/" << file << " resolved to '" << src.canonical
         << "', not the source file " << e.path().string();
+    // A component that is a document of its own (shell.ari: INDEX.ari says `document: true`) is
+    // run, not imported: it loads clean as it is.
+    const std::size_t entry = index.find("file: " + file);
+    const std::size_t next = index.find("- component:", entry == std::string::npos ? 0 : entry);
+    if (entry != std::string::npos &&
+        index.substr(entry, next == std::string::npos ? std::string::npos : next - entry)
+                .find("document: true") != std::string::npos) {
+      const LoadResult d = load_file(app, e.path().string());
+      ASSERT_TRUE(d.ok) << d.error;
+      EXPECT_TRUE(d.schema_issues.empty()) << d.schema_issues.front().text();
+      for (const std::string &w : d.warnings)
+        ADD_FAILURE() << file << ": " << w;
+      ++checked;
+      continue;
+    }
     LoadResult r = load_string(app, "meta: { min_libcvc: \"0.0.0\" }\nimport: cvc://components/" +
                                         file + "\nwindows:\n  - include: " + unit + "\n");
     ASSERT_TRUE(r.ok) << r.error;
@@ -6180,8 +6463,9 @@ windows:
   ASSERT_NE(a, nullptr);
   EXPECT_FALSE(a->writable); // an unrecognized mode ('readonly') fails CLOSED to read-only
   ASSERT_NE(b, nullptr);
-  EXPECT_TRUE(b->writable); // no mode -> rw default
-  EXPECT_TRUE(has_warning(r, "unknown mode"));
+  EXPECT_FALSE(b->writable); // and so does a missing one (docs/ARIADNE.md §7.4)
+  EXPECT_TRUE(has_warning(r, "link 'a' has unknown mode"));
+  EXPECT_FALSE(has_warning(r, "link 'b'")); // a missing mode is no mistake: it means ro
 }
 
 TEST(AriadneMount, LinkNameLeadingSlashIsRejected) {
@@ -6552,6 +6836,7 @@ windows:
         channels:
           done: nav.done
           risk: { to: risk.overlay, mode: ro }
+          feed: { to: news.feed }
 )");
   LoadResult r = fresh_load_file(main);
   ASSERT_TRUE(r.ok) << r.error;
@@ -6561,11 +6846,14 @@ windows:
   // wire_holes plants it and resolve_channel follows it.
   const LinkHole *done = nullptr;
   const LinkHole *risk = nullptr;
+  const LinkHole *feed = nullptr;
   for (const LinkHole &h : m->links) {
     if (h.name == "channels.done")
       done = &h;
     if (h.name == "channels.risk")
       risk = &h;
+    if (h.name == "channels.feed")
+      feed = &h;
   }
   ASSERT_NE(done, nullptr);
   EXPECT_EQ(done->target, "channels.nav.done"); // resolved against the PARENT scope by wire_holes
@@ -6573,6 +6861,9 @@ windows:
   ASSERT_NE(risk, nullptr);
   EXPECT_EQ(risk->target, "channels.risk.overlay");
   EXPECT_FALSE(risk->writable); // mode: ro
+  ASSERT_NE(feed, nullptr);
+  EXPECT_FALSE(feed->writable); // a map with no mode fails closed too (docs/ARIADNE.md §7.4)
+  EXPECT_FALSE(has_warning(r, "channel grant 'feed'"));
 }
 
 // ===========================================================================
@@ -8031,4 +8322,122 @@ windows:
   const Widget *inner = find(r.root, Kind::Window, "Inner");
   ASSERT_NE(inner, nullptr);
   EXPECT_TRUE(inner->context_menu) << "its windows keep theirs";
+}
+
+// docs/roadmap/ARIADNE_SHELL.md 4.2 a mounts: slot: its key, allow: and catalog: (a list, or a
+// bound key), the document's directory for its entries; the schema knows it; and a data: entry's
+// uri from an argument (4.1).
+TEST(AriadneLoader, MountsSlotAndADataUriFromAnArgument) {
+  SKIP_WITHOUT_YAML();
+  LoadResult r = fresh_load(R"(meta: { min_libcvc: "0.0.0" }
+args:
+  catalog: { type: string }
+data:
+  catalog: { uri: { arg: catalog }, as: json }
+root:
+  - mounts: shell.apps
+    allow: { bind: shell.allow }
+    catalog: [a.ari, apps/]
+  - mounts: other
+    allow: docs/
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_TRUE(r.schema_issues.empty()) << r.schema_issues.front().text();
+  const Widget *m = find(r.root, Kind::Mounts);
+  ASSERT_NE(m, nullptr);
+  EXPECT_EQ(m->bind, "shell.apps");
+  ASSERT_TRUE(m->mounts);
+  EXPECT_EQ(m->mounts->allow_bind, "shell.allow");
+  EXPECT_TRUE(m->mounts->allow.empty());
+  EXPECT_EQ(m->mounts->catalog, (std::vector<std::string>{"a.ari", "apps/"}));
+  EXPECT_EQ(count(r.root, Kind::Mounts), 2);
+  ASSERT_EQ(r.data.size(), 1u);
+  EXPECT_EQ(r.data[0].uri_arg, "catalog");
+  EXPECT_TRUE(r.data[0].uri.empty()) << "filled in from the command line";
+  // A misspelt key under mounts: breaks the schema; a mounts: with no key warns.
+  LoadResult bad =
+      fresh_load("meta: { min_libcvc: \"0.0.0\" }\nroot:\n  - mounts: x\n    alow: y\n");
+  ASSERT_TRUE(bad.ok);
+  EXPECT_TRUE(has_schema_issue(bad, "/root/0/alow") || has_schema_issue(bad, "/root/0"));
+  LoadResult empty = fresh_load("meta: { min_libcvc: \"0.0.0\" }\nroot:\n  - mounts: \"\"\n");
+  ASSERT_TRUE(empty.ok);
+  EXPECT_TRUE(has_warning(empty, "mounts: needs a state key"));
+  LoadResult noarg =
+      fresh_load("meta: { min_libcvc: \"0.0.0\" }\ndata:\n  d: { uri: { arg: \"\" } }\n");
+  ASSERT_TRUE(noarg.ok);
+  EXPECT_TRUE(noarg.data.empty());
+}
+
+// load_mount: a mounts: entry's document through the static load:'s path, stateless: the wrapper
+// at includes.<as> with the fragment's init:, on_tick:, requires:, name and args substituted; why
+// one is not mounted; its sources for hot reload.
+TEST(AriadneLoader, LoadMountParsesAnEntrysDocument) {
+  SKIP_WITHOUT_YAML();
+  const std::string frag =
+      write_temp_ari("mount_frag.ari", R"(meta: { name: Frag, min_libcvc: "0.0.0" }
+requires: [json-parse]
+init: (state-set "seeded" "1")
+on_tick: (state-set "t" "{who}")
+windows:
+  - window: "For {who}"
+)");
+  const std::string dir = std::filesystem::path(frag).parent_path().string();
+  cvc::app app;
+  MountRequest rq;
+  rq.uri = "mount_frag.ari"; // relative to the slot's document
+  rq.as = "f";
+  rq.args = {{"who", "ada"}};
+  rq.base_dir = dir;
+  const MountResult m = load_mount(app, rq);
+  ASSERT_TRUE(m.ok) << m.error;
+  EXPECT_EQ(m.wrapper.scope, "includes.f");
+  EXPECT_EQ(m.wrapper.app_name, "Frag");
+  EXPECT_NE(m.wrapper.init_script.find("seeded"), std::string::npos);
+  EXPECT_NE(m.wrapper.tick_script.find("ada"), std::string::npos) << "its args substituted";
+  ASSERT_EQ(m.wrapper.requirements.size(), 1u);
+  EXPECT_NE(find(m.wrapper, Kind::Window, "For ada"), nullptr);
+  EXPECT_FALSE(m.has_scene);
+  ASSERT_FALSE(m.sources.empty());
+  EXPECT_TRUE(std::filesystem::equivalent(m.sources.front(), frag));
+  EXPECT_EQ(m.source_stamps.count(m.sources.front()), 1u);
+  EXPECT_TRUE(std::filesystem::equivalent(m.canonical, frag));
+
+  rq.uri = "no_such_document.ari";
+  const MountResult missing = load_mount(app, rq);
+  EXPECT_FALSE(missing.ok);
+  EXPECT_NE(missing.error.find("could not be resolved"), std::string::npos) << missing.error;
+
+  rq.uri = write_temp_ari("mount_newer.ari", "meta: { min_libcvc: \"99.0.0\" }\n");
+  const MountResult newer = load_mount(app, rq);
+  EXPECT_FALSE(newer.ok);
+  EXPECT_NE(newer.error.find("requires libcvc >= 99.0.0"), std::string::npos) << newer.error;
+
+  rq.uri =
+      write_temp_ari("mount_scene.ari", "meta: { min_libcvc: \"0.0.0\" }\nscene:\n  nodes: []\n");
+  const MountResult scene = load_mount(app, rq);
+  EXPECT_TRUE(scene.ok) << scene.error;
+  EXPECT_TRUE(scene.has_scene) << "the host decides (gl.scene)";
+}
+
+// A mounts: entry's document nests at most kMaxNesting levels, counted as a document of its own's
+// are (§6.7): one a level past it is not mounted, with the nesting error, rather than mounted cut
+// short where its parse stopped.
+TEST(AriadneLoader, LoadMountRefusesADocumentNestedPastTheLimit) {
+  SKIP_WITHOUT_YAML();
+  ASSERT_EQ(kMaxNesting, 256u);
+  cvc::app app;
+  MountRequest rq;
+  rq.as = "deep";
+  rq.uri = write_temp_ari("mount_at_limit.ari", plain_nesting_doc(30, 193)); // its text at 256
+  rq.base_dir = std::filesystem::path(rq.uri).parent_path().string();
+  const MountResult at = load_mount(app, rq);
+  ASSERT_TRUE(at.ok) << at.error;
+  EXPECT_NE(find(at.wrapper, Kind::Text, "deepest"), nullptr);
+
+  rq.uri = write_temp_ari("mount_past_limit.ari", plain_nesting_doc(30, 194)); // at 257
+  const MountResult past = load_mount(app, rq);
+  EXPECT_FALSE(past.ok);
+  EXPECT_NE(past.error.find("a widget nested deeper than 256 levels"), std::string::npos)
+      << past.error;
+  EXPECT_EQ(find(past.wrapper, Kind::Text, "deepest"), nullptr);
 }

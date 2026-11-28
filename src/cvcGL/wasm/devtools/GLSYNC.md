@@ -29,7 +29,7 @@ All three are off by default. With none of them, `serve.py` is the plain cross-o
 
 ## URLs
 
-- `http://localhost:8822/nav_city_drive/?glsync`: census on.
+- `http://localhost:8822/nav_scrub/?glsync`: census on.
 - `...?glsync=seq,stacks`: also prints the worst task's sync calls in order, and the stack of each slow sync call.
 - `...?glsync&glshim=0`: without the state shim, for the A/B.
 - `...?glsync&frameyield=vtk`: with VTK's in-render yield back on (see [Frames and tasks](#frames-and-tasks)). An app linked with `-sASYNCIFY_IGNORE_INDIRECT=1` locks `FrameYield::App` and refuses this.

@@ -503,6 +503,75 @@ TEST(OceanSea, ThePhysicsSeaIsCalmInTheLeeRuffledByGustsAndCarriedByTheCurrent) 
   EXPECT_NE(ruffled.height(x, y, t), lee.height(x, y, t));
 }
 
+// F4: a storm's gust front where each wave is. The ripples (the gust-weighted cascade) scale by
+// the wind there over the reference wind (cvc::algo::front_wind_ratio): a cell west of the sea
+// blowing toward it raises them on the sea's west side and leaves its east side as it was. A
+// source with no front reads the sea without one to the bit, and the digest leaves the fronts out
+// (a scene's world hashes its air instead).
+namespace {
+struct fixed_fronts final : sea_front_source {
+  std::shared_ptr<const sea_fronts> f;
+  std::shared_ptr<const sea_fronts> at(double) const override { return f; }
+};
+} // namespace
+
+TEST(OceanSea, AGustFrontRaisesTheRipplesWhereItBlows) {
+  const sea_state s = windSea(6.0, 0.0);
+  std::vector<sea_cascade> sc = coastCascades(64, s);
+  sc[2].gust = 1.0; // the ripples follow the gusts, and so the fronts
+  auto plain = std::make_shared<sea_forcing>();
+  plain->wind = {6.0, 0.0, 0.0}; // steady: the gust factor 1 everywhere
+  // A cell 1500 m in radius at x = -2600 moving east: its front's edge (1.5 radii ahead) at
+  // x = -350, its reach past x = 1000. So x = -300 has a 12 m/s outflow east on top of the 6 m/s
+  // wind, x = 3000 none.
+  auto cells = std::make_shared<sea_fronts>();
+  cvc::algo::front_cell c;
+  c.x = -2600.0;
+  c.y = 0.0;
+  c.r = 1500.0;
+  c.vx = 10.0;
+  c.vy = 0.0;
+  c.out = 12.0;
+  cells->cells.push_back(c);
+  cells->ux = 6.0;
+  cells->uy = 0.0;
+  cells->ref = 6.0; // the reference point beyond the front: the plain wind
+  auto fronted = std::make_shared<sea_forcing>(*plain);
+  auto src = std::make_shared<fixed_fronts>();
+  src->f = cells;
+  fronted->fronts = src;
+  auto calm = std::make_shared<sea_forcing>(*plain);
+  auto none = std::make_shared<fixed_fronts>(); // a source with no fronts
+  calm->fronts = none;
+  sea_params p;
+  const sea_surface a(sc, p, nullptr, nullptr, plain), b(sc, p, nullptr, nullptr, fronted),
+      z(sc, p, nullptr, nullptr, calm);
+  const double west = cvc::algo::front_wind_ratio(cells->cells, 6.0, 0.0, 6.0, -300.0, 0.0);
+  const double east = cvc::algo::front_wind_ratio(cells->cells, 6.0, 0.0, 6.0, 3000.0, 0.0);
+  std::printf("[sea] a gust front's ratio: %.3f at x -300 (its edge), %.3f at x 3000\n", west,
+              east);
+  EXPECT_GT(west, 2.5);
+  EXPECT_EQ(east, 1.0);
+  // The ripples' weight is the ratio there: the sea's height differs only where the front blows.
+  int westDiffer = 0, eastDiffer = 0, noneDiffer = 0;
+  for (int i = 0; i < 40; ++i) {
+    const double t = 3.0 + 0.37 * i, y = -50.0 + 2.5 * i;
+    westDiffer += b.height(-300.0, y, t) != a.height(-300.0, y, t);
+    eastDiffer += b.height(3000.0, y, t) != a.height(3000.0, y, t);
+    noneDiffer += z.height(-300.0, y, t) != a.height(-300.0, y, t);
+  }
+  EXPECT_GT(westDiffer, 30);
+  EXPECT_EQ(eastDiffer, 0);
+  EXPECT_EQ(noneDiffer, 0);
+  EXPECT_EQ(b.digest(), a.digest());
+  // The front is the weather's (cvc::world::weather::gust_front sums the same function): 12 m/s
+  // at the edge along the motion.
+  double fx = 0.0, fy = 0.0;
+  cvc::algo::add_gust_front(c, -350.0, 0.0, fx, fy);
+  EXPECT_NEAR(fx, 12.0, 1e-9);
+  EXPECT_EQ(fy, 0.0);
+}
+
 // The wind's paths through the physics step's reads (sea_surface::at, the per-time tasks): a sea
 // mid-crossfade, scaled by two fetch maps, its ripples gusting and carried by the current, reads
 // the same bits through a held time whose fields were computed task by task in another order as

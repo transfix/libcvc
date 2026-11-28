@@ -1,7 +1,7 @@
 schema_version: 1
 recipe:
   name: ari
-  upstream_version: "4.0.9"
+  upstream_version: "4.0.10"
   cvc_revision: 1
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
@@ -36,10 +36,10 @@ patches: []
 depends:
   build:
     - name: libcvc
-      version: "==4.0.9"
+      version: "==4.0.10"
   runtime:
     - name: libcvc
-      version: "==4.0.9"
+      version: "==4.0.10"
   host_tools:
     - cmake
     - ninja
@@ -54,6 +54,17 @@ build:
         MACOSX_DEPLOYMENT_TARGET: "13.0"
     - platform: windows
       script: build.ps1
+    # The BSDs and Haiku build on the cvcpkg.org fleet from the release tag's tarball, against
+    # the fleet's libcvc (see the libcvc recipe's matrix).
+    - platform: freebsd
+      script: build.sh
+    - platform: openbsd
+      script: build.sh
+    - platform: netbsd
+      script: build.sh
+    # Haiku too (arisrv has no haiku row: it needs gRPC, which Haiku's libcvc builds without).
+    - platform: haiku
+      script: build.sh
 
 package:
   # Just the `ari` executable (bin/ari, bin/ari.exe on Windows). No cmake package
@@ -63,3 +74,7 @@ package:
 
 abi:
   cxx_std: 20
+
+# Run by `cvcpkg build` (the fleet): see test.sh.
+test:
+  script: test.sh
