@@ -155,10 +155,9 @@ model_asset parse_model_asset(const std::string &json_text, const std::string &d
       l.texture_px = e.second.get_optional<int>("texture_px").value_or(0);
       if (l.file.empty())
         throw std::runtime_error(what + " '" + a.name + "': a LOD with no file");
-      if (!std::isfinite(l.world_error_m) || l.world_error_m < last ||
-          (a.lods.empty() && l.world_error_m != 0.0))
+      if (!std::isfinite(l.world_error_m) || l.world_error_m < last)
         throw std::runtime_error(what + " '" + a.name +
-                                 "': LOD errors must start at 0 and not decrease");
+                                 "': LOD errors must not be negative or decrease");
       last = l.world_error_m;
       a.lods.push_back(l);
     }

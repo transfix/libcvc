@@ -69,16 +69,30 @@ struct biome_rule {
   double max_water_m = std::numeric_limits<double>::infinity();
 };
 
+// How a building archetype fills its lot: one model (a shop, an office), or a yard of the model
+// in rows, stacked (a port's container yard).
+enum class building_layout { single, yard };
+
 struct building_archetype_rule {
   std::string asset;
+  // The cvcpkg package the asset ships in ("cy-pca/building-brownstone"), or a URI a data entry
+  // takes (a directory, https://...). An app that can fetch (the Ariadne world node) fetches it
+  // when the asset is not installed; empty: only an installed asset is used.
+  std::string package;
   double weight = 1.0;
   double min_urbanity = 0.0, max_urbanity = 1.0;
   double min_scale = 0.9, max_scale = 1.1; // the scale drawn per building, within what fits
   int span = 1; // how many neighbouring lots on one street side it may take (1: its own)
+  // Only on lots whose centre is within this of the sea or a lake (enclosed water under 1 ha, a
+  // pond, does not count), metres.
+  double max_water_m = std::numeric_limits<double>::infinity();
+  building_layout layout = building_layout::single;
+  int max_stack = 1; // a yard's stacks: 1 to this many high, drawn per stack
 };
 
 struct tree_archetype_rule {
   std::string asset;
+  std::string package; // as a building archetype's
   double weight = 1.0;
   double min_scale = 0.8, max_scale = 1.2;
   biome_rule biome;
@@ -100,6 +114,10 @@ struct world_theme {
 //                     10 m over it), oaks inland.
 //   "tropical":       palms everywhere but steep ground, the odd oak on the hills; a low-rise
 //                     town (corner shops and brownstones), the office in the cores.
+//   "port_town":      container yards on the lots within 80 m of the sea or a lake (shipping
+//                     containers in rows, stacked up to three high), the coastal town behind
+//                     them; palms on the coast, oaks inland.
+// Every built-in archetype names its cy-pca package (the graphics-assets packages).
 std::vector<world_theme> builtin_world_themes();
 
 // The app's themes. register_world_theme adds a theme or replaces the one of its name.
@@ -107,6 +125,13 @@ void register_world_theme(cvc::app &app, const world_theme &t);
 std::vector<std::string> world_theme_names(cvc::app &app); // built-ins first, then registered
 // The theme of that name; false when there is none.
 bool find_world_theme(cvc::app &app, const std::string &name, world_theme &out);
+
+// What a theme's archetypes ship in: each asset with a package, once, buildings first.
+struct theme_package {
+  std::string asset;
+  std::string package;
+};
+std::vector<theme_package> world_theme_packages(const world_theme &t);
 
 // A theme as JSON, and back. Fields a text leaves out keep their defaults; an archetype without
 // an asset, a negative weight, an inverted band or a share outside [0, 1] throws
@@ -123,12 +148,14 @@ struct lot_view {
   double depth = 0;    // its depth from the setback line
   double urbanity = 0;
   int lots = 1; // how many lots `frontage` spans
+  double water_m = std::numeric_limits<double>::infinity(); // its centre to the nearest water
 };
 // The archetype a lot takes, as an index into theme.buildings, and its scale; -1 when the lot
 // keeps the massing (its draw is over building_share, or nothing fits). An archetype fits when
-// it is in the catalog, its band holds the lot's urbanity, it spans at least lot.lots lots, and
-// its footprint (plus `margin` a side) fits the frontage and depth at some scale in
-// [min_scale, max_scale]: the scale is then drawn from what fits.
+// it is in the catalog, its band holds the lot's urbanity, the lot is within its max_water_m of
+// the water, it spans at least lot.lots lots, and its footprint (plus `margin` a side) fits the
+// frontage and depth at some scale in [min_scale, max_scale]: the scale is then drawn from what
+// fits. A yard fits when one of its models does.
 struct building_pick {
   int archetype = -1;
   double scale = 1.0;

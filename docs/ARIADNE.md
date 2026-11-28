@@ -2135,20 +2135,29 @@ archetype on a share of its lots, the one that fits the lot (or the lot and its 
 real size, its front on the setback line, and builds the procedural massing elsewhere; the scatter's
 trees become tree archetypes where their biome holds, and stay L-system trees elsewhere. The
 built-ins are `temperate_town` (brick shops, brownstones and offices; oaks inland), `coastal_town`
-(the same streets; palms along the coast, oaks inland) and `tropical` (palms everywhere but steep
-ground); a host adds its own with `register_world_theme`, or reads one from JSON
-(`world_theme_from_json`). Every draw is keyed on its spot, so the same params, theme and installed
-assets make the same world.
+(the same streets; palms along the coast, oaks inland), `tropical` (palms everywhere but steep
+ground) and `port_town` (container yards on the lots within 80 m of the sea or a lake: shipping
+containers in rows, stacked up to three high, on a concrete pad; the coastal town behind); a host
+adds its own with `register_world_theme`, or reads one from JSON (`world_theme_from_json`). A
+building archetype may keep to the water's edge (`max_water_m`, to the sea or a lake, not a pond)
+and fill its lot as a `yard` of its model (`layout`, `max_stack`). `theme: none` (the Terrain Lab panel's first Theme) is no theme. Every draw is keyed
+on its spot, so the same params, theme and available assets make the same world.
 
 An asset is a glb and its coarser LODs beside it, described by `<name>.asset.json` (schema
 `cvc-model-asset/1`, [`model_assets.h`](../inc/cvc/world/model_assets.h)), as the cy-pca
 `building-*`, `tree-*` and `prop-*` cvcpkg packages install them to `share/cvc-scenes/shared/`. The
 app's catalog (`model_catalog_of`) finds them there under the cvcpkg prefix (`CVCPKG_PREFIX`,
-`CVC_PREFIX`), the nav bundle's `shared/`, and `CVC_MODEL_PATH`; a theme whose assets are not
-installed builds as if it named none of them. The renderer draws each placed copy as a LOD ladder
+`CVC_PREFIX`), the nav bundle's `shared/`, and `CVC_MODEL_PATH`. Each archetype also names the
+package its asset ships in (`package`); the GL host fetches a theme's packages that are not
+installed through the data store ([`world_model_packages.h`](../inc/cvc/ariadne/world_model_packages.h)),
+as a `cvcpkg://` data entry is fetched: natively the full package (with the network on,
+`--net-allow https://cvcpkg.org`), in a browser its `-web` edition (the coarser LODs only). The
+first world is made from what is installed while the fetch runs, and the world regenerates once
+when any arrive; an asset that is neither installed nor fetched is left out, as if the theme did
+not name it. The renderer draws each placed copy as a LOD ladder
 of the asset's rungs (their switch distances from each rung's `world_error_m`), all copies sharing
 one set of buffers and textures, so only the copies near the camera draw at full resolution. The
-model buildings collide as boxes; the trees are drawn only. A world's bundle carries its models in
+model buildings and a yard's containers collide as boxes; the trees are drawn only. A world's bundle carries its models in
 `models.json`. An edit to a `world.*` key then waits (`world.pending` is 1) until
 Regenerate (`world.request: regenerate`) or Randomize, so several settings change in one rebuild;
 `world.auto` (the node's `auto_regenerate`) rebuilds after every edit instead. Every rebuild and

@@ -63,7 +63,8 @@ bool model_kind_from_name(const std::string &n, model_kind &out); // false for a
 struct model_lod {
   std::string file; // relative to the asset's directory
   std::uint64_t triangles = 0;
-  double world_error_m = 0.0; // 0 for LOD 0; non-decreasing down the ladder
+  double world_error_m = 0.0; // 0 for the full model; non-decreasing down the ladder (a package
+                              // without the full model, a web one, starts above 0)
   int texture_px = 0;         // its base colour's size, 0 when unknown
 };
 
@@ -72,6 +73,10 @@ struct model_asset {
   model_kind kind = model_kind::prop;
   std::vector<std::string> tags;
   std::string dir; // where the sidecar and its glbs are (empty: a catalog entry with no files)
+  // Or, for an asset fetched as a dataset (an Ariadne data store load, in memory: a browser has no
+  // install), the store node whose files hold its glbs by name (lods[k].file); empty otherwise.
+  // Not part of the sidecar: model_asset_json leaves it out.
+  std::string data_node;
   // Extents in the world frame (model_to_world applied): half-widths across the front (x) and
   // front to back (y), its height, and where its bottom is (0 for an origin at bottom-centre).
   double half_x = 0.0, half_y = 0.0, height = 0.0, base_z = 0.0;
@@ -93,7 +98,8 @@ inline void model_to_world(const double in[3], double out[3]) {
 
 // Parse a sidecar. `dir` is recorded as the asset's directory. Throws std::runtime_error naming
 // `what` for malformed JSON, a schema other than cvc-model-asset/1, an unknown kind, no name, no
-// LODs, bounds that are not finite and ordered, or world errors that decrease down the ladder.
+// LODs, bounds that are not finite and ordered, or world errors that are negative or decrease down
+// the ladder.
 model_asset parse_model_asset(const std::string &json_text, const std::string &dir,
                               const std::string &what = "model asset");
 // Read and parse the sidecar at `path` (its directory becomes the asset's).

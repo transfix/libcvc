@@ -196,6 +196,7 @@ scene:
       preset: standard     # standard | forest | urban | sparse | island (counts and relief)
       terrain: fbm         # fbm (the analytic relief) | dem (terrain_file: an elevation .npy)
       city: districts      # districts (roads first, from the district cores) | none
+      theme: coastal_town  # the models: none | temperate_town | coastal_town | tropical | port_town
       trees: 500
       rocks: 90
       buildings: 110       # the most buildings, filled from the district cores out
