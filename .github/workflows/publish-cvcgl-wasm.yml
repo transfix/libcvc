@@ -371,8 +371,8 @@ jobs:
             || { echo "::error::failed to install arigl-web's $PLATFORM deps"; exit 1; }
           # Noarch, so not resolvable from the recipe's (static) wasm deps: the recipe says why.
           if [ "$PLATFORM" = wasm ]; then
-            cvcpkg install xterm-js xterm-js-addon-fit xterm-js-addon-webgl --prefix "$WASM_DEPS" \
-              --platform any --config release --link shared --no-fallback-to-source \
+            cvcpkg install xterm-js xterm-js-addon-fit xterm-js-addon-webgl xterm-js-addon-image \
+              --prefix "$WASM_DEPS" --platform any --config release --link shared --no-fallback-to-source \
               || { echo "::error::failed to install xterm.js for ari's pages"; exit 1; }
           fi
 
@@ -405,6 +405,12 @@ jobs:
               || { echo "::error::ari's pages did not take xterm.js from the prefix's xterm-js packages"; exit 1; }
             ls "$WEB"/xterm/*.js >/dev/null \
               || { echo "::error::arigl-web (wasm) has no xterm/ beside ari's pages"; exit 1; }
+            # The image addon draws a document's pictures in pixels when a page config asks
+            # (--graphics iterm or sixel); a site that asks for them looks for this file.
+            grep -qF "ari: xterm.js's image addon for the browser page from $WASM_DEPS/share/xterm.js" "$log" \
+              || { echo "::error::ari's pages did not take the image addon from the prefix's xterm-js-addon-image"; exit 1; }
+            test -f "$WEB/xterm/addon-image.js" \
+              || { echo "::error::arigl-web (wasm) has no xterm/addon-image.js beside ari's pages"; exit 1; }
           elif [ -e "$WEB/ari.html" ]; then
             echo "::error::the threaded arigl-web carries ari's page, which is single-threaded only"; exit 1
           fi
