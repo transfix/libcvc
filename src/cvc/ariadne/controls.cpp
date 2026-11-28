@@ -91,7 +91,8 @@ std::vector<control_scheme> default_control_schemes() {
       dead(act("strafe_left", "Step left", {"A", "Left"}, {"LeftX-"}), kStickDead));
   walk.actions.push_back(
       dead(act("strafe_right", "Step right", {"D", "Right"}, {"LeftX+"}), kStickDead));
-  walk.actions.push_back(act("jump", "Jump", {"Space"}, {"A"}));
+  walk.actions.push_back(act("jump", "Jump (swimming: a stroke up)", {"Space"}, {"A"}));
+  walk.actions.push_back(act("dive", "Dive (swimming)", {"C", "Left Ctrl"}, {"LeftStick"}));
   walk.actions.push_back(act("mouse_look", "Mouse look on / off", {"V"}, {"RightStick"}));
   control_action in = act("interact", "Get in (hold)", {"E"}, {"X"});
   in.binding.hold = kInteractHold;

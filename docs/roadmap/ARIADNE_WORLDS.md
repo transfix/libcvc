@@ -1588,7 +1588,7 @@ Every thing that moves is an entity in the holon (§4): avatars, vehicles, boats
 | OW6 | **Started** (2026-11-20, OW6a: keyboard and mouse; OW6b: gamepads; OW6c: avatars that are vehicles). **Getting in and out of vehicles,** and avatars that are vehicles. OW6a: control schemes per kind (walk, car, boat), the drive axes as shares, brake and reverse apart, the jump, the ask and the rule, the client's prompt and chase camera. OW6b: gamepads (sticks, triggers, buttons per scheme), and their bindings in the Controls window. OW6c: an avatar archetype may be a vehicle, picked beside the look; a first-person walk under mouse look. | M |
 | OW7 | **Started** (2026-11-22, first part: a drawn host's world in a local server-role holon on a thread of its own, `world_worker`, arigl `--world-thread`; OW7a: the gym in a local server-role holon, with people, from Python too, a person hit a person's; OW7b: the traffic world hosting people among its cars, measured; OW7c: cars brake for people; OW7d: scripted people step around cars, and the live check, arisrv hosting traffic.ari with arigl clients over gRPC and WebSocket; §18.2). **The demos in the holon:** grl-snam and grl-snam-dbg on a local server-role holon, then `arisrv` hosting the traffic world with clients walking among the cars. | M |
 | OW8 | **Built** (2026-11-21, first part). **A world's rate:** the relay chooses it (a scene's `clock: hz`, `arisrv --sim-hz`) and publishes it, and the clients build their holons at it (§18.9). The policies hold at 60 Hz's 4/60 s tick. Not yet: a change while the relay runs. | S |
-| OW9 | **Started** (2026-11-26, §18.10; OW9a: the room's water in the client's avatar world, replayed by tick; OW9b: a person's density, floating head-out; OW9c: walker@2, wading, swimming, diving, getting out). **Water: wading and swimming.** Today an avatar floats like a cork on the relay and walks on the bed in a client's prediction. OW9a: the same water in the client's avatar world; OW9b: a person's density, floating head-out; OW9c: walker@2, wading slower by depth, swimming at a swimmer's pace and cost, diving, climbing out; OW9d: the swimmer drawn, its controls, the live check. | M |
+| OW9 | **Built** (2026-11-26 to 27, §18.10; OW9a: the room's water in the client's avatar world, replayed by tick; OW9b: a person's density, floating head-out; OW9c: walker@2, wading, swimming, diving, getting out; OW9d: drawn lying forward, the dive key, a live check). **Water: wading and swimming.** Today an avatar floats like a cork on the relay and walks on the bed in a client's prediction. OW9a: the same water in the client's avatar world; OW9b: a person's density, floating head-out; OW9c: walker@2, wading slower by depth, swimming at a swimmer's pace and cost, diving, climbing out; OW9d: the swimmer drawn, its controls, the live check. | M |
 
 **Open:**
 
@@ -1915,7 +1915,7 @@ beside walk, car and boat (OW6a); its hints are in the Controls window.
 | OW9a | **Built** (2026-11-26). **The same water on the client.** The room's water as fields in the client's avatar world, on the relay's clock, replayed by tick. Before any new behaviour: the snap at the shore goes, and the avatar floats in prediction as on the relay. A holon_sync test walks a client into a lake: predicted against the relay's poses, corrections counted. | M |
 | OW9b | **Built** (2026-11-26). **People float like people.** `avatar_body::density`, `field_set::mark_avatar`, the rules key. The default person floats head-out (its top 2.5 cm above a still surface, the probe's -0.28 m becomes about -1.68 m). | S |
 | OW9c | **Built** (2026-11-27). **walker@2: wading and swimming.** The three states, the knobs, `move.z` diving and surfacing, the stroke up and climbing out, swimming's energy and ledger line, the controller state published. The stock worlds move to walker@2. Tests: the pace by depth, a swimmer's pace and cost, diving and surfacing, a current carrying a swimmer, getting out at a beach and at a quay, a client predicting it. | M |
-| OW9d | **Drawn and driven.** The swimmer's pose in arigl, the swim control scheme and its hints, the live check: arisrv hosting a world with terrain_lab's sea and clients swimming over gRPC and WebSocket. | S |
+| OW9d | **Built** (2026-11-27). **Drawn and driven.** The swimmer's pose in arigl, the swim control scheme and its hints, the live check: arisrv hosting a world with terrain_lab's sea and clients swimming over gRPC and WebSocket. | S |
 
 - **As built (OW9a, the same water on the client; 2026-11-26).** `avatar_world::set_water` puts
   fluid fields in a world of its own (a shared world's water is its owner's). A holon with a world
@@ -2005,6 +2005,34 @@ beside walk, car and boat (OW6a); its hints are in the Controls window.
   - **walker@1 ignores the water** (`Walker1IgnoresTheWater`): 2 m/s through 1 m of it, walking.
 
   Not yet: drawing the swimmer and its controls (OW9d); a swimmer's own wake; not run live.
+- **As built (OW9d, drawn and driven; 2026-11-27).**
+  - **Drawn** (`room_view`): a swimmer that swims across lies forward along its facing; one
+    wading, walking or treading water stands. `swim_pitch` eases between the two over a quarter
+    second, and `avatar_marker_matrix` lays the box with its top where the floating box's top is
+    (its centre half its width under it), so the head stays just out. Our own avatar lies while
+    its intent asks to move (`holon::intent`), from its prediction's motion (`holon::motion`); a
+    peer lies while the relay publishes it swimming and its shown pose moves over 0.4 m/s. A
+    floating body drifts with the waves at a few tenths of a metre a second, so a speed alone
+    would lay down one treading water (seen live; the first cut's 0.15 m/s did).
+  - **Driven**: no scheme of its own. The walk scheme carries swimming, since swimming is the
+    walker's motion and a switch at the shore would let go of every held key: its keys swim, Jump
+    is a stroke up, and a new action, dive (C or Left Ctrl; the left stick pressed), sends
+    `move.z` -1 while held. `(room-set-intent HANDLE X Y Z [YAW [JUMP]])` takes a JUMP, so a
+    script can stroke up.
+  - **The Avatar window** shows the motion ("in the water"), the body's density and the ledger's
+    `swam` line, with the swimming keys in its tooltip.
+  - **Live**: arisrv hosted a small island of terrain_lab's world and sea (a `generated_world`
+    and a `water` node with bodies, the sea 3 m over the origin where avatars join), with Ann on
+    gRPC and Bob on WebSocket (arigl snapshots, the relay's own document printing the room). Ann
+    swam at about 1 m/s (published `swimming`), dove from z 1.06 to the seabed at 0.43 and held
+    there, stroked up at 0.4 to 0.5 m/s with her head out, and floated at z 1.33 (head-out at the
+    3 m sea) swimming on; Bob trod water. Both joined on the seabed under 3 m of water and took
+    about 30 s to come up on 1.5% of their weight.
+
+  Not yet: the clients drew the avatars but not the island or its sea, since the room does not
+  carry a generated world or water to a client's view, only to its physics (a world replica
+  builds statics and water, not their meshes); a stroke animation and a splash; a swimmer's own
+  wake.
 
 **Open:**
 

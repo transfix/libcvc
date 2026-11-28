@@ -23,6 +23,11 @@
 //     accessory from the relay's catalog, resolved the same way on every client), the local
 //     avatar included: you see yourself as everyone else sees you. A changed choice or catalog
 //     rebuilds the marker.
+//   * A swimmer (walker@2, ARIADNE_WORLDS.md section 18.10.3, OW9d) is drawn lying forward along
+//     its facing while it swims across, upright while it wades or treads water: swim_pitch eases
+//     the marker between the two, and avatar_marker_matrix lays it with its top where the floating
+//     box's top is, a head just out. The local avatar's motion is its prediction's
+//     (holon::motion), a peer's what the relay publishes (room_avatar.h: read_avatar_motion).
 //   * Third-person controls: intent_from_keys turns held WASD / arrow keys into forward / back /
 //     strafe relative to the avatar's FACING; the host turns the avatar by a click on the scene
 //     (pick_ground -> face that point). self_position is where the host keeps the orbit centre.
@@ -75,6 +80,17 @@ cvc::ariadne::avatar_intent intent_from_keys(bool forward, bool back, bool left,
 // walk as fast as the stick is pushed (a full push, or a key, at `speed`; never faster).
 cvc::ariadne::avatar_intent intent_from_axes(double forward, double right, double yaw,
                                              double speed);
+
+// A swimmer's pitch (radians: 0 upright, pi/2 lying forward), eased toward lying while MOTION is
+// swimming at SPEED over 0.4 m/s across, toward upright otherwise, by 1 - e^(-DT/0.25 s) of the way
+// each call. SPEED is what it asks for (our own avatar's intent) or, for a peer, how fast its shown
+// pose moves: over what a floating body drifts with the waves, well under a swimmer's 1 m/s.
+double swim_pitch(double pitch, cvc::ariadne::avatar_motion motion, double speed, double dt);
+// The row-major pose matrix of an avatar's marker (the box, centred on its origin) whose feet are
+// at FEET, of BODY, pitched forward about its right by PITCH: upright, its centre half its height
+// up; lying, its top where an upright floating box's top is (its centre half its width under it).
+void avatar_marker_matrix(const cvc::physics::pose &feet, const cvc::ariadne::avatar_body &body,
+                          double pitch, double m[16]);
 
 // The camera's heading on a Z-up ground as a yaw (radians about +Z from +X): the view direction
 // (eye -> focal) flattened onto the ground. A camera looking straight down has none: +Y (pi/2).
@@ -223,6 +239,16 @@ private:
   std::map<std::string, cvc::physics::vec3> _heads; // pid -> where its label goes (world)
   int _names_age = 0;                               // frames until _names is re-read
   cvc::physics::vec3 _self_offset{0.0, 0.0, 0.0};   // easing offset on the local avatar
+  // How each avatar is drawn in the water (swim_pitch): its motion (a peer's re-read with the
+  // looks), its pitch, and its speed across from the shown pose's frame-to-frame move.
+  struct swim_shown {
+    cvc::ariadne::avatar_motion motion = cvc::ariadne::avatar_motion::walking;
+    double pitch = 0.0, speed = 0.0;
+    cvc::physics::vec3 last{0.0, 0.0, 0.0};
+    bool have = false;
+  };
+  std::map<std::string, swim_shown> _swim;
+  int _motions_age = 0; // frames until the peers' motions are re-read
   bool _have_self = false;
   bool _self_visible = true; // set_self_visible
   std::set<std::string> _riders; // set_riders
