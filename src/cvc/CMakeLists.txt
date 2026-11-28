@@ -180,6 +180,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/geometry/contour_intrinsics.h
   ../../inc/cvc/mol/blur.h
   ../../inc/cvc/mol/molecule.h
+  ../../inc/cvc/mol/view.h
   ../../inc/cvc/volume/point_classes.h
   ../../inc/cvc/volume/point_class_intrinsics.h
   ../../inc/cvc/volume/segmentation.h
@@ -363,6 +364,7 @@ set(SOURCE_FILES
   utility/xml_lite.cpp
   mol/blur.cpp
   mol/molecule.cpp
+  mol/view.cpp
   volume/point_classes.cpp
   volume/point_class_intrinsics.cpp
   volume/segmentation/genseg.cpp

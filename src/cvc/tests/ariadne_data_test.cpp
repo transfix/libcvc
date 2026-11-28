@@ -23,6 +23,7 @@
 #include <cvc/image/image_encode.h>
 #include <cvc/model/model.h>
 #include <cvc/model/model_file_io.h>
+#include <cvc/mol/molecule.h>
 #include <cvc/net/http_client.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_blob_store.h> // sha256_hex
@@ -609,6 +610,42 @@ TEST(AriadneData, ContoursLoadAndSaveThroughTheApp) {
   } catch (const std::exception &e) {
     EXPECT_NE(std::string(e.what()).find("save as .cvcc"), std::string::npos) << e.what();
   }
+}
+
+// A molecule (cvc/mol/molecule.h) loads by its extension, decoded `as: molecule` at `molecule`,
+// whose value is its atom count; a file with no atoms fails the load, saying so.
+TEST(AriadneData, MoleculesLoadByTheirExtension) {
+  cvc::app app;
+  TempDir t;
+  auto store = DataStore::of(app);
+  cvc::state &root = cvc::state::instance(app);
+  std::ofstream(t.dir / "two.pdb")
+      << "ATOM      1  N   ALA A   1      11.104   6.134  -6.504  1.00  0.00           N  \n"
+         "ATOM      2  CA  ALA A   1      11.639   6.071  -5.147  1.00  0.00           C  \n"
+         "END\n";
+  std::ofstream(t.dir / "three.xyzr") << "0 0 0 1.5\n1 0 0 1.5\n2 0 0 1.7\n";
+  std::ofstream(t.dir / "none.pdb") << "REMARK nothing here\nEND\n";
+  for (const auto &[name, atoms] :
+       std::vector<std::pair<std::string, std::size_t>>{{"two.pdb", 2}, {"three.xyzr", 3}}) {
+    DataSpec spec;
+    spec.uri = (t.dir / name).generic_string();
+    const std::string node = store->load(spec);
+    ASSERT_TRUE(store->wait(node, 30)) << root(node + ".error").value();
+    EXPECT_EQ(root(node + ".as").value(), "molecule") << name;
+    auto m =
+        boost::any_cast<std::shared_ptr<const cvc::mol::molecule>>(root(node + ".molecule").data());
+    ASSERT_TRUE(m) << name;
+    EXPECT_EQ(m->atoms.size(), atoms) << name;
+    EXPECT_EQ(root(node + ".molecule").value(), std::to_string(atoms)) << name;
+  }
+  DataSpec spec;
+  spec.uri = (t.dir / "none.pdb").generic_string();
+  const std::string node = store->load(spec);
+  EXPECT_FALSE(store->wait(node, 30));
+  EXPECT_EQ(status_of(app, node), "error");
+  EXPECT_NE(root(node + ".error").value().find("holds no atoms"), std::string::npos)
+      << root(node + ".error").value();
+  EXPECT_TRUE(cvc::ariadne::has_data_decoder(app, "molecule"));
 }
 
 // A generator that makes no files and names no as: has written its outputs: no decoder runs.

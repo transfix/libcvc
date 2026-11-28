@@ -1270,7 +1270,8 @@ types behind one call, `register_cvcgl_extensions`
 `generated_world` (terrain_lab's world, [`world_nodes.h`](../inc/cvc/gl/ariadne/world_nodes.h)),
 `volume_slice` (one axis-aligned plane of a volume, below), `volume_grid` (VolumeGridRover: three
 such planes with point classes, below), `contour_lab` (planar contours and the surfaces the contour
-tiler builds through them, below), `water` (its sea, lakes and ponds as the
+tiler builds through them, below), `molecule` (a molecule drawn as ball-and-stick, spheres, sticks
+or a cartoon, below), `water` (its sea, lakes and ponds as the
 GPU FFT ocean, below), `weather` (the scene's storms, below), `ribbon` and `draped_link` (lines
 drawn from data, below), `nav_swarm` and `swarm_layer` (a swarm of navigating vehicles and
 what of it is drawn, below), and — on a libcvc built with `CVC_ENABLE_LIBIGL` — `mesh_lab` and
@@ -3473,6 +3474,53 @@ third and two mitochondria traced through 72 sections of a Reconstruct series of
 (`examples/data/contours/kuwajima2019`, CC0), tiled into see-through surfaces (`cvcgl_contour_lab`,
 and the `contour_tiler` golden).
 
+**`type: molecule`** ([`molecule_nodes.h`](../inc/cvc/gl/ariadne/molecule_nodes.h),
+[`MoleculeNode.h`](../inc/cvc/gl/MoleculeNode.h)) is a molecule the app holds (a `data:` entry the
+`molecule` decoder read, §5.17, or a key a program wrote), drawn as the view
+[`cvc/mol/view.h`](../inc/cvc/mol/view.h) builds:
+
+```yaml
+data:
+  grl: ../data/molecules/1grl.pdb    # decoded as: molecule (the default for .pdb, .pqr, .xyzr)
+scene:
+  nodes:
+    - node: protein
+      type: molecule
+      source: { data: grl }          # or { state: <key> }, or { node: <id> } (its `molecule`)
+      style: cartoon                 # ball_and_stick (the default), spacefill, sticks, cartoon
+      color_by: structure            # element (the default), chain, residue, b_factor, structure
+      spheres: auto                  # auto, impostor, mesh
+      frame: true                    # frame the main view on it once drawn
+```
+
+- **The styles.** Ball-and-stick: each atom a sphere of `atom_scale` (0.25) times its radius, each
+  bond a cylinder of `bond_radius` half in each atom's colour. Spacefill: each atom a sphere of its
+  radius. Sticks: the bonds, with a sphere of `bond_radius` at each atom. Cartoon: each chain's
+  trace (C-alphas, or nucleotides' phosphorus) as a smooth tube, a wide flat ribbon through the
+  file's HELIX ranges and a flat strand with an arrow through its SHEET strands. Bonds are found by
+  distance: covalent radii plus `bond_tolerance` (0.45 Å), within a model, never between
+  alternate locations, and none to metal ions.
+- **The spheres** are impostors (VTK's sphere mapper: one point an atom, its fragments shaded and
+  depth-written as the sphere's surface). `spheres: mesh` draws them tessellated instead, and
+  `auto` (the default) does so by itself where the impostors' shader can't be built; `info.spheres`
+  says which draws. Both depth-test as spheres (`cvcgl_molecule`).
+- **Its keys:** `source.molecule` (the key it follows), `source.status`, the view's parameters
+  (`style`, `color_by`, `atoms` (all, polymer or hetero), `hydrogens`, `water`, `atom_scale`,
+  `bond_radius`, `bond_tolerance`, `helix_width`, `sheet_width`, `ribbon_thickness`,
+  `coil_radius`, `subdivisions`, `sides`, `sphere_detail`, `b_range`; each with its table's
+  properties), `spheres`, `chains` (a list: `.id`, `.visible`, `.atoms`, `.color`), `info.*`
+  (`atoms`, `drawn`, `bonds`, `residues`, `helices`, `sheets`, `id`, `title`, `spheres`, and
+  `bounds`, a camera frame request) and the job keys. A change rebuilds the view as a sliced job;
+  what was drawn stays until the new one is done. It publishes the molecule it draws at
+  `<node>.molecule`, the very pointer.
+- **Picks.** A pick meets its spheres exactly and reports the atom beside the usual fields:
+  `atom`, `serial`, `name`, `element`, `residue`, `residue_seq`, `chain`, `model`, `b_factor`,
+  `hetero` and `structure`; a pick on its sticks or cartoon names the atom nearest the point
+  (`cvcgl_molecule_pick`).
+
+The `molecule` golden draws 1GRL's cartoon in the main view and its ball-and-stick in a viewport,
+from one copy of the molecule.
+
 **`type: volume_render`** ([`volume_render_nodes.h`](../inc/cvc/gl/ariadne/volume_render_nodes.h),
 [`VolumeRenderNode.h`](../inc/cvc/gl/VolumeRenderNode.h)) is one volume the app holds, drawn by the
 renderer a key picks, switchable while the document runs:
@@ -4764,6 +4812,7 @@ for an archive or a directory, and otherwise one picked by the file's extension:
 | `point_classes` | `classes`: a `cvc::point_classes` from a `.vgr` (VolumeGridRover's point classes; the default for `.vgr`), its point count as the value |
 | `volume_grid_session` | `session`: a `cvc::volume_grid_session` from a session's JSON (`as:` names it: `.json` alone is `json`) |
 | `contours` | `contours`: a `cvc::contour_stack` from any contour format the app reads (the default for `.ser`, `.contour` and `.cvcc`), its polygon count as the value; a Reconstruct series' section files come from its archive or the page's preload |
+| `molecule` | `molecule`: a `cvc::mol::molecule` ([`molecule.h`](../inc/cvc/mol/molecule.h)) from a `.pdb`, `.ent`, `.pqr` or `.xyzr` file (the default for those), or any format the app's molecule handlers read, with the readers' defaults; its atom count as the value. A file with no atoms fails the load |
 
 A host adds its own with `register_data_decoder`.
 
@@ -4962,6 +5011,9 @@ under the `pick:` key:
   (empty elsewhere), and `axis` (`x`, `y` or `z`), the axis that slice looks down;
 - `tags`: the node's own `tags:`, space-separated (in a context menu's `event`, a list,
   §5.30);
+- on a `molecule` node (§5.4), the atom: `atom`, `serial`, `name`, `element`, `residue`,
+  `residue_seq`, `chain`, `model`, `b_factor`, `hetero` and `structure` (written only on a hit
+  there: check `node`);
 - `button` (`1`), `mods` (`shift`, `ctrl`, `alt`, `super`, comma-separated), `phase` (`down`,
   `drag` or `up`) and `view`. The mods are ImGui's, so on a Mac `ctrl` is Cmd, the shortcut key,
   and `super` is Control. VTK's own window reports both keys as one flag, which is `ctrl`;

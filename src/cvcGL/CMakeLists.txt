@@ -1276,6 +1276,22 @@ add_test(NAME cvcgl_mesh_skeleton COMMAND cvcgl_mesh_skeleton)
 add_test(NAME cvcgl_mesh_skeleton_cooperative COMMAND cvcgl_mesh_skeleton)
 set_tests_properties(cvcgl_mesh_skeleton_cooperative PROPERTIES
                      ENVIRONMENT CVC_SLICED_THREADING=cooperative RUN_SERIAL TRUE)
+# The `molecule` node type (cvc/gl/ariadne/molecule_nodes.h): 1GRL from the source tree followed on
+# the state tree, its view built as a sliced job (and again cooperatively, as single-threaded wasm
+# runs it), picks, two apps; then impostor and tessellated spheres drawn offscreen (skipped where
+# nothing rasterises), so it renders and stays among the GL tests.
+add_executable(cvcgl_molecule test/cvcgl_molecule.cpp)
+target_link_libraries(cvcgl_molecule PRIVATE cvcGL)
+target_compile_definitions(cvcgl_molecule PRIVATE CVC_REPO_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../..")
+add_test(NAME cvcgl_molecule COMMAND cvcgl_molecule)
+add_test(NAME cvcgl_molecule_cooperative COMMAND cvcgl_molecule)
+set_tests_properties(cvcgl_molecule_cooperative PROPERTIES
+                     ENVIRONMENT CVC_SLICED_THREADING=cooperative)
+# Picking a molecule node in an `input: pick` viewport: its impostor spheres met exactly, the atom
+# in SceneViews::pick, the view's pick key and the node's on_pick:. Renders offscreen.
+add_executable(cvcgl_molecule_pick test/cvcgl_molecule_pick.cpp)
+target_link_libraries(cvcgl_molecule_pick PRIVATE cvcGL)
+add_test(NAME cvcgl_molecule_pick COMMAND cvcgl_molecule_pick)
 # ImGuiBackend's window sizing and placement on a bare ImGui context: a window with no size fits
 # its widgets, windows with no pos stack instead of overlapping (until the user moves one), and a
 # sized window scrolls both ways. No window, no GL.
@@ -1908,4 +1924,5 @@ cvc_document_host_stack(cvcgl_ariadne_realize cvcgl_ari_switch cvcgl_ari_golden 
                         cvcgl_ariadne_clip
                         cvcgl_ariadne_prototypes cvcgl_ari_record
                         cvcgl_imgui_colors cvcgl_contour_lab cvcgl_ariadne_volume_grid
-                        cvcgl_volume_grid cvcgl_volume_grid_contours cvcgl_ariadne_shared_volume)
+                        cvcgl_volume_grid cvcgl_volume_grid_contours cvcgl_ariadne_shared_volume
+                        cvcgl_molecule_pick)

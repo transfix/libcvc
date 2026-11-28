@@ -144,6 +144,9 @@ public:
     long long ijk[3] = {0, 0, 0};
     double value = 0.0;
     int axis = -1; // with plane: the axis the slice looks down (0 x, 1 y, 2 z)
+    // What the node says of the point, reported beside the fields above: on a molecule node, the
+    // atom it landed on (MoleculeNode::atomFields: atom, serial, name, element, residue, ...).
+    std::vector<std::pair<std::string, std::string>> fields;
   };
   // Pick in view `view` at (x, y) in VTK display coordinates of the window (framebuffer pixels from
   // the lower left; the view's texture is shown at its region), against what the view drew last

@@ -1,26 +1,54 @@
-# The browser smoke test's molecule (src/arigl/web/test/arigl_web_smoke.mjs): the
-# examples/ariadne/documents/skeleton_lab.ari scene, smaller. A mesh_lab node reads PDB entry 1GRL
-# (examples/data/molecules, which the page config at /apps/mol/ preloads), makes its surface (the
-# heavy atoms' blur map and its isosurface), decimates it to 2,000 triangles and takes the
-# skeleton of what is left, a slice at a time on the page's scheduler. Once the skeleton is drawn
-# it prints one line the test waits for; a failed run prints why.
+# The browser smoke test's molecule (src/arigl/web/test/arigl_web_smoke.mjs), PDB entry 1GRL
+# (examples/data/molecules, which the page config at /apps/mol/ preloads) two ways:
+#   - the examples/ariadne/documents/skeleton_lab.ari scene, smaller: a mesh_lab node reads the file,
+#     makes its surface (the heavy atoms' blur map and its isosurface), decimates it to 2,000
+#     triangles and takes the skeleton of what is left, a slice at a time on the page's scheduler;
+#   - the `molecule` node type on the same file loaded as app data (data:): its cartoon, and its
+#     ball-and-stick (impostor spheres, or tessellated ones where impostors can't run on the page),
+#     each built as a sliced job.
+# Once each is drawn it prints one line the test waits for; a failed run prints why.
 meta: {min_libcvc: 4.0.0}
 customs:
   - node: mesh_lab
     required: true
-init: (state-set "graphics.root.children.mesh.mesh_ops.request" "decimate skeleton")
+  - node: molecule
+    required: true
+data:
+  grl: ../data/molecules/1grl.pdb
+init: (begin (state-set "graphics.root.children.mesh.mesh_ops.request" "decimate skeleton")
+             (state-set "mol.frames" 0))
 on_tick: |
-  (if (and (!= (state-get "mol.reported") "1")
-           (= (state-get "graphics.root.children.mesh.mesh_ops.skeleton.busy") "0")
-           (!= (state-get "graphics.root.children.mesh.mesh_ops.skeleton.status") "idle"))
-      (begin
-        (print (str-concat "molecule skeleton: "
-                           (state-get "graphics.root.children.mesh.mesh_ops.skeleton.info.strands")
-                           " strands, "
-                           (state-get "graphics.root.children.mesh.mesh_ops.skeleton.info.sheets")
-                           " sheets ("
-                           (state-get "graphics.root.children.mesh.mesh_ops.skeleton.status") ")"))
-        (state-set "mol.reported" "1")))
+  (begin
+    (if (and (!= (state-get "mol.reported") "1")
+             (= (state-get "graphics.root.children.mesh.mesh_ops.skeleton.busy") "0")
+             (!= (state-get "graphics.root.children.mesh.mesh_ops.skeleton.status") "idle"))
+        (begin
+          (print (str-concat "molecule skeleton: "
+                             (state-get "graphics.root.children.mesh.mesh_ops.skeleton.info.strands")
+                             " strands, "
+                             (state-get "graphics.root.children.mesh.mesh_ops.skeleton.info.sheets")
+                             " sheets ("
+                             (state-get "graphics.root.children.mesh.mesh_ops.skeleton.status") ")"))
+          (state-set "mol.reported" "1")))
+    ;; The view's line 30 frames after both builds are done, so a fallback to tessellated spheres
+    ;; (found at the impostors' first draw) is what it reports.
+    (if (and (!= (state-get "mol.viewed") "1")
+             (= (state-get "graphics.root.children.atoms.busy") "0")
+             (= (state-get "graphics.root.children.cartoon.busy") "0")
+             (!= (state-get "graphics.root.children.atoms.info.drawn") "")
+             (!= (state-get "graphics.root.children.cartoon.info.residues") ""))
+        (begin
+          (state-set "mol.frames" (+ 1 (int (state-get "mol.frames"))))
+          (if (> (int (state-get "mol.frames")) 30)
+              (begin
+                (print (str-concat "molecule view: "
+                                   (state-get "graphics.root.children.atoms.info.drawn") " atoms, "
+                                   (state-get "graphics.root.children.atoms.info.bonds") " bonds, "
+                                   (state-get "graphics.root.children.cartoon.info.residues")
+                                   " residues (" (state-get "graphics.root.children.atoms.info.spheres")
+                                   " spheres; " (state-get "graphics.root.children.atoms.status") ")"))
+                (state-set "mol.viewed" "1"))))
+        (state-set "mol.frames" 0)))
 windows:
   - window: Skeleton
     id: skeleton
@@ -37,8 +65,24 @@ windows:
         chrome: false
         width: 320
         height: 240
+  - window: Molecule
+    id: molecule
+    pos: [16, 330]
+    size: [340, 300]
+    children:
+      - progress: progress
+        bind: graphics.root.children.atoms.progress
+        hi: 100
+        overlay: graphics.root.children.atoms.phase
+      - type: viewport
+        view: atoms
+        show: [atoms]
+        chrome: false
+        width: 320
+        height: 240
 scene:
   chrome: false
+  main_view: { hide: [atoms] }
   nodes:
     - node: mesh
       type: mesh_lab
@@ -49,3 +93,16 @@ scene:
       fit: { height: 100 }
       material: { color: [0.80, 0.86, 0.92], opacity: 0.3 }
       target_faces: 2000
+    - node: cartoon
+      type: molecule
+      source: { data: grl }
+      style: cartoon
+      color_by: structure
+      transform: { position: [120, 0, 40] }
+      tags: [cartoon]
+    - node: atoms
+      type: molecule
+      source: { data: grl }
+      style: ball_and_stick
+      color_by: chain
+      tags: [atoms]
