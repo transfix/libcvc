@@ -1558,6 +1558,7 @@ struct ConferenceSession {
       in = gla::intent_from_axes(walk_f, walk_r, facing_yaw_,
                                  holon_->controller().param("walk_speed", kWalkSpeed));
       in.jump = controls_.held("jump");
+      in.move.z = controls_.held("dive") ? -1.0 : 0.0; // a swimmer's dive (walker@2)
     } else if (driving != 0) {
       controls_.drive_axes(in); // the vehicle's: steer, throttle, brake
     }

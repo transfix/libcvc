@@ -160,6 +160,17 @@ units:
           - text: "controller"
           - text: ""
             bind: self.avatar.controller
+      - type: group
+        layout: { kind: grid, col_widths: [104, 300] }
+        children:
+          - text: "in the water"
+            tooltip: "Walking, wading (slower the deeper) or swimming. Swimming: the walk keys swim, Jump strokes up (and climbs out onto an edge), C or Left Ctrl dives."
+          - text: ""
+            bind: self.avatar.motion
+          - text: "density"
+            tooltip: "The water your body displaces: below fresh water's 1000 you float, head-out."
+          - text: ""
+            bind: self.avatar.density
       - separator
       - text: "Energy budget"
         color: [0.75, 0.85, 1.0]
@@ -303,6 +314,12 @@ units:
         bind: self.avatar.ledger.share.overflow
       - text: ""
         bind: self.avatar.ledger.summary
+      - type: group
+        layout: { kind: grid, col_widths: [104, 300] }
+        children:
+          - text: "swam"
+          - text: ""
+            bind: self.avatar.ledger.swam
       - separator
       - plot: Reserve kJ
         bind: self.avatar.history.reserve

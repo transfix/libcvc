@@ -1343,6 +1343,9 @@ TEST(ControlSchemes, EachSchemeHasItsOwnBindings) {
   ASSERT_EQ(walk.id, "walk");
   ASSERT_NE(walk.find("jump"), nullptr);
   EXPECT_EQ(walk.find("jump")->binding.keys, (std::vector<std::string>{"Space"}));
+  ASSERT_NE(walk.find("dive"), nullptr) << "a swimmer dives on the walk scheme (OW9d)";
+  EXPECT_EQ(walk.find("dive")->binding.keys, (std::vector<std::string>{"C", "Left Ctrl"}));
+  EXPECT_EQ(walk.find("dive")->binding.pad, (std::vector<std::string>{"LeftStick"}));
   EXPECT_EQ(walk.find("strafe_left")->binding.keys, (std::vector<std::string>{"A", "Left"}));
   EXPECT_EQ(car.find("throttle")->binding.keys, (std::vector<std::string>{"W", "Up"}));
   EXPECT_EQ(car.find("reverse")->binding.keys, (std::vector<std::string>{"S", "Down"}));

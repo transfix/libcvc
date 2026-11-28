@@ -87,6 +87,29 @@ void pose_matrix(const cvc::physics::quat &q, double tx, double ty, double tz, d
 
 } // namespace
 
+double swim_pitch(double pitch, cvc::ariadne::avatar_motion motion, double speed, double dt) {
+  constexpr double kLying = 1.57079632679489661923, kTau = 0.25, kMoving = 0.4;
+  const double target =
+      motion == cvc::ariadne::avatar_motion::swimming && speed > kMoving ? kLying : 0.0;
+  if (!(dt > 0.0) || !std::isfinite(pitch))
+    return std::isfinite(pitch) ? pitch : target;
+  return target + (pitch - target) * std::exp(-dt / kTau);
+}
+
+void avatar_marker_matrix(const cvc::physics::pose &feet, const cvc::ariadne::avatar_body &body,
+                          double pitch, double m[16]) {
+  // The facing (about +Z) and then the pitch about the body's own right-hand axis, +Y: its top
+  // (+Z) turns toward its front (+X).
+  const cvc::physics::quat &q = feet.rotation;
+  const double c = std::cos(0.5 * pitch), s = std::sin(0.5 * pitch);
+  const cvc::physics::quat r{q.w * c - q.y * s, q.x * c - q.z * s, q.y * c + q.w * s,
+                             q.z * c + q.x * s};
+  // Its centre: half its height up when upright; lying, half its width under the floating top.
+  const double lying = std::sin(std::clamp(pitch, 0.0, 1.57079632679489661923));
+  const double up = 0.5 * body.height + lying * (0.5 * body.height - 0.5 * body.width);
+  pose_matrix(r, feet.position.x, feet.position.y, feet.position.z + up, m);
+}
+
 cvc::ariadne::avatar_intent intent_from_keys(bool forward, bool back, bool left, bool right,
                                              double yaw, double speed) {
   return intent_from_axes((forward ? 1.0 : 0.0) - (back ? 1.0 : 0.0),
@@ -255,7 +278,11 @@ void room_view::sync_avatars(cvc::ariadne::holon &h, double wall_dt) {
   for (const std::string &pid : gone) {
     remove_marker(pid);
     _heads.erase(pid);
+    _swim.erase(pid);
   }
+  const bool refresh_motions = _motions_age-- <= 0;
+  if (refresh_motions)
+    _motions_age = kLooksEvery;
   if (!present.count(_self))
     _have_self = false;
 
@@ -298,9 +325,36 @@ void room_view::sync_avatars(cvc::ariadne::holon &h, double wall_dt) {
       _self_pos[0] = p.position.x, _self_pos[1] = p.position.y, _self_pos[2] = p.position.z;
       _have_self = true;
     }
+    // In the water (OW9d): its motion, its speed across from the shown pose's move, and the pitch
+    // they ease it to.
+    swim_shown &sw = _swim[pid];
+    if (self) {
+      cvc::ariadne::avatar_motion mo;
+      if (h.motion(pid, mo))
+        sw.motion = mo;
+    } else if (refresh_motions) {
+      cvc::ariadne::avatar_motion mo = cvc::ariadne::avatar_motion::walking;
+      rs::read_avatar_motion(_app, _room, pid, mo);
+      sw.motion = mo;
+    }
+    if (sw.have && wall_dt > 0.0) {
+      const double dx = p.position.x - sw.last.x, dy = p.position.y - sw.last.y;
+      const double now = std::sqrt(dx * dx + dy * dy) / wall_dt;
+      sw.speed += (now - sw.speed) * std::min(1.0, wall_dt / 0.2);
+    }
+    sw.last = p.position;
+    sw.have = true;
+    // Our own: whether we ask to swim across (the waves carry a body treading water too).
+    double across = sw.speed;
+    if (self) {
+      cvc::ariadne::avatar_intent in;
+      across = h.intent(pid, in) ? std::sqrt(in.move.x * in.move.x + in.move.y * in.move.y) : 0.0;
+    }
+    sw.pitch = swim_pitch(sw.pitch, sw.motion, across, wall_dt);
     double m[16];
-    // The box is centred on its origin: lift it by half its height to stand on the pose.
-    pose_matrix(p.rotation, p.position.x, p.position.y, p.position.z + 0.5 * _body.height, m);
+    // The box is centred on its origin: lifted by half its height to stand on the pose, or laid
+    // forward at the surface while it swims.
+    avatar_marker_matrix(p, _body, sw.pitch, m);
     // The marker, visor and parts move together, or (within kPoseEpsilon of the pose they show)
     // not at all.
     const auto shown = _posed.find(pid);

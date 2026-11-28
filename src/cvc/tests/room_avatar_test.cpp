@@ -381,6 +381,9 @@ TEST(RoomAvatar, ThePanelPublishesTheBudgetLedgerAndHistory) {
   EXPECT_EQ(get("look.color"), "Teal");
   EXPECT_EQ(get("look.accessory"), "Cap");
   EXPECT_EQ(get("controller"), "walker@2") << "the room's (its rules' default)";
+  EXPECT_EQ(get("density"), "985 kg/m^3: floats head-out") << "a person's (OW9b)";
+  EXPECT_EQ(get("motion"), "walking") << "on the floor (OW9d)";
+  EXPECT_EQ(get("ledger.swam"), "none") << "not a stroke yet";
   EXPECT_EQ(get("body"), "0.50 x 0.50 x 1.70 m box, 70 kg");
   EXPECT_EQ(get("policy.reserve"), "30.0 kJ");
   EXPECT_EQ(get("policy.sustains"), "2.2 m/s");

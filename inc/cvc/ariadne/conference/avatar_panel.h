@@ -39,8 +39,10 @@ namespace conference {
 // -- a window, the terminal, a test -- shows the same thing.
 //
 //   look.{color, accessory}            the labels everyone draws (room_avatar.h)
-//   body, controller                   "0.50 x 0.50 x 1.70 m box, 70 kg", "walker@1": the
+//   body, controller                   "0.50 x 0.50 x 1.70 m box, 70 kg", "walker@2": the
 //                                      room's (its rules sections, world_rules.h)
+//   density, motion                    "985 kg/m^3: floats head-out"; "walking", "wading" or
+//                                      "swimming" (walker@2, OW9d)
 //   policy.{budget, push, power, reserve, carrying, empty, sustains}   the relay's rule, each a
 //                                      short value ("840 N"), with what it means as
 //                                      policy.<line>_tip (for a tooltip)
@@ -49,6 +51,7 @@ namespace conference {
 //   ledger.{start, refilled, work, carried, overflow, unpaid, corrections, now, residual,
 //           distance, time, exhausted, peak, per_km}            the books, as text
 //   ledger.{balance, summary}          "balances (residual 0.000 J)"; "412 m in 2 min 05 s, ..."
+//   ledger.swam                        "40 m for 24.5 kJ" (swimming's share; "none" before)
 //   ledger.share.{work, carried, overflow}   each spending line's share of all spent (0..1)
 //   history.{reserve, power, window}   the last samples (kJ, W), comma-separated, for plot:
 //   ready                              "1" once our avatar has a body to account for
@@ -92,6 +95,7 @@ private:
   avatar_energy_policy _policy;
   avatar_body _body;
   std::string _controller;   // the avatar's controller id (world_rules.h)
+  avatar_motion _motion = avatar_motion::walking; // its last drive's (holon::motion)
   double _gravity = 9.80665; // m/s^2: the world's, what carrying a body along is priced by
   double _speed = 0.0;
   std::string _color, _accessory;

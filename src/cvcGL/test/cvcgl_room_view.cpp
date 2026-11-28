@@ -29,7 +29,9 @@
 #include <cvc/gl/SceneRenderer.h>
 #include <cvc/gl/ariadne/room_view.h>
 #include <cvc/lod/select.h>
+#include <cvc/physics/field.h> // a pool for the swimmer
 #include <cvc/state/state.h> // the relay's scene leaves, ingested by hand
+#include <cvc/volume/volume.h>
 #include <memory>
 #include <string>
 #include <thread>
@@ -726,6 +728,93 @@ int main() {
           "walking bakes (nearly) every frame, and the marker walks: " +
               std::to_string(sg.shadowBakes() - walk0) + " bakes in 10 frames, " +
               std::to_string(walked) + " m");
+    }
+  }
+
+  // ── a swimmer is drawn lying forward, a wader or one treading water upright (OW9d) ──
+  {
+    using cvc::ariadne::avatar_motion;
+    using cvc::gl::ariadne::avatar_marker_matrix;
+    using cvc::gl::ariadne::swim_pitch;
+    const double kLying = 1.57079632679489661923;
+    double pitch = 0.0;
+    for (int i = 0; i < 120; ++i)
+      pitch = swim_pitch(pitch, avatar_motion::swimming, 1.0, 1.0 / 60.0);
+    chk(near(pitch, kLying, 0.01), "swimming across, it lies forward within 2 s");
+    const double halfway = swim_pitch(kLying, avatar_motion::swimming, 0.05, 0.25);
+    chk(halfway < kLying && halfway > 0.5, "treading water, it rises back upright, eased");
+    chk(swim_pitch(0.3, avatar_motion::wading, 1.0, 10.0) < 1e-6, "a wader stands upright");
+    chk(swim_pitch(0.0, avatar_motion::walking, 1.0, 1.0) == 0.0, "a walker never pitches");
+
+    const cvc::ariadne::avatar_body body;
+    cvc::physics::pose feet;
+    feet.position = vec3{2.0, 3.0, -1.675}; // floating head-out, facing +x
+    double m[16];
+    avatar_marker_matrix(feet, body, 0.0, m);
+    chk(near(m[2], 0.0) && near(m[10], 1.0) && near(m[11], -1.675 + 0.85),
+        "upright: the box stands on its feet");
+    avatar_marker_matrix(feet, body, kLying, m);
+    chk(near(m[2], 1.0, 1e-9) && near(m[0], 0.0, 1e-9),
+        "lying: its top toward its facing, its front down");
+    chk(near(m[11], -1.675 + 1.7 - 0.25, 1e-9) && near(m[3], 2.0) && near(m[7], 3.0),
+        "with its top where the floating box's top was");
+    feet.rotation =
+        cvc::physics::quat{std::cos(0.5 * kLying), 0.0, 0.0, std::sin(0.5 * kLying)}; // facing +y
+    avatar_marker_matrix(feet, body, kLying, m);
+    chk(near(m[6], 1.0, 1e-9) && near(m[2], 0.0, 1e-9), "facing +y it lies along +y");
+  }
+
+  // ── the local swimmer in a client's view: lying while it swims, upright when it stops ──
+  {
+    cvc::app swim_app;
+    SceneGraph sg(swim_app, "room_swimmer");
+    SceneRenderer view(sg, 64, 64, /*offscreen=*/true, "main");
+    cvc::ariadne::holon_config cfg;
+    cfg.physics = true;
+    holon h(holon_role::client, cfg);
+    if (!h.physics()) {
+      printf("  SKIP  the swimmer's view (no Jolt in this build)\n");
+    } else {
+      rs::seed_default_scene(swim_app, "swim");
+      cvc::ariadne::avatar_static bed;
+      bed.center = vec3{0.0, 0.0, -6.5};
+      bed.half_extents = vec3{100.0, 100.0, 0.5};
+      auto v = std::make_shared<cvc::volume>(swim_app, cvc::dimension(2, 2, 2), cvc::Float,
+                                             cvc::bounding_box(-100, -100, -8, 100, 100, 0));
+      v->fill(1000.0);
+      cvc::physics::field water;
+      water.kind = cvc::physics::field_kind::fluid;
+      water.volume = v;
+      water.drag_coefficient = 1.0;
+      water.damping = 1.0e4;
+      water.inertial = true;
+      h.set_statics({bed}, 1, {water});
+      body_state at;
+      at.position = vec3{0.0, 0.0, -1.675};
+      h.add_participant("A", /*local=*/true, at);
+      room_view rv(view, swim_app, "swim", "A", sg.getStatePrefix());
+      const double dt = h.clock().fixed_dt();
+      const auto run = [&](const avatar_intent &in, int frames) {
+        h.set_intent("A", in);
+        for (int i = 0; i < frames; ++i) {
+          h.advance(dt);
+          rv.update(h, dt);
+        }
+      };
+      avatar_intent swim;
+      swim.move = vec3{2.0, 0.0, 0.0};
+      run(swim, 360);
+      std::shared_ptr<cvc::gl::GraphicsNode> n = sg.getGraphics("avatar_A");
+      const vtkMatrix4x4 *t = n ? n->getTransform() : nullptr;
+      cvc::ariadne::avatar_motion mo = cvc::ariadne::avatar_motion::walking;
+      chk(h.motion("A", mo) && mo == cvc::ariadne::avatar_motion::swimming, "it swims");
+      chk(t && t->GetElement(0, 2) > 0.95 && near(t->GetElement(2, 3), -0.225, 0.05),
+          "swimming across, drawn lying forward at the surface: z axis " +
+              std::to_string(t ? t->GetElement(0, 2) : 0.0) + ", centre at z " +
+              std::to_string(t ? t->GetElement(2, 3) : 0.0));
+      run(avatar_intent{}, 120); // it stops stroking: treading water, though it still glides
+      t = n ? n->getTransform() : nullptr;
+      chk(t && t->GetElement(2, 2) > 0.95, "treading water, drawn upright again");
     }
   }
 
