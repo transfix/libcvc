@@ -26,6 +26,19 @@
 //     verbs (e2ee_intrinsics.h). A store that cannot open leaves them out; (e2ee-status) says
 //     why, and the rest still turns on.
 //
+// All of that is the launcher's, for the `local` principal (principal.h; docs/roadmap/
+// ARIADNE_SHELL.md 4.12). A program's verbs are bound to its principal's, from the scope it runs
+// in, so a document mounted beside another reaches only what its principal may:
+//   - local: the launcher's allowlist and credentials, as above; a local application the shell
+//     gives a network of its own (shell.apps.<as>.net_policy, .credential_store, .e2ee_store) has
+//     its own policy (the launcher's when it names none), its own credential store (in memory
+//     when it names only a policy) and its own end-to-end keys;
+//   - remote:<origin>: its own origin and the origins it was granted (ScopePrincipal::net_origins);
+//   - file:<dir>: the origins it was granted, none by default;
+//   - each principal's credentials are its own (CredentialStore::for_principal, kept in the
+//     launcher's credential file under its principal), and so are its sign-ins, its end-to-end keys
+//     (in memory) and its WebSockets. A request naming a credential finds only its principal's.
+//
 // The registrations are process-wide, like the action-intrinsic providers they add to.
 
 #include <cvc/ariadne/net_intrinsics.h>
@@ -96,8 +109,12 @@ NetHostStatus net_host_status(cvc::app &app);
 
 // What enable_net gave `app`'s http verbs (its allowlist, credential store and on/off switch), for
 // a host-side request made on the same terms (host_get: an image: widget's picture). Empty when the
-// network is off for `app`.
+// network is off for `app`. This is the launcher's, the `local` principal's.
 std::optional<NetAccess> net_host_access(cvc::app &app);
+// What a program or widget whose scope is `scope` gets: its principal's (scope_principal,
+// principal.h; above). Empty when the network is off for `app`. A principal whose own network
+// cannot be built (its policy file stopped loading) gets an access that reaches nothing.
+std::optional<NetAccess> net_host_access(cvc::app &app, const std::string &scope);
 
 } // namespace ariadne
 } // namespace cvc

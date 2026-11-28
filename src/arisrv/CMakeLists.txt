@@ -173,7 +173,7 @@ if(CVC_BUILD_TESTS AND NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
                    "-DARGS=--doc@@${_srv_tests}/set_after_world.ari@@--set@@conf.rooms.ctest.scene.rev=7@@--set@@conf.rooms.ctest.scene.objects.ref.transform.pos.z=2@@${_srv_listen}"
                    -DSTATUS=0
                    "-DEXPECT1=world: cvc://worlds/default\\.ari for room 'ctest': 2 objects, 1 light, shadows on"
-                   "-DEXPECT2=rules: cvc://worlds/default\\.ari: avatars are person \\(70 kg, 0\\.50 x 0\\.50 x 1\\.70 m\\) on walker@1, at most 4\\.0 m/s, gravity 9\\.81 m/s\\^2; energy on; an empty reserve rests"
+                   "-DEXPECT2=rules: cvc://worlds/default\\.ari: avatars are person \\(70 kg, 0\\.50 x 0\\.50 x 1\\.70 m\\) on walker@2, at most 4\\.0 m/s, gravity 9\\.81 m/s\\^2; energy on; an empty reserve rests"
                    -P "${_srv_tests}/run_arisrv.cmake")
   set_tests_properties(arisrv_set_after_world PROPERTIES
                        ENVIRONMENT "CVC_ARIADNE_PATH=${CMAKE_CURRENT_SOURCE_DIR}/../cvc/ariadne")

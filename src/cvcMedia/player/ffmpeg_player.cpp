@@ -293,7 +293,7 @@ private:
   void run() {
     am::FetchResult fetched;
     if (src_.app)
-      fetched = am::fetch_bytes(*src_.app, src_.uri, src_.auth, src_.base);
+      fetched = am::fetch_bytes(*src_.app, src_.uri, src_.auth, src_.base, src_.scope);
     else
       fetched.error = "no app to fetch the media with";
     if (quitting())
