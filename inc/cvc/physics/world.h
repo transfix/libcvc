@@ -101,9 +101,10 @@ struct world_config {
   double penetration_slop = 0.002;  // metres two bodies may overlap before the solver pushes them
                                     // apart (Jolt's own default, 0.02, is sized for game props)
   int threads = 0; // worker threads inside step(): 0 = none (single-threaded job system)
-  // Worker threads for the fields' free-surface reads (each cell a body has in a fluid with a
-  // surface reads its height and velocity there, the field step's main cost): 0 = none, the
-  // calling thread reads them all. The same values in the same order either way, so a run's
+  // Worker threads for the fields' free-surface reads, the field step's main cost: each cell a
+  // body has in a fluid with a surface reads its height and velocity there, and each hull
+  // (hull.h) its vertices' heights and its wetted triangles' velocities, a hull a task. 0 = none,
+  // the calling thread reads them all. The same values in the same order either way, so a run's
   // state_hash does not depend on it. A build without threads (single-threaded WebAssembly)
   // ignores it. Free to change by reconfigure().
   int field_threads = 0;

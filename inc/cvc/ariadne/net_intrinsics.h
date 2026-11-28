@@ -83,7 +83,17 @@ struct NetAccess {
   // own. Null: the compiled backend (cvc::net::ws_connect, ws_start). With one, the ws-* verbs are
   // there even in a build without a WebSocket backend.
   std::shared_ptr<cvc::net::WsConnector> ws;
+  // Whose access this is (principal.h; docs/roadmap/ARIADNE_SHELL.md 4.12): the principal whose
+  // view of the store `credentials` is, with a local application's own policy and store when it
+  // has them (net_host.cpp writes it). A WebSocket a program opens is its owner's: a program of
+  // another owner gets "no WebSocket" for its handle. "" for a host's single access.
+  std::string owner;
 };
+
+// Which access a program whose scope is `scope` (its intrinsics_context::root_path) gets: the
+// network's host's per-principal one (net_host.h). Called as each program's verbs are bound, on
+// whatever thread binds them.
+using NetAccessFor = std::function<NetAccess(const std::string &scope)>;
 
 // Register the verbs: their kernels run on `app`'s background task pool, and each program calls
 // through its own context's async host (intrinsics_context::host). Appends two providers to the
@@ -95,6 +105,11 @@ struct NetAccess {
 void register_net_intrinsics(cvc::app &app, NetAccess access);
 // register_net_intrinsics(app, {}): unchecked, and no credentials.
 void register_net_intrinsics(cvc::app &app);
+// The verbs, each program's bound to `for_scope(<its scope>)`, so a mounted document reaches only
+// what its principal may (enable_net). `access` is for what has no scope (none yet) and keeps the
+// on/off switch: a program built after `access.live` clears gets no verbs. Null `for_scope`: as
+// register_net_intrinsics(app, access).
+void register_net_intrinsics(cvc::app &app, NetAccess access, NetAccessFor for_scope);
 
 // A GET the host makes for a document, not a program: an image: widget's picture (media.h). It
 // keeps the verbs' terms: `access.policy` checks the URL, and `auth` ("" = none) names a

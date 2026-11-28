@@ -1,11 +1,13 @@
 // Ariadne — a host turning the network on for its documents. See inc/cvc/ariadne/net_host.h.
 
+#include <algorithm>
 #include <atomic>
 #include <cstdlib>
 #include <cvc/ariadne/e2ee_intrinsics.h>
 #include <cvc/ariadne/net_host.h>
 #include <cvc/ariadne/net_intrinsics.h>
 #include <cvc/ariadne/oidc_host.h>
+#include <cvc/ariadne/principal.h>
 #include <cvc/ariadne/uri.h>
 #include <cvc/ariadne/uri_http.h>
 #include <cvc/ariadne/uri_http_cache.h>
@@ -14,11 +16,13 @@
 #include <cvc/net/credentials.h>
 #include <cvc/net/http_client.h>
 #include <cvc/net/net_policy.h>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace cvc {
 namespace ariadne {
@@ -28,7 +32,12 @@ namespace {
 struct NetHost {
   std::shared_ptr<std::atomic<bool>> live;
   NetHostStatus status;
-  NetAccess access;
+  NetAccess access; // the launcher's: the `local` principal's
+  // docs/roadmap/ARIADNE_SHELL.md 4.12: what each other principal's programs get, built the first
+  // time one asks, by access_key; and the stores local applications named of their own, by path,
+  // so two that name one file share it.
+  std::map<std::string, NetAccess> by_key;
+  std::map<std::string, std::shared_ptr<cvc::net::CredentialStore>> own_stores;
 };
 
 // What enable_net turned on for an app.
@@ -37,6 +46,160 @@ struct net_host_slot {
   std::mutex m;
   NetHost host;
 };
+
+// The launcher's own principal's programs: the outermost document and every local one without a
+// network of its own.
+bool launchers(const ScopePrincipal &p) {
+  return p.local() && p.net_policy.empty() && p.credential_store.empty();
+}
+
+// Whose an access is (NetAccess::owner): the principal, and a local application's own policy and
+// store.
+std::string owner_of(const ScopePrincipal &p) {
+  if (launchers(p))
+    return cvc::net::kLocalPrincipal;
+  std::string k = p.principal;
+  if (!p.net_policy.empty())
+    k += "\npolicy=" + p.net_policy;
+  if (!p.credential_store.empty())
+    k += "\nstore=" + p.credential_store;
+  return k;
+}
+
+// The cache's key: the owner, and the origins a sandboxed principal was granted (a grant that
+// changes makes a new policy over the same credentials).
+std::string access_key(const ScopePrincipal &p) {
+  std::string k = owner_of(p);
+  if (!p.local()) {
+    std::vector<std::string> granted = p.net_origins;
+    std::sort(granted.begin(), granted.end());
+    for (const std::string &o : granted)
+      k += "\nallow=" + o;
+  }
+  return k;
+}
+
+// Every origin a policy binds a credential to must be allowed. "" or why not.
+std::string check_bindings(const cvc::net::NetPolicy &policy, const std::string &what) {
+  for (const auto &[name, origins] : policy.credential_bindings()) {
+    if (!cvc::net::CredentialStore::valid_name(name))
+      return what + ": '" + name + "' is not a credential name (1-64 of A-Z a-z 0-9 . _ -)";
+    for (const cvc::net::Origin &o : origins)
+      if (!policy.allows(o))
+        return what + ": credential " + name + " is bound to " + o.str() +
+               ", which is not allowed (add an allow line or --net-allow " + o.str() + ")";
+  }
+  return std::string();
+}
+
+// A store a local application named of its own (`spec` as --credential-store takes one), opened
+// once. Null, with `why`, when it cannot be.
+std::shared_ptr<cvc::net::CredentialStore> own_store(NetHost &h, const std::string &spec,
+                                                     std::string &why) {
+#ifdef __EMSCRIPTEN__
+  (void)h;
+  (void)spec;
+  why = "credential_store: a browser host keeps credentials in memory only";
+  return nullptr;
+#else
+  const std::string path = cvc::net::CredentialStore::resolve_path(spec);
+  if (path.empty()) {
+    why = "credential_store: no config directory to keep '" + spec +
+          "' in (set XDG_CONFIG_HOME or HOME, or give a path)";
+    return nullptr;
+  }
+  if (h.access.credentials && h.access.credentials->path() == path)
+    return h.access.credentials; // the launcher's own file: its local view
+  if (const auto it = h.own_stores.find(path); it != h.own_stores.end())
+    return it->second;
+  auto store = std::make_shared<cvc::net::CredentialStore>(path);
+  if (!store->load(&why)) {
+    why = "credential_store: " + why;
+    return nullptr;
+  }
+  h.own_stores.emplace(path, store);
+  return store;
+#endif
+}
+
+// What programs running as `p` get (net_host.h), built. nullopt, with `why`, when it cannot be: a
+// local application's own policy that does not load, an origin granted that is not one.
+std::optional<NetAccess> build_access(NetHost &h, const ScopePrincipal &p, std::string &why) {
+  if (launchers(p))
+    return h.access;
+  NetAccess a = h.access; // the same switch and WebSocket transport
+  a.owner = owner_of(p);
+  auto policy = std::make_shared<cvc::net::NetPolicy>();
+  std::shared_ptr<cvc::net::CredentialStore> store;
+  if (p.local()) {
+    // A local application's own network: its policy, or the launcher's; its store, or (with a
+    // policy of its own, whose credential lines would otherwise bind the launcher's names) one in
+    // memory.
+    if (!p.net_policy.empty()) {
+      if (!cvc::net::load_net_policy_file(p.net_policy, *policy, &why)) {
+        why = "net_policy: " + why;
+        return std::nullopt;
+      }
+      if (const std::string page = cvc::net::page_origin(); !page.empty())
+        policy->allow(*cvc::net::parse_origin_spec(page));
+      if (why = check_bindings(*policy, "net_policy"); !why.empty())
+        return std::nullopt;
+    } else if (h.access.policy) {
+      *policy = *h.access.policy;
+    }
+    if (!p.credential_store.empty()) {
+      if (!(store = own_store(h, p.credential_store, why)))
+        return std::nullopt;
+    } else {
+      store = std::make_shared<cvc::net::CredentialStore>();
+    }
+    if (store != h.access.credentials)
+      for (const auto &[name, origins] : policy->credential_bindings())
+        store->bind(name, origins);
+  } else {
+    // A sandboxed principal: a remote one's own origin, and what it was granted; its own view of
+    // the launcher's credential store.
+    constexpr std::string_view kRemote = "remote:";
+    if (p.principal.compare(0, kRemote.size(), kRemote) == 0)
+      policy->allow(*cvc::net::parse_origin_spec(p.principal.substr(kRemote.size())));
+    for (const std::string &spec : p.net_origins) {
+      const std::optional<cvc::net::Origin> o = cvc::net::parse_origin_spec(spec, &why);
+      if (!o) {
+        why = "the origin granted to " + p.principal + ": " + why;
+        return std::nullopt;
+      }
+      policy->allow(*o);
+    }
+    if (h.access.credentials)
+      store = h.access.credentials->for_principal(p.principal);
+  }
+  a.policy = std::move(policy);
+  a.credentials = std::move(store);
+  return a;
+}
+
+// build_access, kept for the next program of the same key. Slot lock held.
+std::optional<NetAccess> access_locked(NetHost &h, const ScopePrincipal &p, std::string &why) {
+  if (launchers(p))
+    return h.access;
+  const std::string key = access_key(p);
+  if (const auto it = h.by_key.find(key); it != h.by_key.end())
+    return it->second;
+  std::optional<NetAccess> a = build_access(h, p, why);
+  if (a)
+    h.by_key.emplace(key, *a);
+  return a;
+}
+
+// An access that reaches nothing and holds no credential: for a principal whose own network could
+// not be built (fail closed), owned by nobody else.
+NetAccess no_access(const NetAccess &base, const ScopePrincipal &p) {
+  NetAccess none = base;
+  none.policy = std::make_shared<const cvc::net::NetPolicy>();
+  none.credentials = nullptr;
+  none.owner = owner_of(p) + "\n(none)";
+  return none;
+}
 
 } // namespace
 
@@ -66,14 +229,8 @@ std::string enable_net(cvc::app &app, const NetHostConfig &config) {
   // their API usually live.
   if (const std::string page = cvc::net::page_origin(); !page.empty())
     policy->allow(*cvc::net::parse_origin_spec(page));
-  for (const auto &[name, origins] : policy->credential_bindings()) {
-    if (!cvc::net::CredentialStore::valid_name(name))
-      return "--net-policy: '" + name + "' is not a credential name (1-64 of A-Z a-z 0-9 . _ -)";
-    for (const cvc::net::Origin &o : origins)
-      if (!policy->allows(o))
-        return "--net-policy: credential " + name + " is bound to " + o.str() +
-               ", which is not allowed (add an allow line or --net-allow " + o.str() + ")";
-  }
+  if (const std::string bad = check_bindings(*policy, "--net-policy"); !bad.empty())
+    return bad;
 
   std::string path;
   if (!config.credential_store.empty()) {
@@ -123,8 +280,16 @@ std::string enable_net(cvc::app &app, const NetHostConfig &config) {
     status.oidc_issuers.push_back(i.issuer);
 
   disable_net(app); // a second enable replaces the first
-  NetAccess access{policy, store, live, config.ws};
-  register_net_intrinsics(app, access);
+  NetAccess access{policy, store, live, config.ws, cvc::net::kLocalPrincipal};
+  // Each program's verbs reach what its principal may (docs/roadmap/ARIADNE_SHELL.md 4.12): the
+  // scope it runs in names its mount, and the mount's principal its access.
+  cvc::app *const app_ptr = &app; // the providers go with the app
+  const NetAccessFor for_scope = [app_ptr, access](const std::string &scope) {
+    if (std::optional<NetAccess> a = net_host_access(*app_ptr, scope))
+      return *a;
+    return no_access(access, scope_principal(*app_ptr, scope)); // turned off meanwhile
+  };
+  register_net_intrinsics(app, access, for_scope);
   // Keys for end-to-end encrypted DMs. One that cannot open is no error: (e2ee-status) says why.
   enable_e2ee(app, config.e2ee_store);
   // The http(s) URIs, and the host's own GETs for pictures and native media, through the app's
@@ -134,17 +299,37 @@ std::string enable_net(cvc::app &app, const NetHostConfig &config) {
   else
     register_http_uri_handler(app, policy);
   if (status.oidc) {
-    enable_oidc(app, policy, store, config.oidc, live);
+    enable_oidc(app, access, for_scope, config.oidc);
     status.oidc_flows = oidc_flows(app);
   }
   status.browser = cvc::net::browser_available(app);
-  net_host_slot &s = app.slot<net_host_slot>();
-  std::lock_guard<std::mutex> lock(s.m);
-  s.host = NetHost{std::move(live), std::move(status), std::move(access)};
+  {
+    net_host_slot &s = app.slot<net_host_slot>();
+    std::lock_guard<std::mutex> lock(s.m);
+    s.host = NetHost{std::move(live), std::move(status), std::move(access), {}, {}};
+  }
+  // A mount's principal is checked as the Runtime records it: a local application's own policy
+  // and stores must open, or the mount is refused (rather than run without its network).
+  set_principal_check(app, "net", [app_ptr](const ScopePrincipal &p) -> std::string {
+    std::string why;
+    {
+      net_host_slot &s = app_ptr->slot<net_host_slot>();
+      std::lock_guard<std::mutex> lock(s.m);
+      if (!s.host.live)
+        return std::string();
+      if (!access_locked(s.host, p, why))
+        return why;
+    }
+    // Its own end-to-end keys: one that cannot open is no error, as --e2ee-store's is not.
+    if (p.local() && !p.e2ee_store.empty())
+      open_e2ee_store(*app_ptr, p.e2ee_store);
+    return std::string();
+  });
   return std::string();
 }
 
 void disable_net(cvc::app &app) {
+  set_principal_check(app, "net", nullptr);
   net_host_slot &s = app.slot<net_host_slot>();
   std::lock_guard<std::mutex> lock(s.m);
   NetHost &h = s.host;
@@ -174,6 +359,19 @@ std::optional<NetAccess> net_host_access(cvc::app &app) {
   if (!h.live)
     return std::nullopt;
   return h.access;
+}
+
+std::optional<NetAccess> net_host_access(cvc::app &app, const std::string &scope) {
+  const ScopePrincipal p = scope_principal(app, scope); // its own lock, not under ours
+  net_host_slot &s = app.slot<net_host_slot>();
+  std::lock_guard<std::mutex> lock(s.m);
+  NetHost &h = s.host;
+  if (!h.live)
+    return std::nullopt;
+  std::string why;
+  if (std::optional<NetAccess> a = access_locked(h, p, why))
+    return a;
+  return no_access(h.access, p);
 }
 
 } // namespace ariadne

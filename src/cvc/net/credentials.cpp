@@ -9,8 +9,12 @@
 #include <cvc/net/credentials.h>
 #include <filesystem>
 #include <fstream>
+#include <map>
+#include <memory>
+#include <mutex>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <utility>
 #include <vector>
@@ -33,8 +37,53 @@ bool name_char(char c) {
          c == '_' || c == '-';
 }
 
-constexpr char kFileHeader[] = "# cvc credentials v1: <name> <origin> <token> a line. Owner-only;\n"
-                               "# these are secrets. Written by the host; do not edit.\n";
+constexpr char kFileHeader[] =
+    "# cvc credentials v2: <principal> <name> <origin> <token> a line, the principal\n"
+    "# percent-encoded; a line of three words is the local principal's. Owner-only;\n"
+    "# these are secrets. Written by the host; do not edit.\n";
+
+// A principal's longest form (a file: directory's path, a remote: origin).
+constexpr std::size_t kMaxPrincipal = 4096;
+
+// A principal as a word of the file: every byte but [A-Za-z0-9] and ":/._~-" as %XX, so a
+// directory with a space in it stays one word.
+std::string encode_principal(const std::string &p) {
+  static const char kHex[] = "0123456789ABCDEF";
+  std::string out;
+  for (const char c : p) {
+    const unsigned char u = static_cast<unsigned char>(c);
+    if (std::isalnum(u) || c == ':' || c == '/' || c == '.' || c == '_' || c == '~' || c == '-') {
+      out.push_back(c);
+    } else {
+      out.push_back('%');
+      out.push_back(kHex[u >> 4]);
+      out.push_back(kHex[u & 15]);
+    }
+  }
+  return out;
+}
+
+// encode_principal undone; "" when a %XX is malformed.
+std::string decode_principal(const std::string &w) {
+  const auto hex = [](char c) {
+    return c >= '0' && c <= '9'   ? c - '0'
+           : c >= 'A' && c <= 'F' ? c - 'A' + 10
+           : c >= 'a' && c <= 'f' ? c - 'a' + 10
+                                  : -1;
+  };
+  std::string out;
+  for (std::size_t i = 0; i < w.size(); ++i) {
+    if (w[i] != '%') {
+      out.push_back(w[i]);
+      continue;
+    }
+    if (i + 2 >= w.size() || hex(w[i + 1]) < 0 || hex(w[i + 2]) < 0)
+      return std::string();
+    out.push_back(static_cast<char>(hex(w[i + 1]) * 16 + hex(w[i + 2])));
+    i += 2;
+  }
+  return out;
+}
 
 // --- a JSON scan just deep enough to find one string ------------------------------------------
 
@@ -311,7 +360,79 @@ std::vector<std::string> split_path(const std::string &field) {
 
 } // namespace
 
-CredentialStore::CredentialStore(std::string path) : path_(std::move(path)) {}
+// One store's state, which every principal's view of it shares (credentials.h).
+struct CredentialStore::Shared {
+  struct Entry {
+    std::string principal;
+    std::string name;
+    Origin from;
+    std::string token;
+    bool kept = true; // written to the file (false: provided, this run only)
+  };
+  // What one principal has besides its entries.
+  struct Own {
+    std::vector<std::pair<std::string, std::vector<Origin>>> bindings;
+    std::vector<std::pair<std::string, std::shared_ptr<CredentialRenewer>>> renewers;
+  };
+
+  explicit Shared(std::string p) : path(std::move(p)) {}
+
+  const std::string path;
+  std::mutex mutex; // everything below
+  std::vector<Entry> entries;
+  std::map<std::string, Own> own; // by principal
+
+  const std::vector<Origin> *bound(const std::string &principal, const std::string &name) const {
+    const auto o = own.find(principal);
+    if (o == own.end())
+      return nullptr;
+    for (const auto &b : o->second.bindings)
+      if (b.first == name)
+        return &b.second;
+    return nullptr;
+  }
+
+  // Whether entry `e` is sent to `to`. mutex held.
+  bool sends_to(const Entry &e, const Origin &to) const {
+    if (const std::vector<Origin> *b = bound(e.principal, e.name)) {
+      const auto has = [&](const Origin &o) {
+        return std::find(b->begin(), b->end(), o) != b->end();
+      };
+      return has(e.from) && has(to); // an entry from a since-dropped origin is not used
+    }
+    return e.from == to;
+  }
+
+  bool save_locked(std::string *error) const {
+    if (path.empty())
+      return true;
+#if defined(__EMSCRIPTEN__)
+    return fail(error, "a browser host keeps credentials in memory only");
+#else
+    std::string text = kFileHeader;
+    for (const Entry &e : entries)
+      if (e.kept)
+        text += encode_principal(e.principal) + " " + e.name + " " + e.from.str() + " " + e.token +
+                "\n";
+    return private_file::write(fs::path(path), text, "the credential store", error);
+#endif
+  }
+};
+
+CredentialStore::CredentialStore(std::string path)
+    : shared_(std::make_shared<Shared>(std::move(path))), principal_(kLocalPrincipal) {}
+
+CredentialStore::CredentialStore(std::shared_ptr<Shared> shared, std::string principal)
+    : shared_(std::move(shared)), principal_(std::move(principal)) {}
+
+std::shared_ptr<CredentialStore> CredentialStore::for_principal(const std::string &principal) {
+  std::string p = canonical_principal(principal);
+  if (p.empty())
+    return nullptr;
+  return std::shared_ptr<CredentialStore>(new CredentialStore(shared_, std::move(p)));
+}
+
+const std::string &CredentialStore::path() const { return shared_->path; }
 
 bool CredentialStore::valid_name(const std::string &name) {
   return !name.empty() && name.size() <= 64 && std::all_of(name.begin(), name.end(), name_char);
@@ -329,6 +450,30 @@ bool CredentialStore::valid_token(const std::string &token) {
   });
 }
 
+bool CredentialStore::valid_principal(const std::string &principal) {
+  return !canonical_principal(principal).empty();
+}
+
+std::string CredentialStore::canonical_principal(const std::string &principal) {
+  if (principal == kLocalPrincipal)
+    return principal;
+  constexpr std::string_view kFile = "file:", kRemote = "remote:";
+  if (principal.size() > kMaxPrincipal)
+    return std::string();
+  if (principal.compare(0, kFile.size(), kFile) == 0) {
+    if (principal.size() == kFile.size() ||
+        std::any_of(principal.begin(), principal.end(),
+                    [](char c) { return static_cast<unsigned char>(c) < 0x20 || c == 0x7f; }))
+      return std::string();
+    return principal;
+  }
+  if (principal.compare(0, kRemote.size(), kRemote) == 0) {
+    const std::optional<Origin> o = parse_origin_spec(principal.substr(kRemote.size()));
+    return o ? std::string(kRemote) + o->str() : std::string();
+  }
+  return std::string();
+}
+
 std::string CredentialStore::resolve_path(const std::string &spec) {
 #if defined(__EMSCRIPTEN__)
   (void)spec;
@@ -344,87 +489,69 @@ std::string CredentialStore::resolve_path(const std::string &spec) {
 }
 
 bool CredentialStore::load(std::string *error) {
-  if (path_.empty())
+  const std::string &file = shared_->path;
+  if (file.empty())
     return true;
 #if defined(__EMSCRIPTEN__)
   return fail(error, "a browser host keeps credentials in memory only");
 #else
   std::error_code ec;
-  if (!fs::exists(path_, ec))
+  if (!fs::exists(file, ec))
     return true;
-  if (!private_file::check_owner_only(path_, "the credential store", error))
+  if (!private_file::check_owner_only(file, "the credential store", error))
     return false;
-  std::ifstream in(path_, std::ios::binary);
+  std::ifstream in(file, std::ios::binary);
   if (!in)
-    return fail(error, "cannot read the credential store '" + path_ + "'");
-  std::vector<Entry> loaded;
+    return fail(error, "cannot read the credential store '" + file + "'");
+  std::vector<Shared::Entry> loaded;
   std::string line;
   for (int n = 1; std::getline(in, line); ++n) {
     if (!line.empty() && line.back() == '\r')
       line.pop_back();
     if (line.empty() || line[0] == '#')
       continue;
-    std::istringstream words(line);
-    Entry e;
-    std::string origin, extra;
+    std::istringstream words_in(line);
+    std::vector<std::string> words;
+    for (std::string w; words_in >> w;)
+      words.push_back(std::move(w));
     // Never quote the line: it holds a token.
-    const std::string where = "the credential store '" + path_ + "' line " + std::to_string(n);
-    if (!(words >> e.name >> origin >> e.token) || (words >> extra))
-      return fail(error, where + " is not '<name> <origin> <token>'");
-    const std::optional<Origin> o = parse_origin_spec(origin);
-    if (!valid_name(e.name) || !o || !valid_token(e.token))
+    const std::string where = "the credential store '" + file + "' line " + std::to_string(n);
+    if (words.size() != 3 && words.size() != 4)
+      return fail(error, where + " is not '<principal> <name> <origin> <token>'");
+    // Three words: a line written before principals were kept, the local principal's.
+    const std::size_t at = words.size() - 3;
+    Shared::Entry e;
+    e.principal =
+        at == 0 ? std::string(kLocalPrincipal) : canonical_principal(decode_principal(words[0]));
+    e.name = words[at];
+    e.token = words[at + 2];
+    const std::optional<Origin> o = parse_origin_spec(words[at + 1]);
+    if (e.principal.empty() || !valid_name(e.name) || !o || !valid_token(e.token))
       return fail(error, where + " is malformed");
     e.from = *o;
     loaded.push_back(std::move(e));
   }
-  std::lock_guard<std::mutex> lock(mutex_);
-  entries_ = std::move(loaded);
+  std::lock_guard<std::mutex> lock(shared_->mutex);
+  shared_->entries = std::move(loaded);
   return true;
 #endif
 }
 
-bool CredentialStore::save_locked(std::string *error) const {
-  if (path_.empty())
-    return true;
-#if defined(__EMSCRIPTEN__)
-  return fail(error, "a browser host keeps credentials in memory only");
-#else
-  std::string text = kFileHeader;
-  for (const Entry &e : entries_)
-    if (e.kept)
-      text += e.name + " " + e.from.str() + " " + e.token + "\n";
-  return private_file::write(fs::path(path_), text, "the credential store", error);
-#endif
-}
-
 void CredentialStore::bind(const std::string &name, std::vector<Origin> origins) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  for (auto &b : bindings_)
+  std::lock_guard<std::mutex> lock(shared_->mutex);
+  auto &bindings = shared_->own[principal_].bindings;
+  for (auto &b : bindings)
     if (b.first == name) {
       b.second = std::move(origins);
       return;
     }
-  bindings_.emplace_back(name, std::move(origins));
+  bindings.emplace_back(name, std::move(origins));
 }
 
 std::vector<Origin> CredentialStore::binding(const std::string &name) const {
-  std::lock_guard<std::mutex> lock(mutex_);
-  for (const auto &b : bindings_)
-    if (b.first == name)
-      return b.second;
-  return {};
-}
-
-// Whether entry `e` (of credential `name`) is sent to `to`. mutex_ held.
-bool CredentialStore::sends_to(const std::string &name, const Entry &e, const Origin &to) const {
-  for (const auto &b : bindings_)
-    if (b.first == name) {
-      const auto has = [&](const Origin &o) {
-        return std::find(b.second.begin(), b.second.end(), o) != b.second.end();
-      };
-      return has(e.from) && has(to); // an entry from a since-dropped origin is not used
-    }
-  return e.from == to;
+  std::lock_guard<std::mutex> lock(shared_->mutex);
+  const std::vector<Origin> *b = shared_->bound(principal_, name);
+  return b ? *b : std::vector<Origin>{};
 }
 
 bool CredentialStore::capture(const std::string &name, const Origin &from, const std::string &token,
@@ -433,19 +560,17 @@ bool CredentialStore::capture(const std::string &name, const Origin &from, const
     return fail(error, "'" + name + "' is not a credential name (1-64 of A-Z a-z 0-9 . _ -)");
   if (!valid_token(token))
     return fail(error, "the value is not a bearer token (16-4096 of A-Z a-z 0-9 - . _ ~ + /)");
-  std::lock_guard<std::mutex> lock(mutex_);
-  bool bound = false;
-  for (const auto &b : bindings_)
-    if (b.first == name) {
-      bound = true;
-      if (std::find(b.second.begin(), b.second.end(), from) == b.second.end())
-        return fail(error, "credential '" + name + "' is not bound to " + from.str());
-    }
-  std::erase_if(entries_,
-                [&](const Entry &e) { return e.name == name && (bound || e.from == from); });
-  entries_.push_back({name, from, token});
+  std::lock_guard<std::mutex> lock(shared_->mutex);
+  const std::vector<Origin> *b = shared_->bound(principal_, name);
+  if (b && std::find(b->begin(), b->end(), from) == b->end())
+    return fail(error, "credential '" + name + "' is not bound to " + from.str());
+  const bool bound = b != nullptr;
+  std::erase_if(shared_->entries, [&](const Shared::Entry &e) {
+    return e.principal == principal_ && e.name == name && (bound || e.from == from);
+  });
+  shared_->entries.push_back({principal_, name, from, token});
   std::string werr;
-  if (!save_locked(&werr) && error)
+  if (!shared_->save_locked(&werr) && error)
     *error = werr;
   return true;
 }
@@ -456,70 +581,79 @@ bool CredentialStore::provide(const std::string &name, const std::string &token,
     return fail(error, "'" + name + "' is not a credential name (1-64 of A-Z a-z 0-9 . _ -)");
   if (!valid_token(token))
     return fail(error, "the value is not a bearer token (16-4096 of A-Z a-z 0-9 - . _ ~ + /)");
-  std::lock_guard<std::mutex> lock(mutex_);
-  const auto bound = std::find_if(bindings_.begin(), bindings_.end(),
-                                  [&](const auto &b) { return b.first == name; });
-  if (bound == bindings_.end() || bound->second.empty())
+  std::lock_guard<std::mutex> lock(shared_->mutex);
+  const std::vector<Origin> *b = shared_->bound(principal_, name);
+  if (!b || b->empty())
     return fail(error, "credential '" + name + "' is bound to no origin");
   // The file's token for it stays on file: this one is ahead of it, for this run.
-  std::erase_if(entries_, [&](const Entry &e) { return e.name == name && !e.kept; });
-  entries_.push_back({name, bound->second.front(), token, false});
+  std::erase_if(shared_->entries, [&](const Shared::Entry &e) {
+    return e.principal == principal_ && e.name == name && !e.kept;
+  });
+  shared_->entries.push_back({principal_, name, b->front(), token, false});
   return true;
 }
 
 std::optional<std::string> CredentialStore::token_for(const std::string &name,
                                                       const Origin &to) const {
-  std::lock_guard<std::mutex> lock(mutex_);
-  for (auto it = entries_.rbegin(); it != entries_.rend(); ++it)
-    if (it->name == name && sends_to(name, *it, to))
+  std::lock_guard<std::mutex> lock(shared_->mutex);
+  const auto &entries = shared_->entries;
+  for (auto it = entries.rbegin(); it != entries.rend(); ++it)
+    if (it->principal == principal_ && it->name == name && shared_->sends_to(*it, to))
       return it->token;
   return std::nullopt;
 }
 
 bool CredentialStore::has(const std::string &name) const {
-  std::lock_guard<std::mutex> lock(mutex_);
-  return std::any_of(entries_.begin(), entries_.end(),
-                     [&](const Entry &e) { return e.name == name; });
+  std::lock_guard<std::mutex> lock(shared_->mutex);
+  return std::any_of(shared_->entries.begin(), shared_->entries.end(), [&](const Shared::Entry &e) {
+    return e.principal == principal_ && e.name == name;
+  });
 }
 
 std::vector<std::string> CredentialStore::names() const {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::lock_guard<std::mutex> lock(shared_->mutex);
   std::vector<std::string> out;
-  for (const Entry &e : entries_)
-    if (std::find(out.begin(), out.end(), e.name) == out.end())
+  for (const Shared::Entry &e : shared_->entries)
+    if (e.principal == principal_ && std::find(out.begin(), out.end(), e.name) == out.end())
       out.push_back(e.name);
   std::sort(out.begin(), out.end());
   return out;
 }
 
 bool CredentialStore::forget(const std::string &name, std::string *error) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  std::erase_if(renewers_, [&](const auto &r) { return r.first == name; });
-  const std::size_t dropped =
-      std::erase_if(entries_, [&](const Entry &e) { return e.name == name; });
+  std::lock_guard<std::mutex> lock(shared_->mutex);
+  std::erase_if(shared_->own[principal_].renewers, [&](const auto &r) { return r.first == name; });
+  const std::size_t dropped = std::erase_if(shared_->entries, [&](const Shared::Entry &e) {
+    return e.principal == principal_ && e.name == name;
+  });
   if (dropped > 0)
-    save_locked(error);
+    shared_->save_locked(error);
   return dropped > 0;
 }
 
 void CredentialStore::clear(std::string *error) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  entries_.clear();
-  renewers_.clear();
-  save_locked(error);
+  std::lock_guard<std::mutex> lock(shared_->mutex);
+  std::erase_if(shared_->entries,
+                [&](const Shared::Entry &e) { return e.principal == principal_; });
+  shared_->own[principal_].renewers.clear();
+  shared_->save_locked(error);
 }
 
 void CredentialStore::set_renewer(const std::string &name,
                                   std::shared_ptr<CredentialRenewer> renewer) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  std::erase_if(renewers_, [&](const auto &r) { return r.first == name; });
+  std::lock_guard<std::mutex> lock(shared_->mutex);
+  auto &renewers = shared_->own[principal_].renewers;
+  std::erase_if(renewers, [&](const auto &r) { return r.first == name; });
   if (renewer)
-    renewers_.emplace_back(name, std::move(renewer));
+    renewers.emplace_back(name, std::move(renewer));
 }
 
 std::shared_ptr<CredentialRenewer> CredentialStore::renewer(const std::string &name) const {
-  std::lock_guard<std::mutex> lock(mutex_);
-  for (const auto &r : renewers_)
+  std::lock_guard<std::mutex> lock(shared_->mutex);
+  const auto o = shared_->own.find(principal_);
+  if (o == shared_->own.end())
+    return nullptr;
+  for (const auto &r : o->second.renewers)
     if (r.first == name)
       return r.second;
   return nullptr;
