@@ -1,0 +1,155 @@
+# secondary_structures_panel.ari — GENERATED from cvc::param_table<cvc::secondary_params> (inc/cvc/geometry/secondary_structures_params.h)
+# by cvc::param_panel_ari (inc/cvc/core/param_panel.h). Do not edit: src/cvc/tests/param_panel_test.cpp
+# fails when it is not current, and writes it again when run with CVC_WRITE_PARAM_PANELS=1.
+#
+# One widget per field, in table order, bound to <keys>.<field>: the keys the table's
+# params_to_state and params_from_state read and seed (docs/PORT_PARAMETERS.md).
+#
+# Units:
+#   secondary_structures_panel   a window: args keys, title, id; slots before and after the widgets
+#   secondary_structures_params  the widgets alone, to include in a window of your own: args keys
+#
+# Args (every one has a default, so a bare include works):
+#   keys   the key root the fields sit under (default secondary_structures)
+#   title  the window's title (default Secondary structures)
+#   id     the instance id: the window's geometry persists under tree.<id> (default secondary_structures_panel)
+#
+# Use it:
+#     import: cvc://components/params/secondary_structures_panel.ari
+#     windows:
+#       - include: secondary_structures_panel
+#         args: { keys: secondary_structures }
+#         slots:
+#           after:
+#             - button: Run
+#               on: ...
+
+units:
+  secondary_structures_params:
+    args: { keys: "secondary_structures" }
+    type: group
+    children:
+      - slider_float: "Cocone phi"
+        bind: "{keys}.cocone_phi"
+        lo: 0
+        hi: 1.5707963267948966
+        range: key
+        fmt: "%g"
+        def: 0.39269908169872414
+        tooltip: "cocone_phi: Tight Cocone: half the cocone's opening angle around the surface (rad; 0 .. 1.5707963267948966)"
+      - slider_float: "Sharp phi"
+        bind: "{keys}.sharp_phi"
+        lo: 0
+        hi: 3.141592653589793
+        range: key
+        fmt: "%g"
+        def: 2.0943951023931953
+        tooltip: "sharp_phi: Tight Cocone: facets meeting at more than this dihedral angle make a sharp edge (rad; 0 .. 3.141592653589793)"
+      - slider_float: "Flat phi"
+        bind: "{keys}.flat_phi"
+        lo: 0
+        hi: 1.5707963267948966
+        range: key
+        fmt: "%g"
+        def: 1.0471975511965976
+        tooltip: "flat_phi: Tight Cocone: the normal deviation allowed between cocone neighbours of a flat point (rad; 0 .. 1.5707963267948966)"
+      - slider_float: "Flatness ratio"
+        bind: "{keys}.flatness_ratio"
+        lo: 0
+        hi: 14.4
+        fmt: "%g"
+        def: 1.44
+        tooltip: "flatness_ratio: Tight Cocone: the squared thinness factor of a flat point (0 .. 1e+300); the table sets no other end, so the slider's is a guess"
+      - slider_float: "Medial theta"
+        bind: "{keys}.medial_theta"
+        lo: 0
+        hi: 1.5707963267948966
+        range: key
+        fmt: "%g"
+        def: 0.39269908169872414
+        tooltip: "medial_theta: medial axis: a Delaunay edge within this angle of a tangent plane is not chosen by the angle condition (rad; 0 .. 1.5707963267948966)"
+      - slider_float: "Medial ratio"
+        bind: "{keys}.medial_ratio"
+        lo: 0
+        hi: 640
+        fmt: "%g"
+        def: 64
+        tooltip: "medial_ratio: medial axis: a Delaunay edge is chosen when its squared length exceeds this times both ends' umbrella diameters (0 .. 1e+300); the table sets no other end, so the slider's is a guess"
+      - slider_float: "Helix min width"
+        bind: "{keys}.helix_min_width"
+        lo: 0
+        hi: 20
+        fmt: "%g"
+        def: 2
+        tooltip: "helix_min_width: helices: the narrowest U2 edge kept (the radius of the tube around it) (0 .. 1e+300); the table sets no other end, so the slider's is a guess"
+      - slider_float: "Helix max width"
+        bind: "{keys}.helix_max_width"
+        lo: 0
+        hi: 30
+        fmt: "%g"
+        def: 3
+        tooltip: "helix_max_width: helices: the widest U2 edge kept (0 .. 1e+300); the table sets no other end, so the slider's is a guess"
+      - slider_float: "Helix join distance"
+        bind: "{keys}.helix_join_distance"
+        lo: 0
+        hi: 40
+        fmt: "%g"
+        def: 4
+        tooltip: "helix_join_distance: helices: candidate points nearer than this are in one cluster (0 .. 1e+300); the table sets no other end, so the slider's is a guess"
+      - slider_float: "Helix min length"
+        bind: "{keys}.helix_min_length"
+        lo: 0
+        hi: 30
+        fmt: "%g"
+        def: 3
+        tooltip: "helix_min_length: helices: a fitted axis shorter than this is not a helix (0 .. 1e+300); the table sets no other end, so the slider's is a guess"
+      - input_int: "Helix count"
+        bind: "{keys}.helix_count"
+        lo: 0
+        hi: 1000000000
+        def: 20
+        tooltip: "helix_count: helices: how many of the longest axes are the helices (0 .. 1000000000)"
+      - slider_float: "Helix radius"
+        bind: "{keys}.helix_radius"
+        lo: 0
+        hi: 18
+        fmt: "%g"
+        def: 1.8
+        tooltip: "helix_radius: helices: the radius of the cylinders drawn (0 .. 1e+300); the table sets no other end, so the slider's is a guess"
+      - slider_float: "Sheet min width"
+        bind: "{keys}.sheet_min_width"
+        lo: 0
+        hi: 20
+        fmt: "%g"
+        def: 2
+        tooltip: "sheet_min_width: sheets: the thinnest polygon drawn (the length of its dual Delaunay edge) (0 .. 1e+300); the table sets no other end, so the slider's is a guess"
+      - slider_float: "Sheet max width"
+        bind: "{keys}.sheet_max_width"
+        lo: 0
+        hi: 30
+        fmt: "%g"
+        def: 3
+        tooltip: "sheet_max_width: sheets: the thickest polygon drawn (0 .. 1e+300); the table sets no other end, so the slider's is a guess"
+      - slider_float: "Sheet min area"
+        bind: "{keys}.sheet_min_area"
+        lo: 0
+        hi: 100
+        fmt: "%g"
+        def: 10
+        tooltip: "sheet_min_area: sheets: a component of polygons smaller than this is never a sheet (0 .. 1e+300); the table sets no other end, so the slider's is a guess"
+      - input_int: "Sheet count"
+        bind: "{keys}.sheet_count"
+        lo: 0
+        hi: 1000000000
+        def: 2
+        tooltip: "sheet_count: sheets: how many of the largest components are the sheets (0 .. 1000000000)"
+
+  secondary_structures_panel:
+    args: { keys: "secondary_structures", title: "Secondary structures", id: secondary_structures_panel }
+    window: "{title}"
+    id: "{id}"
+    children:
+      - slot: before
+      - include: secondary_structures_params
+        args: { keys: "{keys}" }
+      - slot: after

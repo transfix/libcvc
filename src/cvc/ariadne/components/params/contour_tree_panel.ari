@@ -1,0 +1,49 @@
+# contour_tree_panel.ari — GENERATED from cvc::param_table<cvc::contour_tree_options> (inc/cvc/volume/contour_tree_params.h)
+# by cvc::param_panel_ari (inc/cvc/core/param_panel.h). Do not edit: src/cvc/tests/param_panel_test.cpp
+# fails when it is not current, and writes it again when run with CVC_WRITE_PARAM_PANELS=1.
+#
+# One widget per field, in table order, bound to <keys>.<field>: the keys the table's
+# params_to_state and params_from_state read and seed (docs/PORT_PARAMETERS.md).
+#
+# Units:
+#   contour_tree_panel   a window: args keys, title, id; slots before and after the widgets
+#   contour_tree_params  the widgets alone, to include in a window of your own: args keys
+#
+# Args (every one has a default, so a bare include works):
+#   keys   the key root the fields sit under (default contour_tree)
+#   title  the window's title (default Contour tree)
+#   id     the instance id: the window's geometry persists under tree.<id> (default contour_tree_panel)
+#
+# Use it:
+#     import: cvc://components/params/contour_tree_panel.ari
+#     windows:
+#       - include: contour_tree_panel
+#         args: { keys: contour_tree }
+#         slots:
+#           after:
+#             - button: Run
+#               on: ...
+
+units:
+  contour_tree_params:
+    args: { keys: "contour_tree" }
+    type: group
+    children:
+      - input_int: "Max dim"
+        bind: "{keys}.max_dim"
+        def: 0
+        tooltip: "max_dim: resample so no axis exceeds this many voxels first (0: full resolution) (voxel)"
+      - checkbox: "Quantize u8"
+        bind: "{keys}.quantize_u8"
+        def: false
+        tooltip: "quantize_u8: build on the values quantized to 256 levels, as VolumeRover2 did"
+
+  contour_tree_panel:
+    args: { keys: "contour_tree", title: "Contour tree", id: contour_tree_panel }
+    window: "{title}"
+    id: "{id}"
+    children:
+      - slot: before
+      - include: contour_tree_params
+        args: { keys: "{keys}" }
+      - slot: after

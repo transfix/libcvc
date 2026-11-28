@@ -1,0 +1,132 @@
+# seeded_segmentation_panel.ari — GENERATED from cvc::param_table<cvc::seeded_segmentation_params> (inc/cvc/volume/segmentation_params.h)
+# by cvc::param_panel_ari (inc/cvc/core/param_panel.h). Do not edit: src/cvc/tests/param_panel_test.cpp
+# fails when it is not current, and writes it again when run with CVC_WRITE_PARAM_PANELS=1.
+#
+# One widget per field, in table order, bound to <keys>.<field>: the keys the table's
+# params_to_state and params_from_state read and seed (docs/PORT_PARAMETERS.md).
+# On a node: volume_grid's grid.segment.*.
+#
+# Units:
+#   seeded_segmentation_panel   a window: args keys, title, id; slots before and after the widgets
+#   seeded_segmentation_params  the widgets alone, to include in a window of your own: args keys
+#
+# Args (every one has a default, so a bare include works):
+#   keys   the key root the fields sit under (default graphics.root.children.grid.grid.segment)
+#   title  the window's title (default Seeded segmentation)
+#   id     the instance id: the window's geometry persists under tree.<id> (default seeded_segmentation_panel)
+#
+# Use it:
+#     import: cvc://components/params/seeded_segmentation_panel.ari
+#     windows:
+#       - include: seeded_segmentation_panel
+#         args: { keys: graphics.root.children.grid.grid.segment }
+#         slots:
+#           after:
+#             - button: Run
+#               on: ...
+
+units:
+  seeded_segmentation_params:
+    args: { keys: "graphics.root.children.grid.grid.segment" }
+    type: group
+    children:
+      - slider_float: "T low"
+        bind: "{keys}.t_low"
+        lo: -1
+        hi: 1
+        range: key
+        fmt: "%g"
+        def: 0
+        tooltip: "t_low: voxels below this stop every front (data units, or 0..255 with normalized_thresholds) (data); the table sets no range, so the slider's is a guess"
+      - slider_float: "T high"
+        bind: "{keys}.t_high"
+        lo: -1
+        hi: 1
+        range: key
+        fmt: "%g"
+        def: 0
+        tooltip: "t_high: automatic seeds are the smoothed volume's local maxima above this (data units, or 0..255 with normalized_thresholds) (data); the table sets no range, so the slider's is a guess"
+      - checkbox: "Normalized thresholds"
+        bind: "{keys}.normalized_thresholds"
+        def: false
+        tooltip: "normalized_thresholds: t_low and t_high are on the legacy 0..255 scale the volume is rescaled to"
+      - slider_float: "Gamma"
+        bind: "{keys}.gamma"
+        lo: -1
+        hi: 0
+        range: key
+        fmt: "%g"
+        def: -0.12
+        tooltip: "gamma: front speed exp(gamma * |grad I|), |grad I| rescaled to 0..255: fronts slow at edges (-1 .. 0)"
+      - combo: "Automatic"
+        bind: "{keys}.automatic"
+        options: ["None", "Local maxima", "Critical points"]
+        values: ["none", "local_maxima", "critical_points"]
+        def: "local_maxima"
+        tooltip: "automatic: automatic seeds added to the point classes' (none, local_maxima, or critical_points: the paper's feature and background classes)"
+      - input_int: "Variable"
+        bind: "{keys}.variable"
+        lo: 0
+        hi: 2147483647
+        def: 0
+        tooltip: "variable: the point classes of this variable seed the run (0 .. )"
+      - input_int: "Timestep"
+        bind: "{keys}.timestep"
+        lo: 0
+        hi: 2147483647
+        def: 0
+        tooltip: "timestep: the point classes of this timestep seed the run (0 .. )"
+      - checkbox: "Class volumes"
+        bind: "{keys}.class_volumes"
+        def: true
+        tooltip: "class_volumes: also output a volume per class: its voxels' values, zero elsewhere"
+      - input_int: "Cp iterations"
+        bind: "{keys}.cp_iterations"
+        lo: 0
+        hi: 100000
+        def: 10
+        tooltip: "cp_iterations: critical_points: iterations of the gradient vector diffusion (0 .. 100000)"
+      - slider_float: "Cp k"
+        bind: "{keys}.cp_k"
+        lo: 0
+        hi: 1000
+        range: key
+        fmt: "%g"
+        def: 2
+        tooltip: "cp_k: critical_points: Eq. 3's k, a neighbour weighing exp(k (cos a - 1)), a the angle between the two vectors (0 .. 1000)"
+      - input_text: "Cp feature threshold"
+        bind: "{keys}.cp_feature_threshold"
+        def: "-inf"
+        tooltip: "cp_feature_threshold: critical_points: a maximum below this joins the background (data units, or 0..255 with normalized_thresholds; -inf: none does) (data); a number, or -inf"
+      - input_text: "Cp background threshold"
+        bind: "{keys}.cp_background_threshold"
+        def: "inf"
+        tooltip: "cp_background_threshold: critical_points: a minimum above this joins the feature (data units, or 0..255 with normalized_thresholds; inf: none does) (data); a number, or inf"
+      - combo: "Cp field"
+        bind: "{keys}.cp_field"
+        options: ["Image", "Gradient magnitude"]
+        values: ["image", "gradient_magnitude"]
+        def: "image"
+        tooltip: "cp_field: critical_points: the critical points of the gradient of the volume (image, the paper) or of its gradient magnitude (gradient_magnitude, SegMed: the maxima, on edges, are dropped)"
+      - combo: "Cp weights"
+        bind: "{keys}.cp_weights"
+        options: ["Current", "Initial"]
+        values: ["current", "initial"]
+        def: "current"
+        tooltip: "cp_weights: critical_points: the field whose angles weigh the diffusion's neighbours, the one being diffused (current, the paper) or the first (initial, SegMed)"
+      - input_int: "Cp sample"
+        bind: "{keys}.cp_sample"
+        lo: 0
+        hi: 2147483647
+        def: 0
+        tooltip: "cp_sample: critical_points: thin each connected run of critical voxels to one seed in every cp_sample + 1 (SegMed: 20; 0, the paper's: keep every voxel) (0 .. )"
+
+  seeded_segmentation_panel:
+    args: { keys: "graphics.root.children.grid.grid.segment", title: "Seeded segmentation", id: seeded_segmentation_panel }
+    window: "{title}"
+    id: "{id}"
+    children:
+      - slot: before
+      - include: seeded_segmentation_params
+        args: { keys: "{keys}" }
+      - slot: after

@@ -609,6 +609,58 @@ DSL from it. **PP1** adds one more generator: a parameter table's widget list as
 generated panel, with its run and stop buttons and its result picker added by hand. That makes the
 windows in §5 and §6 small. The jobs window is `jobs.ari`, planned by the TexMol plan's J1.
 
+**Built** (PP1, transfix/libcvc#1620):
+- **The generator.** `cvc::param_panel_ari<P>(spec)` (`inc/cvc/core/param_panel.h`) sits beside
+  `params_markdown<P>()`. A table becomes a file with these units:
+  - `<stem>_params`: the widgets alone, a group;
+  - `<stem>_panel`: a window holding them, with a `before` slot above and an `after` slot below for
+    a port's run and stop buttons and its result picker;
+  - `<stem>_<group>_params` for each group of dotted fields (volume_grid's `slice.*`), so a window
+    can show one group at a time, as V0's filter window does with each filter's fields.
+
+  All take `keys`, the key root the fields sit under, and the window also takes `title` and `id`.
+  Each widget binds `{keys}.<field>`, the key `params_to_state` and `params_from_state` use. `keys`
+  is one arg rather than `node` plus a prefix because a table can sit under more than one node:
+  `tile_params` is contour_lab's `tiler.*` and volume_grid's `grid.tile.*`.
+- **The widgets.**
+  - A bool is a `checkbox`.
+  - An enum is a `combo`: it shows the names in words and stores the names.
+  - A string or a list is an `input_text`.
+  - An int is a `slider_int` over a range of at most 1000, and an `input_int` otherwise.
+  - A number is a `slider_float`, log when its range spans three decades above 0. A number whose
+    default is infinite (a threshold that is off) is an `input_text`, since no slider holds it.
+
+  The schema has no `input_float` and no slider step until SDK-5. So a number with an open end
+  gets a slider over a range made up from its default, and its tooltip says so. A slider over the
+  table's own range takes `range: key`, so it follows the key's `min` and `max` properties when a
+  node rewrites them.
+- **The shipped panels.**
+  - All 24 tables, every `cvc::param_table` in `inc/`, are at `src/cvc/ariadne/components/params/`,
+    served as `cvc://components/params/<stem>_panel.ari`. `params/INDEX.ari` is generated in CC1's
+    collection format.
+  - They are checked in, not generated at build time. The components directory is installed and
+    embedded in every wasm host as it is, so a build-time directory would need its own install and
+    embed lines in each host.
+  - `param_panel_test` fails when a file is not what the generator writes, and when a table in
+    `inc/` has no panel. `CVC_WRITE_PARAM_PANELS=1` writes them again.
+- **pycvc:** `P.ari_panel(stem, keys, title)` on every wrapped params struct.
+- **Tests.** `param_panel_test` is a port test, so it runs natively and as wasm-mt under node. The
+  ports lane now installs yaml-cpp, so the loading cases run there too. It checks that:
+  - every panel loads clean, as a window and inside a window of one's own with its slots filled,
+    each field bound in table order, and each group unit alone;
+  - an edit in each kind of widget writes its key, and `params_from_state` reads it;
+  - a state change shows in the widgets;
+  - the seeded segmentation panel drives volume_grid's keys, and its range follows the keys'
+    properties;
+  - two apps do not share a panel's state.
+- **Left.**
+  - V0's three filters arrive as fields of `volume_filter_params`, so their panel only needs
+    writing again. V1's `tight_cocone_params` joins the list. In both cases whichever PR lands
+    second does it.
+  - The open-ended number sliders become `input_float` with SDK-5.
+  - A node that knows its data's range (volume_grid for the thresholds) can write `min` and `max`
+    on those keys, so their sliders follow the data.
+
 ### 7.6 Documentation fixes found on the way
 
 - ARIADNE_SHELL.md's status line ("Nothing in it is built").
@@ -625,7 +677,7 @@ Sizes as in the VolumeRover plan: S is a PR or two, M a few, L a short series.
 | Phase | Size | What lands | Needs |
 |---|---|---|---|
 | CC1 Collections | S–M | §4.2: `volume/`, `mesh/` and `dev/` with forwarders at the old paths, per-collection `INDEX.ari`, the recursive test and globs, the resolver's containment check | — |
-| PP1 Parameter panels | S–M | §7.5's generator, with a test that every port's table yields a panel that loads clean | — |
+| PP1 Parameter panels | S–M | §7.5's generator, with a test that every port's table yields a panel that loads clean. *Built:* transfix/libcvc#1620, 24 panels in `cvc://components/params/` | — |
 | SDK-7 | L | `tree`, `table`, selection bound to state, in ImGui, FTXUI and tvision | — |
 | SDK-4 + open | M | `file_dialog`, `message_box`, modal windows, §7.4's open verb | — |
 | SDK-3, SDK-5 | M | Toolbar, status bar, shortcuts, icons; `input_float`, editable `combo` | — |

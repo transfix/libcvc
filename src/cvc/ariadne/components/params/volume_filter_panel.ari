@@ -1,0 +1,70 @@
+# volume_filter_panel.ari — GENERATED from cvc::param_table<cvc::volume_filter_params> (inc/cvc/volume/volume_filter.h)
+# by cvc::param_panel_ari (inc/cvc/core/param_panel.h). Do not edit: src/cvc/tests/param_panel_test.cpp
+# fails when it is not current, and writes it again when run with CVC_WRITE_PARAM_PANELS=1.
+#
+# One widget per field, in table order, bound to <keys>.<field>: the keys the table's
+# params_to_state and params_from_state read and seed (docs/PORT_PARAMETERS.md).
+#
+# Units:
+#   volume_filter_panel   a window: args keys, title, id; slots before and after the widgets
+#   volume_filter_params  the widgets alone, to include in a window of your own: args keys
+#
+# Args (every one has a default, so a bare include works):
+#   keys   the key root the fields sit under (default volume_filter)
+#   title  the window's title (default Volume filter)
+#   id     the instance id: the window's geometry persists under tree.<id> (default volume_filter_panel)
+#
+# Use it:
+#     import: cvc://components/params/volume_filter_panel.ari
+#     windows:
+#       - include: volume_filter_panel
+#         args: { keys: volume_filter }
+#         slots:
+#           after:
+#             - button: Run
+#               on: ...
+
+units:
+  volume_filter_params:
+    args: { keys: "volume_filter" }
+    type: group
+    children:
+      - combo: "Filter"
+        bind: "{keys}.filter"
+        options: ["Bilateral"]
+        values: ["bilateral"]
+        def: "bilateral"
+        tooltip: "filter: the filter: bilateral"
+      - slider_float: "Radiometric sigma"
+        bind: "{keys}.radiometric_sigma"
+        lo: 1e-09
+        hi: 2000
+        range: key
+        fmt: "%g"
+        def: 200
+        tooltip: "radiometric_sigma: bilateral: how far apart two values may be and still blend (small keeps edges) (data; 1e-09 .. ); the table sets no other end, so the slider's is a guess"
+      - slider_float: "Spatial sigma"
+        bind: "{keys}.spatial_sigma"
+        lo: 1e-09
+        hi: 15
+        range: key
+        fmt: "%g"
+        def: 1.5
+        tooltip: "spatial_sigma: bilateral: how fast a neighbour's weight falls with its distance (voxel; 1e-09 .. ); the table sets no other end, so the slider's is a guess"
+      - slider_int: "Radius"
+        bind: "{keys}.radius"
+        lo: 0
+        hi: 16
+        range: key
+        def: 2
+        tooltip: "radius: bilateral: the neighbourhood's half-width (radius 2 is 5 x 5 x 5 voxels) (voxel; 0 .. 16)"
+
+  volume_filter_panel:
+    args: { keys: "volume_filter", title: "Volume filter", id: volume_filter_panel }
+    window: "{title}"
+    id: "{id}"
+    children:
+      - slot: before
+      - include: volume_filter_params
+        args: { keys: "{keys}" }
+      - slot: after

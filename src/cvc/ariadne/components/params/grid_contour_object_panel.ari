@@ -1,0 +1,67 @@
+# grid_contour_object_panel.ari — GENERATED from cvc::param_table<cvc::grid_contour_object> (inc/cvc/volume/volume_grid_contours.h)
+# by cvc::param_panel_ari (inc/cvc/core/param_panel.h). Do not edit: src/cvc/tests/param_panel_test.cpp
+# fails when it is not current, and writes it again when run with CVC_WRITE_PARAM_PANELS=1.
+#
+# One widget per field, in table order, bound to <keys>.<field>: the keys the table's
+# params_to_state and params_from_state read and seed (docs/PORT_PARAMETERS.md).
+# On a node: volume_grid's grid.objects.<i>.* rows.
+#
+# Units:
+#   grid_contour_object_panel   a window: args keys, title, id; slots before and after the widgets
+#   grid_contour_object_params  the widgets alone, to include in a window of your own: args keys
+#
+# Args (every one has a default, so a bare include works):
+#   keys   the key root the fields sit under (default graphics.root.children.grid.grid.objects.0)
+#   title  the window's title (default Grid contour object)
+#   id     the instance id: the window's geometry persists under tree.<id> (default grid_contour_object_panel)
+#
+# Use it:
+#     import: cvc://components/params/grid_contour_object_panel.ari
+#     windows:
+#       - include: grid_contour_object_panel
+#         args: { keys: graphics.root.children.grid.grid.objects.0 }
+#         slots:
+#           after:
+#             - button: Run
+#               on: ...
+
+units:
+  grid_contour_object_params:
+    args: { keys: "graphics.root.children.grid.grid.objects.0" }
+    type: group
+    children:
+      - input_text: "Name"
+        bind: "{keys}.name"
+        def: ""
+        tooltip: "name: the object's name"
+      - input_text: "Color"
+        bind: "{keys}.color"
+        def: "[1, 1, 1]"
+        tooltip: "color: its colour: r, g, b in [0, 1] (0 .. 1); a list, as [1, 2.5]"
+      - combo: "Interpolation"
+        bind: "{keys}.interpolation"
+        options: ["Linear", "Spline"]
+        values: ["linear", "spline"]
+        def: "linear"
+        tooltip: "interpolation: how its curves draw between their control points: linear or spline"
+      - slider_int: "Samples"
+        bind: "{keys}.samples"
+        lo: 1
+        hi: 64
+        range: key
+        def: 5
+        tooltip: "samples: points per span of a spline (1 .. 64)"
+      - checkbox: "Visible"
+        bind: "{keys}.visible"
+        def: true
+        tooltip: "visible: whether its curves draw"
+
+  grid_contour_object_panel:
+    args: { keys: "graphics.root.children.grid.grid.objects.0", title: "Grid contour object", id: grid_contour_object_panel }
+    window: "{title}"
+    id: "{id}"
+    children:
+      - slot: before
+      - include: grid_contour_object_params
+        args: { keys: "{keys}" }
+      - slot: after

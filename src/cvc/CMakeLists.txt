@@ -163,6 +163,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/core/param_table.h
   ../../inc/cvc/core/param_cli.h
   ../../inc/cvc/core/param_dsl.h
+  ../../inc/cvc/core/param_panel.h
   ../../inc/cvc/core/result_job.h
   ../../inc/cvc/core/job_keys.h
   ../../inc/cvc/core/notify.h
@@ -318,6 +319,7 @@ set(SOURCE_FILES
   core/async_lane.cpp
   core/sliced_task.cpp
   core/param_dsl.cpp
+  core/param_panel.cpp
   core/job_keys.cpp
   core/notify.cpp
   core/job_intrinsics.cpp

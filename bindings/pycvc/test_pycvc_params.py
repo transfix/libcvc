@@ -84,6 +84,15 @@ def test_text_and_markdown():
     print("  ok: set_text / get_text / markdown")
 
 
+def test_ari_panel():
+    t = pycvc.contour_tree_options.ari_panel("contour_tree", "doc.tree", "Contour tree")
+    assert "GENERATED from cvc::param_table<cvc::contour_tree_options>" in t, t
+    assert '  contour_tree_params:\n    args: { keys: "doc.tree" }\n' in t, t
+    assert '        bind: "{keys}.max_dim"\n' in t, t
+    assert "  contour_tree_panel:\n" in t and "      - slot: after\n" in t, t
+    print("  ok: ari_panel")
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_") and callable(fn):

@@ -1,0 +1,72 @@
+# volume_slice_panel.ari — GENERATED from cvc::param_table<cvc::volume_slice_params> (inc/cvc/volume/volume_slice.h)
+# by cvc::param_panel_ari (inc/cvc/core/param_panel.h). Do not edit: src/cvc/tests/param_panel_test.cpp
+# fails when it is not current, and writes it again when run with CVC_WRITE_PARAM_PANELS=1.
+#
+# One widget per field, in table order, bound to <keys>.<field>: the keys the table's
+# params_to_state and params_from_state read and seed (docs/PORT_PARAMETERS.md).
+# On a node: volume_slice's slice.*.
+#
+# Units:
+#   volume_slice_panel   a window: args keys, title, id; slots before and after the widgets
+#   volume_slice_params  the widgets alone, to include in a window of your own: args keys
+#
+# Args (every one has a default, so a bare include works):
+#   keys   the key root the fields sit under (default graphics.root.children.slice_z.slice)
+#   title  the window's title (default Volume slice)
+#   id     the instance id: the window's geometry persists under tree.<id> (default volume_slice_panel)
+#
+# Use it:
+#     import: cvc://components/params/volume_slice_panel.ari
+#     windows:
+#       - include: volume_slice_panel
+#         args: { keys: graphics.root.children.slice_z.slice }
+#         slots:
+#           after:
+#             - button: Run
+#               on: ...
+
+units:
+  volume_slice_params:
+    args: { keys: "graphics.root.children.slice_z.slice" }
+    type: group
+    children:
+      - combo: "Axis"
+        bind: "{keys}.axis"
+        options: ["X", "Y", "Z"]
+        values: ["x", "y", "z"]
+        def: "z"
+        tooltip: "axis: the axis the slice looks down: x, y or z"
+      - input_int: "Index"
+        bind: "{keys}.index"
+        lo: -1
+        hi: 2147483647
+        def: -1
+        tooltip: "index: which plane along the axis, from 0; -1 is the middle one (voxel; -1 .. )"
+      - combo: "Filter"
+        bind: "{keys}.filter"
+        options: ["Nearest", "Linear"]
+        values: ["nearest", "linear"]
+        def: "nearest"
+        tooltip: "filter: nearest draws each voxel as a square; linear blends between voxel centres"
+      - checkbox: "Opaque"
+        bind: "{keys}.opaque"
+        def: true
+        tooltip: "opaque: every voxel in its transfer-function colour at full opacity; off takes the opacity from the transfer function"
+      - slider_float: "Overlay offset"
+        bind: "{keys}.overlay_offset"
+        lo: 0
+        hi: 20
+        range: key
+        fmt: "%g"
+        def: 2
+        tooltip: "overlay_offset: how far the slice is pushed back in depth so overlays drawn in its plane stay on top (polygon-offset units) (0 .. ); the table sets no other end, so the slider's is a guess"
+
+  volume_slice_panel:
+    args: { keys: "graphics.root.children.slice_z.slice", title: "Volume slice", id: volume_slice_panel }
+    window: "{title}"
+    id: "{id}"
+    children:
+      - slot: before
+      - include: volume_slice_params
+        args: { keys: "{keys}" }
+      - slot: after

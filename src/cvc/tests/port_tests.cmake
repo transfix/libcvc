@@ -11,6 +11,7 @@
 
 set(CVC_PORT_TESTS
   param_table_test
+  param_panel_test
   result_job_test
   job_intrinsics_test
   tet_complex_test
@@ -96,4 +97,9 @@ target_compile_definitions(tiler_test PRIVATE
 target_compile_definitions(molecule_test PRIVATE
   CVC_REPO_DIR="${CMAKE_CURRENT_LIST_DIR}/../../..")
 target_compile_definitions(blur_test PRIVATE
+  CVC_REPO_DIR="${CMAKE_CURRENT_LIST_DIR}/../../..")
+
+# param_panel_test reads the shipped panels (src/cvc/ariadne/components/params) and the headers
+# whose tables make them from the source tree, and loads the panels through cvc://.
+target_compile_definitions(param_panel_test PRIVATE
   CVC_REPO_DIR="${CMAKE_CURRENT_LIST_DIR}/../../..")

@@ -1,0 +1,98 @@
+# tile_panel.ari — GENERATED from cvc::param_table<cvc::tile_params> (inc/cvc/geometry/tiler_params.h)
+# by cvc::param_panel_ari (inc/cvc/core/param_panel.h). Do not edit: src/cvc/tests/param_panel_test.cpp
+# fails when it is not current, and writes it again when run with CVC_WRITE_PARAM_PANELS=1.
+#
+# One widget per field, in table order, bound to <keys>.<field>: the keys the table's
+# params_to_state and params_from_state read and seed (docs/PORT_PARAMETERS.md).
+# On a node: contour_lab's tiler.*, volume_grid's grid.tile.*.
+#
+# Units:
+#   tile_panel   a window: args keys, title, id; slots before and after the widgets
+#   tile_params  the widgets alone, to include in a window of your own: args keys
+#
+# Args (every one has a default, so a bare include works):
+#   keys   the key root the fields sit under (default graphics.root.children.contours.tiler)
+#   title  the window's title (default Contour tiling)
+#   id     the instance id: the window's geometry persists under tree.<id> (default tile_panel)
+#
+# Use it:
+#     import: cvc://components/params/tile_panel.ari
+#     windows:
+#       - include: tile_panel
+#         args: { keys: graphics.root.children.contours.tiler }
+#         slots:
+#           after:
+#             - button: Run
+#               on: ...
+
+units:
+  tile_params:
+    args: { keys: "graphics.root.children.contours.tiler" }
+    type: group
+    children:
+      - slider_float: "Collinear epsilon"
+        bind: "{keys}.collinear_epsilon"
+        lo: 0
+        hi: 1
+        range: key
+        fmt: "%g"
+        def: 0
+        tooltip: "collinear_epsilon: a contour vertex whose triangle with its neighbours has at most this area is dropped as collinear (world^2; 0 .. ); the table sets no other end, so the slider's is a guess"
+      - slider_float: "Curation delta"
+        bind: "{keys}.curation_delta"
+        lo: 0
+        hi: 1
+        range: key
+        fmt: "%g"
+        def: 1e-08
+        tooltip: "curation_delta: the least distance kept between contours of one slice (0: no curation); less than the slice spacing (world; 0 .. ); the table sets no other end, so the slider's is a guess"
+      - checkbox: "Remove intersections"
+        bind: "{keys}.remove_intersections"
+        def: false
+        tooltip: "remove_intersections: remove the intersections between different components' tiles (needs curation_delta > 0)"
+      - slider_float: "Correspondence overlap"
+        bind: "{keys}.correspondence_overlap"
+        lo: -10
+        hi: 10
+        range: key
+        fmt: "%g"
+        def: -1
+        tooltip: "correspondence_overlap: crossing contours of consecutive slices correspond only above this overlap area (negative: any) (world^2); the table sets no range, so the slider's is a guess"
+      - input_text: "Include"
+        bind: "{keys}.include"
+        def: "[]"
+        tooltip: "include: components tiled, as regular expressions on the name (none: every one); a list, as [1, 2.5]"
+      - input_text: "Exclude"
+        bind: "{keys}.exclude"
+        def: "[]"
+        tooltip: "exclude: components not tiled, as regular expressions; a list, as [1, 2.5]"
+      - input_int: "Z first"
+        bind: "{keys}.z_first"
+        lo: -1
+        hi: 2147483647
+        def: -1
+        tooltip: "z_first: the first slice index tiled (-1: the stack's first) (-1 .. )"
+      - input_int: "Z last"
+        bind: "{keys}.z_last"
+        lo: -1
+        hi: 2147483647
+        def: -1
+        tooltip: "z_last: the last slice index tiled (-1: the stack's last) (-1 .. )"
+      - checkbox: "Cap ends"
+        bind: "{keys}.cap_ends"
+        def: true
+        tooltip: "cap_ends: close every component beyond each end of the slice range"
+      - input_text: "Color"
+        bind: "{keys}.color"
+        def: "[]"
+        tooltip: "color: one colour (r, g, b in [0, 1]) for every surface (empty: each component's) (0 .. 1); a list, as [1, 2.5]"
+
+  tile_panel:
+    args: { keys: "graphics.root.children.contours.tiler", title: "Contour tiling", id: tile_panel }
+    window: "{title}"
+    id: "{id}"
+    children:
+      - slot: before
+      - include: tile_params
+        args: { keys: "{keys}" }
+      - slot: after

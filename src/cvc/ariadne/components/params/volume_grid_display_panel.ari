@@ -1,0 +1,68 @@
+# volume_grid_display_panel.ari — GENERATED from cvc::param_table<cvc::volume_grid_display_params> (inc/cvc/volume/volume_grid.h)
+# by cvc::param_panel_ari (inc/cvc/core/param_panel.h). Do not edit: src/cvc/tests/param_panel_test.cpp
+# fails when it is not current, and writes it again when run with CVC_WRITE_PARAM_PANELS=1.
+#
+# One widget per field, in table order, bound to <keys>.<field>: the keys the table's
+# params_to_state and params_from_state read and seed (docs/PORT_PARAMETERS.md).
+# On a node: volume_grid's grid.display.*.
+#
+# Units:
+#   volume_grid_display_panel   a window: args keys, title, id; slots before and after the widgets
+#   volume_grid_display_params  the widgets alone, to include in a window of your own: args keys
+#
+# Args (every one has a default, so a bare include works):
+#   keys   the key root the fields sit under (default graphics.root.children.grid.grid.display)
+#   title  the window's title (default Volume grid display)
+#   id     the instance id: the window's geometry persists under tree.<id> (default volume_grid_display_panel)
+#
+# Use it:
+#     import: cvc://components/params/volume_grid_display_panel.ari
+#     windows:
+#       - include: volume_grid_display_panel
+#         args: { keys: graphics.root.children.grid.grid.display }
+#         slots:
+#           after:
+#             - button: Run
+#               on: ...
+
+units:
+  volume_grid_display_params:
+    args: { keys: "graphics.root.children.grid.grid.display" }
+    type: group
+    children:
+      - slider_float: "Point scale"
+        bind: "{keys}.point_scale"
+        lo: 0.1
+        hi: 10
+        range: key
+        fmt: "%g"
+        def: 1
+        tooltip: "point_scale: every class's radius times this, as its points draw and as a click finds them (0.1 .. 10)"
+      - checkbox: "Show points"
+        bind: "{keys}.show_points"
+        def: true
+        tooltip: "show_points: draw the point classes on the slices"
+      - checkbox: "Crosshairs"
+        bind: "{keys}.crosshairs"
+        def: true
+        tooltip: "crosshairs: draw where the other two planes cross each slice"
+      - checkbox: "Grey"
+        bind: "{keys}.grey"
+        def: false
+        tooltip: "grey: draw the slices in grey, not through the transfer function"
+      - combo: "Render"
+        bind: "{keys}.render"
+        options: ["None", "Vtk", "Volren", "Volslice"]
+        values: ["none", "vtk", "volren", "volslice"]
+        def: "none"
+        tooltip: "render: what draws the volume in the 3D view, through the same transfer function: none (the planes alone), vtk, volren or volslice"
+
+  volume_grid_display_panel:
+    args: { keys: "graphics.root.children.grid.grid.display", title: "Volume grid display", id: volume_grid_display_panel }
+    window: "{title}"
+    id: "{id}"
+    children:
+      - slot: before
+      - include: volume_grid_display_params
+        args: { keys: "{keys}" }
+      - slot: after

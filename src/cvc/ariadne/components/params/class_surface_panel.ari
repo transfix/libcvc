@@ -1,0 +1,77 @@
+# class_surface_panel.ari — GENERATED from cvc::param_table<cvc::class_surface_params> (inc/cvc/volume/class_surfaces.h)
+# by cvc::param_panel_ari (inc/cvc/core/param_panel.h). Do not edit: src/cvc/tests/param_panel_test.cpp
+# fails when it is not current, and writes it again when run with CVC_WRITE_PARAM_PANELS=1.
+#
+# One widget per field, in table order, bound to <keys>.<field>: the keys the table's
+# params_to_state and params_from_state read and seed (docs/PORT_PARAMETERS.md).
+# On a node: volume_grid's grid.segment.mesh.*.
+#
+# Units:
+#   class_surface_panel   a window: args keys, title, id; slots before and after the widgets
+#   class_surface_params  the widgets alone, to include in a window of your own: args keys
+#
+# Args (every one has a default, so a bare include works):
+#   keys   the key root the fields sit under (default graphics.root.children.grid.grid.segment.mesh)
+#   title  the window's title (default Class surfaces)
+#   id     the instance id: the window's geometry persists under tree.<id> (default class_surface_panel)
+#
+# Use it:
+#     import: cvc://components/params/class_surface_panel.ari
+#     windows:
+#       - include: class_surface_panel
+#         args: { keys: graphics.root.children.grid.grid.segment.mesh }
+#         slots:
+#           after:
+#             - button: Run
+#               on: ...
+
+units:
+  class_surface_params:
+    args: { keys: "graphics.root.children.grid.grid.segment.mesh" }
+    type: group
+    children:
+      - slider_int: "Smoothing"
+        bind: "{keys}.smoothing"
+        lo: 0
+        hi: 1000
+        range: key
+        def: 10
+        tooltip: "smoothing: passes of Taubin's smoothing (a lambda and a mu step each): the voxel steps go, the classes keep their size; 0 keeps the steps (0 .. 1000)"
+      - slider_float: "Lambda"
+        bind: "{keys}.lambda"
+        lo: 0
+        hi: 1
+        range: key
+        fmt: "%g"
+        def: 0.5
+        tooltip: "lambda: Taubin's lambda: each vertex moves this far towards its neighbours' mean (0 .. 1)"
+      - slider_float: "Mu"
+        bind: "{keys}.mu"
+        lo: -1
+        hi: 0
+        range: key
+        fmt: "%g"
+        def: -0.53
+        tooltip: "mu: Taubin's mu (below -lambda): the step back out that keeps the volume (-1 .. 0)"
+      - checkbox: "Close"
+        bind: "{keys}.close"
+        def: true
+        tooltip: "close: cap each class where it meets the volume's faces, so every surface is closed"
+      - input_int: "Background"
+        bind: "{keys}.background"
+        def: 255
+        tooltip: "background: the label of no class, which gets no surface (a segmentation's 255)"
+      - input_text: "Labels"
+        bind: "{keys}.labels"
+        def: "[]"
+        tooltip: "labels: only these labels get a surface (none: every label but the background); a list, as [1, 2.5]"
+
+  class_surface_panel:
+    args: { keys: "graphics.root.children.grid.grid.segment.mesh", title: "Class surfaces", id: class_surface_panel }
+    window: "{title}"
+    id: "{id}"
+    children:
+      - slot: before
+      - include: class_surface_params
+        args: { keys: "{keys}" }
+      - slot: after
