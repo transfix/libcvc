@@ -27,6 +27,7 @@
 #include <cvc/gl/ariadne/extensions.h>
 #include <cvc/gl/ariadne/lsystem_nodes.h>
 #include <cvc/gl/ariadne/mesh_nodes.h>
+#include <cvc/gl/ariadne/molecule_nodes.h>
 #include <cvc/gl/ariadne/ribbon_nodes.h>  // register_ribbon_node_types
 #include <cvc/gl/ariadne/scene_realize.h> // register_default_shader_presets
 #include <cvc/gl/ariadne/swarm_nodes.h>   // register_swarm_node_types
@@ -63,6 +64,7 @@ void register_cvcgl_extensions(cvc::app &app) {
   register_contour_lab_node_type(app);  // "contour_lab"
   register_swarm_node_types(app);       // "nav_swarm", "swarm_layer"
   register_entity_node_types(app);      // "entity_layer"
+  register_molecule_node_type(app);     // "molecule" (cvc::mol views: spheres, sticks, cartoon)
 }
 
 } // namespace ariadne

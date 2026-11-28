@@ -1,0 +1,67 @@
+# molecule.ari — golden: the `molecule` node type on PDB entry 1GRL, a GroEL subunit
+# (examples/data/molecules), which the document loads as app data. The main view draws its cartoon
+# coloured by secondary structure (helices red, strands yellow with their arrows, coil grey); the
+# window's viewport draws the same molecule, one copy, as ball-and-stick: impostor spheres and
+# bond cylinders coloured by B-factor. The harness waits for both builds
+# (RealizedScene::pending_work) before the capture.
+
+meta:
+  name: golden molecule
+  min_libcvc: 4.0.0
+
+customs:
+  - node: molecule
+    required: true
+
+data:
+  grl: ../../../../examples/data/molecules/1grl.pdb
+
+# The main view on 1GRL with a margin (its atoms span -27..31, -22..37, -70..1 Å), on the first
+# tick. The viewport frames itself on the atoms once they are drawn.
+on_tick: |
+  (if (!= (state-get "mol.opened") "1")
+      (begin (state-set "viewers.main.camera.frame" "-46 -42 -92 50 57 24")
+             (state-set "mol.opened" "1")))
+
+windows:
+  - window: Atoms
+    id: atoms
+    pos: [16, 16]
+    size: [430, 420]
+    children:
+      - text: "atoms"
+        bind: graphics.root.children.atoms.info.drawn
+      - text: "bonds"
+        bind: graphics.root.children.atoms.info.bonds
+      - text: "residues"
+        bind: graphics.root.children.cartoon.info.residues
+      - text: "spheres"
+        bind: graphics.root.children.atoms.info.spheres
+      - type: viewport
+        view: atoms
+        show: [atoms]
+        chrome: false
+        clear_color: [0.04, 0.045, 0.06]
+        width: 390
+        height: 300
+
+scene:
+  chrome: false
+  background: { top: [0.10, 0.12, 0.16], bottom: [0.02, 0.02, 0.03] }
+  main_view: { show: [cartoon] }
+  nodes:
+    - node: cartoon
+      type: molecule
+      source: { data: grl }
+      style: cartoon
+      color_by: structure
+      tags: [cartoon]
+    - node: atoms
+      type: molecule
+      source: { data: grl }
+      style: ball_and_stick
+      color_by: b_factor
+      tags: [atoms]
+  lights:
+    - rig: three_point
+      key: { intensity: 1.4, azimuth: -38, elevation: 52 }

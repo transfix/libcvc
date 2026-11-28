@@ -148,7 +148,7 @@ const TILER_CONFIG = JSON.stringify({
   preload: [`${SERIES}.ser`, ...Array.from({length: 20}, (_, i) => `${SERIES}.${14 + i}`)],
 });
 // /apps/mol/: the app again, preloading the PDB file molecule.ari's mesh_lab reads (a node's
-// source file is not a reference the page follows).
+// source file is not a reference the page follows; its data: entry names the same file).
 const MOL_CONFIG = JSON.stringify({preload: ['../data/molecules/1grl.pdb']});
 // /apps/pix/ and /apps/pixsixel/: ari.html with a page config asking for pictures in pixels
 // (iTerm2 images; Sixel, whose cell size the page measures), on pixels.ari's picture, the
@@ -597,15 +597,19 @@ console.log = function(...a) { window.__out.push(a.join(' ')); return log.apply(
     check: v => v.state === 'running' && v.warnings.length === 0 &&
                 v.out.some(l => /skeleton: [1-9]\d* strands, \d+ sheets \(done: /.test(l)),
   });
-  // The skeleton of a molecule: mesh_lab makes PDB entry 1GRL's surface (its blur map's isosurface,
-  // cvc::mol), decimates it and skeletonizes it on the single-threaded page; its document prints
-  // the counts once the skeleton is drawn (or the error, which fails the case).
+  // A molecule two ways. mesh_lab makes PDB entry 1GRL's surface (its blur map's isosurface,
+  // cvc::mol), decimates it and skeletonizes it on the single-threaded page. And the `molecule`
+  // node type draws the same file, loaded as app data, as a cartoon and as ball-and-stick: impostor
+  // spheres in WebGL2, or tessellated ones if the impostors' shader can't be built there (the line
+  // says which). Its document prints a line for each once drawn (or the error, which fails the
+  // case).
   cases.push({
-    name: 'a mesh_lab skeleton of a PDB molecule runs on the page',
+    name: 'a mesh_lab skeleton and molecule views of a PDB molecule run on the page',
     url: `${ORIGIN}/apps/mol/?src=molecule.ari`,
     inject: LOGGED,
     check: v => v.state === 'running' && v.warnings.length === 0 &&
-                v.out.some(l => /molecule skeleton: [1-9]\d* strands, \d+ sheets \(done: /.test(l)),
+                v.out.some(l => /molecule skeleton: [1-9]\d* strands, \d+ sheets \(done: /.test(l)) &&
+                v.out.some(l => /molecule view: 4186 atoms, [1-9]\d* bonds, 518 residues \((impostor|mesh) spheres; /.test(l)),
   });
   // The contour tiler (arigl only, as the orthoslicer): a contour_lab node reads a Reconstruct
   // series the page config preloads and tiles it as a sliced task on the page's scheduler; the

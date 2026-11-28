@@ -29,6 +29,7 @@
 #include <cvc/image/image_decode.h> // a city's satellite.png, from its bytes
 #include <cvc/model/model.h>
 #include <cvc/model/model_file_io.h> // read_model_from_memory
+#include <cvc/mol/molecule.h>
 #include <cvc/net/http_client.h>
 #include <cvc/state/state.h>
 #include <cvc/state/state_blob_store.h> // sha256_hex
@@ -309,6 +310,32 @@ void decode_contours(DataDecode &d) {
   d.out("contours").data(boost::any(std::shared_ptr<const cvc::contour_stack>(std::move(stack))));
 }
 
+// A molecule (cvc/mol/molecule.h), at `molecule`: a .pdb, .ent, .pqr or .xyzr file read from its
+// bytes, any other through the app's molecule handlers (molecule_handlers), with the readers'
+// defaults (the first model, hetero atoms, water and hydrogens all kept). Its value is the atom
+// count.
+void decode_molecule(DataDecode &d) {
+  const auto &f = only_file(d);
+  const std::string ext = extension(f.path);
+  cvc::mol::molecule m;
+  if (ext == ".pdb" || ext == ".ent" || ext == ".pqr" || ext == ".xyzr") {
+    std::istringstream in(*f.bytes);
+    if (ext == ".pqr")
+      m = cvc::mol::read_pqr(in, {}, f.path);
+    else if (ext == ".xyzr")
+      m = cvc::mol::read_xyzr(in, f.path);
+    else
+      m = cvc::mol::read_pdb(in, {}, f.path);
+  } else {
+    temp_dir tmp;
+    m = cvc::mol::read_molecule(d.app, tmp.put(basename(f.path), *f.bytes));
+  }
+  if (m.empty())
+    fail(f.path + " holds no atoms");
+  d.out("molecule").value(std::to_string(m.atoms.size()));
+  d.out("molecule").data(boost::any(std::make_shared<const cvc::mol::molecule>(std::move(m))));
+}
+
 // A volume grid session (cvc/volume/volume_grid.h's JSON), at `session`.
 void decode_volume_grid_session(DataDecode &d) {
   const auto &f = only_file(d);
@@ -433,6 +460,7 @@ struct decoder_table {
       {"point_classes", decode_point_classes},
       {"volume_grid_session", decode_volume_grid_session},
       {"contours", decode_contours},
+      {"molecule", decode_molecule},
   };
 };
 
@@ -488,6 +516,8 @@ std::string default_decoder(bool many, const std::string &name) {
       return "volume";
   if (ext == ".vgr")
     return "point_classes";
+  if (ext == ".pdb" || ext == ".ent" || ext == ".pqr" || ext == ".xyzr")
+    return "molecule";
   if (ext == ".ser" || ext == ".contour" || ext == ".cvcc")
     return "contours";
   return "bytes";

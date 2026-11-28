@@ -116,10 +116,11 @@ using DataDecoder = std::function<void(DataDecode &)>;
 // Register (or replace) `app`'s decoder named `as` (an empty decoder removes it). Every app
 // starts with the built-ins: files, bytes, text, json, mesh, heightfield, volume, city_bundle,
 // point_classes (a .vgr's classes, cvc/volume/point_classes.h, at `classes`),
-// volume_grid_session (a volume grid session's JSON, cvc/volume/volume_grid.h, at `session`) and
+// volume_grid_session (a volume grid session's JSON, cvc/volume/volume_grid.h, at `session`),
 // contours (a cvc::contour_stack, cvc/geometry/contours.h, at `contours`: .ser, .contour, .cvcc and
 // the other formats the app reads; a .ser's section files come from its archive or the page's
-// preload).
+// preload) and molecule (a cvc::mol::molecule, cvc/mol/molecule.h, at `molecule`: .pdb, .ent, .pqr
+// and .xyzr, and any other format the app's molecule handlers read).
 // Thread-safe; a decoder runs on a load's worker thread and throws std::exception to fail the
 // load. Another app's documents don't see it.
 void register_data_decoder(cvc::app &app, const std::string &as, DataDecoder decoder);

@@ -17,6 +17,7 @@
 #include <cvc/ariadne/widget.h>
 #include <cvc/gl/CameraController.h>
 #include <cvc/gl/GraphicsNode.h>
+#include <cvc/gl/MoleculeNode.h> // a molecule's spheres, picked exactly
 #include <cvc/gl/NullGraphicNode.h>
 #include <cvc/gl/SceneGraph.h>
 #include <cvc/gl/SceneRenderer.h>
@@ -31,6 +32,7 @@
 #include <cvc/gl/ariadne/scene_realize.h>
 #include <cvc/gl/ariadne/scene_views.h>
 #include <cvc/volume/volume_slice.h> // parse_slice_axis: a slice view's axis
+#include <limits>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -979,18 +981,65 @@ bool SceneViews::pick_props(
       picker->AddPickList(p);
       ++listed;
     }
-  if (listed == 0 || !picker->Pick(x, y, 0.0, ren) || picker->GetCellId() < 0)
-    return false;
-  picker->GetPickPosition(hit.world);
-  hit.hit = true;
-  if (vtkProp *prop = picker->GetViewProp()) {
-    const auto n = node_of.find(prop);
-    if (n != node_of.end()) {
-      hit.node = n->second.first;
-      if (realized)
-        hit.on_pick = on_pick_of(*realized, n->second.second);
+  const bool cell = listed > 0 && picker->Pick(x, y, 0.0, ren) && picker->GetCellId() >= 0;
+  double cell_world[3] = {0.0, 0.0, 0.0};
+  const GraphicsNode *cell_node = nullptr;
+  if (cell) {
+    picker->GetPickPosition(cell_world);
+    if (vtkProp *prop = picker->GetViewProp()) {
+      const auto n = node_of.find(prop);
+      if (n != node_of.end())
+        cell_node = n->second.second;
     }
   }
+  // A molecule's spheres, met exactly: impostors have no cells for the picker to meet
+  // (MoleculeNode::pickRay). The nearer of that and the cell picker's hit wins.
+  const MoleculeNode *molecule = nullptr;
+  int atom = -1;
+  double atom_world[3] = {0.0, 0.0, 0.0};
+  if (ray && realized) {
+    double best = cell ? std::sqrt((cell_world[0] - origin[0]) * (cell_world[0] - origin[0]) +
+                                   (cell_world[1] - origin[1]) * (cell_world[1] - origin[1]) +
+                                   (cell_world[2] - origin[2]) * (cell_world[2] - origin[2]))
+                       : std::numeric_limits<double>::infinity();
+    for (const RealizedScene::TaggedNode &t : realized->nodes)
+      if (auto m = std::dynamic_pointer_cast<MoleculeNode>(t.node.lock())) {
+        if (!node_of.count(m->prop())) // not in this view
+          continue;
+        double w[3], d = 0.0;
+        const int a = m->pickRay(origin, dir, w, &d);
+        if (a < 0 || d >= best)
+          continue;
+        best = d;
+        molecule = m.get();
+        atom = a;
+        std::copy(w, w + 3, atom_world);
+      }
+  }
+  if (!cell && !molecule)
+    return false;
+  hit.hit = true;
+  if (molecule) {
+    std::copy(atom_world, atom_world + 3, hit.world);
+    cell_node = molecule;
+  } else {
+    std::copy(cell_world, cell_world + 3, hit.world);
+  }
+  if (cell_node && realized) {
+    for (const RealizedScene::TaggedNode &t : realized->nodes)
+      if (t.node.lock().get() == cell_node) {
+        hit.node = t.id;
+        break;
+      }
+    hit.on_pick = on_pick_of(*realized, cell_node);
+  }
+  // On a molecule (its spheres, or one of its parts): the atom.
+  if (!molecule && cell_node)
+    if (const auto *m = dynamic_cast<const MoleculeNode *>(cell_node->getParentNode()))
+      if ((atom = m->atomNear(hit.world)) >= 0)
+        molecule = m;
+  if (molecule)
+    hit.fields = molecule->atomFields(atom);
   // On a volume_slice node: the point on its plane exactly, and the voxel there.
   if (ray && !hit.node.empty() && realized)
     for (const RealizedScene::TaggedNode &t : realized->nodes)
@@ -1051,17 +1100,21 @@ SceneViews::hit_fields(const PickHit &hit, const std::string &scene) const {
           tags += (tags.empty() ? "" : " ") + tag;
         break;
       }
-  return {{"x", at ? num(hit.world[0]) : ""},
-          {"y", at ? num(hit.world[1]) : ""},
-          {"z", at ? num(hit.world[2]) : ""},
-          {"hit", hit.hit ? "1" : "0"},
-          {"node", hit.node},
-          {"i", ijk(0)},
-          {"j", ijk(1)},
-          {"k", ijk(2)},
-          {"value", hit.voxel ? num(hit.value) : ""},
-          {"axis", hit.plane && hit.axis >= 0 && hit.axis < 3 ? axes[hit.axis] : ""},
-          {"tags", tags}};
+  std::vector<std::pair<std::string, std::string>> f = {
+      {"x", at ? num(hit.world[0]) : ""},
+      {"y", at ? num(hit.world[1]) : ""},
+      {"z", at ? num(hit.world[2]) : ""},
+      {"hit", hit.hit ? "1" : "0"},
+      {"node", hit.node},
+      {"i", ijk(0)},
+      {"j", ijk(1)},
+      {"k", ijk(2)},
+      {"value", hit.voxel ? num(hit.value) : ""},
+      {"axis", hit.plane && hit.axis >= 0 && hit.axis < 3 ? axes[hit.axis] : ""},
+      {"tags", tags}};
+  // What the node says of the point (a molecule's atom), after the usual fields.
+  f.insert(f.end(), hit.fields.begin(), hit.fields.end());
+  return f;
 }
 
 std::vector<std::pair<std::string, std::string>> SceneViews::main_pick_fields() const {
