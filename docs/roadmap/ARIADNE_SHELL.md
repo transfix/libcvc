@@ -29,7 +29,7 @@ applications:
 The first user is one arigl window that can open every libcvc example document. The goal beyond
 it is 4.12's golden: applications that travel as links in posts.
 
-**The design follows two rules.**
+**The design follows three rules.**
 
 - **A document runs the same mounted as it does on its own.** Under its mount's sub-prefix (§7.3)
   it finds the keys it would find at its own prefix: its scene's nodes at
@@ -38,6 +38,12 @@ it is 4.12's golden: applications that travel as links in posts.
 - **A mounted document gets nothing beyond its own scope unless it asks and the document that
   loads it grants it.** That is how `link:` holes and `functions:` work today (§7.4, §6.6), and
   4.5 extends it to input, signals and the shell's UI.
+- **The shell runs in every host:** arigl, `ari`'s terminal backends (FTXUI and tvision) and the
+  browser. A feature that needs GL degrades there, or is refused by name, and never stops the shell
+  from starting: an application with a scene is refused on a host without `gl.scene`, naming it
+  (4.2), and the main window shows what the host can draw (4.14). The hosts' capabilities are the
+  `requires:` tokens `(has? ...)` answers and `ari info` lists (§5.7); the shell checks them, not
+  the host's name.
 
 ## 2. What exists
 
@@ -259,7 +265,8 @@ nothing else: the SceneGraph, its world and its bodies stay as they are.
   Its background, lights, shadows, chrome and HUD are the front scene's.
 - One scene in the main view, never two: the outermost document's `scene:` is not drawn under
   the front application's. When `front:` is empty or absent, the main view draws the outermost
-  document's own `scene:`, as today.
+  document's own `scene:`, as today, or what its `main_window:` shows instead: the default main
+  window, a picture, a video, a colour or a gradient (4.14).
 - **How to draw it** is for a spike in SH6. Since a scene window is its scene's own renderer,
   the natural way is the same here: the main view draws the front scene's SceneGraph from its own
   renderer, into the window's frame instead of a texture, with the main camera controller pointed
@@ -1039,8 +1046,31 @@ backend `Backend::draw_main_window(...)` ahead of every window:
   has taken over the main window.
 - **Where.** ImGui draws it on the background draw list (`ImGui::GetBackgroundDrawList()`), under
   every window, as `room_view` draws its overlay. The browser builds draw it the same way, and play
-  the video with the browser's player. The terminal backends draw `color` and `gradient` as the
-  screen's background cells, and a picture or a video as half-blocks, as §5.12's `behind` does.
+  the video with the browser's player. FTXUI draws it behind everything, where its host background
+  (`set_background`) goes, and tvision, an FTXUI backend in hosted mode, draws it as its desktop.
+
+**On a host without GL** (rule 3 in section 1). The Runtime asks the host's capabilities before it
+draws, and what the host cannot draw falls back to the colour, so the shell never fails over a
+setting. Nothing is refused: the main window is the shell's own, and a setting written on one host
+is read on every other.
+
+| Kind | arigl, the browser | `ari` (FTXUI, tvision) | Falls back, when |
+|---|---|---|---|
+| `scene` | the main view | not drawn | the colour, without `gl.scene` |
+| `video` | its frames | not drawn | the colour, on a terminal (`term`), and while no player plays it |
+| `image` | real pixels | real pixels on a kitty, Sixel or iTerm terminal (`raster.bitmap`), half-blocks on any other colour terminal | the colour, without `raster.bitmap` or `ui.color` |
+| `gradient` | exact bands | each half-block cell its place's blend | the colour, without `ui.color` |
+| `color` | the colour | the colour in every cell | nothing drawn, without `ui.color` (a mono terminal) |
+
+- **What is drawn is mirrored** to `ariadne.main_window.shows` (`scene`, `image`, `video`, `color`,
+  `gradient`, `none`, or empty without a block), so the Settings page can say *This host cannot
+  show that here: it shows the colour instead*, and keep the user's choice for the hosts that can.
+- **The Settings page and the applications' pages are widgets every backend has** (a radio, a
+  combo, a text field, a checkbox, a colour field, a slider, and `app_settings:`'s sections, a rule
+  and a title where there is no collapsing header), so they work in FTXUI and tvision as in arigl.
+- **Tested without GL** in `ari`'s backends and on the AppRuntime stand-in: the fallback for each
+  kind, FTXUI's cells for a colour, a gradient and a picture, tvision's desktop, and the real
+  `shell.ari` in FTXUI with its Settings window and an application's page.
 
 **Taking over the main window.** The setting is the one 4.13 listed as *Applications may ask for
 the main view*. It works inside the grants model, without widening it:
@@ -1070,6 +1100,12 @@ the main view*. It works inside the grants model, without widening it:
   change nothing until the next request.
 - **The mirror.** `ariadne.apps.<id>.front` and `ariadne.apps.<id>.main_view` (`asked`, `allowed`,
   `refused` or empty) let the Launcher and the Permissions window show it.
+- **How the work splits with SH6.** SH6 (4.4) is not started. SH18 builds the gate: `front:`,
+  `(app-request-view)`, `(app-view)`, the answer to each request and the mirror, which 4.4
+  designed and SH6 listed. SH6 keeps drawing the front application's scene in the main view, its
+  menu's *Show in the main view* and *Show in a window*, the scene window hidden while it is in
+  front, and Escape held. Whichever lands second wires the other's half: SH6 reads `front:` as
+  SH18 writes it.
 - **What it overrides.** While an application is in front, the default main window is not drawn:
   the main view draws the front application's scene (4.4, SH6). When `front:` is empty again, the
   default comes back. SH18 builds the gate and `front:`; SH6 draws the front scene, with the
@@ -1116,8 +1152,12 @@ contributes:
   when it next opens.
 - **Alone.** A document running on its own may place `app_settings:` in its own windows, where it
   lists its own pages, so the same page serves both ways (as 4.7's *Alone*).
-- **The rest of `contributes:`** (menus and right-click menus) stays SH9's; SH18 builds only its
-  `settings:` part.
+- **How the work splits with SH9.** SH9 (4.7, 4.8) is not started. SH18 builds `contributes:`'s
+  `settings:` part, `app_settings:` and `extend.settings`'s effect; SH9 keeps `contributes:`'s
+  `menus:` and `context_menus:` (SH18's loader warns that they are not built yet), `shares:`,
+  `access.settings`, `grants: { ask }` and *Permissions...*, and the rule that `shares:` refuses the
+  key `override` is read from. 4.13's settings, and SH16's saving of them, are unchanged:
+  *Main window* and *Applications may take over the main window* are two rows of that page.
 
 ## 5. Phases
 
@@ -1145,7 +1185,7 @@ ship drawn under the UI.
 | SH15 | The golden (4.12): `shell_remote_golden` in libcvc; `open-link` and `tests/shell.sh` in cy-pca/nicotina | the checks 4.12 lists, in both repositories |
 | SH16 | The shell's settings saved across runs (4.13): the owner-only file natively, IndexedDB or `localStorage` in the browser; trusted publishers, remembered grants, budgets | settings survive a restart; a file another user can write is refused; the browser keeps them across a reload |
 | SH17 | Sandboxed principals out of the process: each `remote:` (and `file:`) principal in a process of its own, its DSL processes moved there with state_exec's migration (pause, serialize, send, resume; STATE_EXEC_DEVELOPER_GUIDE.md section 9) and the arisrv state_exec work under way, talking to the shell over a state transport. Needs a design of its own | to be set by its design |
-| SH18 | Application settings (4.14): `main_window:` and `MainWindow` (scene, image, video, colour, gradient; cover, contain, fill, tile, centre), `Backend::draw_main_window` (ImGui, the terminals), `SceneAdapter::show_main_view`; `front:`, `(app-request-view)` and the `override` gate (never, ask, always); `contributes: settings:` and `app_settings:`; `shell.ari`'s *Main window* page and its own scene | runtime: the settings round-trip through the state tree (written, read back, copied leaf by leaf to a fresh app, read the same), the literal block's defaults under a bound subtree, a mounted document's block ignored; each kind handed to the backend as written, the picture once loaded, the video's frame; the gate: no token refused, `never` refused, `always` granted, `ask` posts once and Allow grants, `never` sends a requested front application back and leaves one the user put there; an application's page listed while it runs, in its scope, in `main_window` only while it is in front, and gone after Close, Quit and a withdrawn `extend.settings`, its values kept for reopening; cvcGL: each kind's pixels in the main window (a colour, a gradient at 0, 90 and 135 degrees, a picture in each fit, a video frame), the main view not drawn under them |
+| SH18 | Application settings (4.14): `main_window:` and `MainWindow` (scene, image, video, colour, gradient; cover, contain, fill, tile, centre), `Backend::draw_main_window` (ImGui, the terminals), `SceneAdapter::show_main_view`; `front:`, `(app-request-view)` and the `override` gate (never, ask, always); `contributes: settings:` and `app_settings:`; `shell.ari`'s *Main window* page and its own scene | runtime: the settings round-trip through the state tree (written, read back, copied leaf by leaf to a fresh app, read the same), the literal block's defaults under a bound subtree, a mounted document's block ignored; each kind handed to the backend as written, the picture once loaded, the video's frame; the gate: no token refused, `never` refused, `always` granted, `ask` posts once and Allow grants, `never` sends a requested front application back and leaves one the user put there; an application's page listed while it runs, in its scope, in `main_window` only while it is in front, and gone after Close, Quit and a withdrawn `extend.settings`, its values kept for reopening; cvcGL: each kind's pixels in the main window (a colour, a gradient at 0, 90 and 135 degrees, a picture in each fit, a video frame), the main view not drawn under them; without GL: each kind's fallback on a terminal and none without colour, FTXUI's cells and tvision's desktop for each kind it draws, the real `shell.ari` in FTXUI with its Settings window and an application's page |
 
 SH11 comes before SH12 to SH15, and before the shell hosts nicotina beside any other
 application. SH13 needs SH1; SH14 needs SH7 and SH13; SH15 needs all of them and SH3. SH16 can
