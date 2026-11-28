@@ -8,6 +8,7 @@
 #include <cvc/ariadne/backend.h>  // cvc::ariadne::Backend (set_backend)
 #include <cvc/ariadne/bind.h>     // resolve_bind / read_or_seed / write
 #include <cvc/ariadne/doc_args.h> // the document's command line
+#include <cvc/ariadne/grants.h>   // ARIADNE_SHELL.md 4.5 grant tokens in requires:
 #include <cvc/ariadne/loader.h>   // load_file / LoadResult / ChannelDecl / sources_changed
 #include <cvc/ariadne/mount_scene.h> // ARIADNE_SHELL.md 4.3 a mount's scene, realized here
 #include <cvc/ariadne/oidc_host.h>
@@ -989,21 +990,62 @@ struct ScannedProgram {
   const std::set<std::string> *declared = nullptr;
 };
 
+// ARIADNE_SHELL.md 4.5 what of a grant token a requires: entry asks for is not granted: to the
+// module `mount` (its grants, or the defaults on a wrapper built without them), or with no mount
+// to the outermost document, which alone holds every delegate.* and extend.* token and
+// net.origin. "" when all of it is; else the token, and for net.origin the origins not granted.
+std::string grant_missing(const HostRequirement &req, const Widget *mount) {
+  if (!mount)
+    return held_alone(req.name) ? std::string() : req.name;
+  const MountGrants g =
+      mount->grants ? *mount->grants : hold_grants(default_grant_set(), mount->requirements);
+  if (req.name == "net.origin") {
+    if (req.origins.empty())
+      return g.granted.has("net.origin") ? std::string() : req.name;
+    std::string missing;
+    for (const std::string &o : req.origins) {
+      std::string bad;
+      const std::string p = policy_origin(o, &bad);
+      if (p.empty()) // the net host could not read it: every request would fail, silently
+        missing += " " + o + " (" + bad + ")";
+      else if (std::find(g.net_origins.begin(), g.net_origins.end(), p) == g.net_origins.end())
+        missing += " " + p;
+    }
+    return missing.empty() ? std::string() : req.name + missing;
+  }
+  const bool given = g.granted.has(req.name) ||
+                     (req.name == "access.settings.read" && g.granted.has("access.settings"));
+  return given ? std::string() : req.name;
+}
+
 // The requires: of the document and its modules, as the free-head scan walks them.
 struct RequirementScan {
   const Runtime &rt;
   std::vector<std::string> missing;         // required and not on this host: the load fails
-  std::vector<std::string> warnings;        // optional and not on this host
+  std::vector<std::string> ungranted;       // required grant tokens not granted: ... fails too
+  std::vector<std::string> warnings;        // optional and not on this host, or not granted
   std::deque<std::set<std::string>> scopes; // each scope's declared names (stable addresses)
 
-  // Check `reqs` (the document's, or the module mounted at `scope`) against the host, and return
-  // the names its programs may call: these and the enclosing scope's.
+  // Check `reqs` (the document's, or the module mounted at `scope`, `mount`) against the host, and
+  // its grant tokens against what it was granted, and return the names its programs may call:
+  // these and the enclosing scope's.
   const std::set<std::string> *add(const std::vector<HostRequirement> &reqs,
-                                   const std::set<std::string> *outer, const std::string &scope) {
+                                   const std::set<std::string> *outer, const std::string &scope,
+                                   const Widget *mount = nullptr) {
     const std::string of = scope.empty() ? std::string() : " (module '" + scope + "')";
     std::set<std::string> names = outer ? *outer : std::set<std::string>();
     for (const HostRequirement &req : reqs) {
       names.insert(req.name);
+      if (is_grant_token(req.name)) {
+        // Asked of the document that loads it, not of the host. An optional token it was not
+        // granted is not worth a warning: the document copes by design, (has? ...) tells it, and
+        // a mounts: entry's `holds` lists what it holds.
+        if (req.optional)
+          continue;
+        if (const std::string missing = grant_missing(req, mount); !missing.empty())
+          ungranted.push_back(missing + of);
+        continue;
+      }
       if (rt.has(req.name))
         continue;
       if (req.optional)
@@ -1024,7 +1066,7 @@ void collect_programs(const Widget &w, const FunctionScope *functions,
                       const std::set<std::string> *declared, RequirementScan &reqs,
                       std::vector<ScannedProgram> &out) {
   if (!w.requirements.empty())
-    declared = reqs.add(w.requirements, declared, w.scope);
+    declared = reqs.add(w.requirements, declared, w.scope, &w);
   if (w.functions) {
     functions = w.functions.get();
     if (!functions->prelude.empty())
@@ -1085,8 +1127,8 @@ void check_host_requirements(cvc::app &app, const Runtime &rt, LoadResult &lr) {
   collect_programs(lr.root, nullptr, declared, reqs, programs); // and checks the modules' requires:
   for (std::string &w : reqs.warnings)
     lr.warnings.push_back(std::move(w));
-  if (!reqs.missing.empty()) {
-    std::string list, hints;
+  if (!reqs.missing.empty() || !reqs.ungranted.empty()) {
+    std::string list, hints, ungranted;
     for (const std::string &m : reqs.missing) {
       list += (list.empty() ? "" : ", ") + m;
       const std::string hint =
@@ -1094,8 +1136,19 @@ void check_host_requirements(cvc::app &app, const Runtime &rt, LoadResult &lr) {
       if (!hint.empty() && hints.find(hint) == std::string::npos)
         hints += (hints.empty() ? "" : "; ") + hint;
     }
-    throw std::runtime_error("this host does not provide what the document requires: " + list +
-                             (hints.empty() ? "" : "; " + hints));
+    for (const std::string &u : reqs.ungranted)
+      ungranted += (ungranted.empty() ? "" : ", ") + u;
+    // ARIADNE_SHELL.md 4.5 a required grant token not granted fails the load as a missing entry
+    // does, named apart: it is the loading document's to give, not the host's.
+    std::string what;
+    if (!list.empty())
+      what = "this host does not provide what the document requires: " + list +
+             (hints.empty() ? "" : "; " + hints);
+    if (!ungranted.empty())
+      what += (what.empty() ? std::string() : "; and ") +
+              "it requires what it is not granted: " + ungranted +
+              " (grant it where it is loaded: grants: [...])";
+    throw std::runtime_error(what);
   }
 
   // Without a scene adapter the whole scene is ignored, and load says so; only a scene that does
@@ -1165,6 +1218,15 @@ std::string mount_needs(const Runtime &rt, const Widget &wrapper,
   std::string out;
   for (const std::string &m : missing)
     out += (out.empty() ? "" : ", ") + m;
+  if (!out.empty())
+    out = "this host does not provide what it requires: " + out;
+  // ARIADNE_SHELL.md 4.5 a required grant token not granted refuses it, named.
+  std::string ungranted;
+  for (const std::string &u : reqs.ungranted)
+    ungranted += (ungranted.empty() ? "" : ", ") + u;
+  if (!ungranted.empty())
+    out += (out.empty() ? std::string() : "; and ") +
+           "it requires what it is not granted: " + ungranted;
   return out;
 }
 
@@ -1178,11 +1240,15 @@ MountResult AppRuntime::load_mount_checked(const MountRequest &rq) {
   std::string needs = mount_needs(rt_, r.wrapper, r.warnings);
   // Its scene (ARIADNE_SHELL.md 4.3): a host that draws no scene refuses a document with one,
   // naming gl.scene, as a static load of it would warn that the scene is ignored.
-  if (r.has_scene && !rt_.has("gl.scene"))
-    needs = "gl.scene (its scene:)" + (needs.empty() ? std::string() : ", " + needs);
+  if (r.has_scene && !rt_.has("gl.scene")) {
+    const std::string prefix = "this host does not provide what it requires: ";
+    needs = needs.rfind(prefix, 0) == 0
+                ? prefix + "gl.scene (its scene:), " + needs.substr(prefix.size())
+                : prefix + "gl.scene (its scene:)" + (needs.empty() ? "" : "; and " + needs);
+  }
   if (!needs.empty()) {
     r.ok = false;
-    r.error = "this host does not provide what it requires: " + needs;
+    r.error = needs;
     r.wrapper = Widget{};
   }
   return r;
@@ -1496,7 +1562,7 @@ void AppRuntime::sync_mount_scenes() {
   }
   for (const Runtime::SceneMount &m : now) {
     if (!m.scene || !m.scene->has_scene())
-      continue; // datasets or keys alone
+      continue; // datasets alone
     auto it = mountScenes_.find(m.scope);
     if (it == mountScenes_.end()) {
       RealizedMount rm;

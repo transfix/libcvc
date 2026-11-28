@@ -29,6 +29,8 @@ add_executable(ariadne_server_document_test ariadne_server_document_test.cpp)
 add_executable(ariadne_bind_test ariadne_bind_test.cpp)
 add_executable(ariadne_ftxui_test ariadne_ftxui_test.cpp)
 add_executable(ariadne_deep_nesting_test ariadne_deep_nesting_test.cpp)
+# Asks and grants, input, signals and argv of mounted documents (ARIADNE_SHELL.md 4.5, 4.6).
+add_executable(ariadne_grants_test ariadne_grants_test.cpp)
 add_executable(ariadne_chart_test ariadne_chart_test.cpp)
 add_executable(ariadne_heatmap_test ariadne_heatmap_test.cpp)
 add_executable(ariadne_settings_test ariadne_settings_test.cpp)
@@ -474,6 +476,7 @@ set(TEST_TARGETS
   ariadne_bind_test
   ariadne_ftxui_test
   ariadne_deep_nesting_test
+  ariadne_grants_test
   ariadne_chart_test
   ariadne_heatmap_test
   ariadne_settings_test
@@ -975,6 +978,15 @@ target_link_libraries(ariadne_deep_nesting_test
     GTest::gtest_main
 )
 target_compile_features(ariadne_deep_nesting_test PRIVATE cxx_std_20)
+
+# Asks and grants: the loader, the Runtime's mounts, their input, signals and command lines.
+target_link_libraries(ariadne_grants_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+target_compile_features(ariadne_grants_test PRIVATE cxx_std_20)
 
 target_link_libraries(ariadne_chart_test
   PRIVATE
@@ -3391,6 +3403,7 @@ cvc_discover_tests(ariadne_scene_swarm_test)
 cvc_discover_tests(ariadne_server_document_test)
 cvc_discover_tests(ariadne_ftxui_test)
 cvc_discover_tests(ariadne_deep_nesting_test)
+cvc_discover_tests(ariadne_grants_test)
 cvc_discover_tests(ariadne_chart_test)
 cvc_discover_tests(ariadne_heatmap_test)
 cvc_discover_tests(ariadne_settings_test)

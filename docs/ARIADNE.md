@@ -3825,13 +3825,23 @@ too, since nobody could pass arguments to it. Without an `args:` block nothing i
 `--help` included: the document gets `argv` and makes of it what it wants. `ari check`
 validates the block but not the arguments, and declared arguments take their defaults.
 
-**Who can see them.** Only the outermost document takes arguments. A `load:`-mounted
-module's own `args:` is ignored with a warning. Programs are chrooted to their own
-subtree (§7), so a module sees neither `argv` nor `args` unless its parent grants a
-read-only hole (§7.4). A hole grants a node and everything under it:
+**Who can see them.** The command line is the outermost document's. Programs are chrooted to
+their own subtree (§7), so a mounted module sees neither the document's `argv` nor its `args`
+unless its parent grants a read-only hole (§7.4). A hole grants a node and everything under it:
 - `link: {args: {to: args, mode: ro}}` hands the module the dict,
   `(get-attr (state-data-get "args") "room")`;
 - `link: {room: {to: args.room, mode: ro}}` hands it one argument, `(state-get "room")`.
+
+**A mounted document's own command line.** A module that declares an `args:` block of its own
+gets a command line of its own, which the document that loads it passes: a `load:`'s
+`argv: [...]` (§6.3), a `mounts:` entry's `argv` (§6.8). Its `args:` is parsed against it as a
+top-level document's is, and `argv`, `args.<name>` and `args` are published under the mount's
+sub-prefix before its `init:` runs. With no `argv` passed, its arguments take their defaults. A
+parse error, a missing `required:` argument or `--help` refuses the mount, with its usage: a
+`mounts:` entry's refusal and usage go to the feed, a `load:`'s to the load's warnings (it is left
+out of the document). A module with a command line of its own gets no `link:` hole named `args`
+or `argv`, where its own are published. The design is ARIADNE_SHELL.md 4.6. The command line needs
+no grant: the parent chooses what to pass.
 
 ---
 
@@ -3890,7 +3900,29 @@ entry warns. An entry is one of:
 - a **function** a program can call: a builtin, a stdlib function, a state intrinsic or a
   host verb (`Runtime::has_function`);
 - a **widget type**, built in (`slider_int`, `button`, …) or registered
-  (`register_widget_type`, a backend-native widget such as `stream_view`).
+  (`register_widget_type`, a backend-native widget such as `stream_view`);
+- a **grant token**, what a mounted document asks of the document that loads it rather than of
+  the host ([`grants.h`](../inc/cvc/ariadne/grants.h); the design is ARIADNE_SHELL.md 4.5):
+
+  | token | granted, the mounted document |
+  |---|---|
+  | `delegate.keys` | has its `on_key:` and `keys:` run for the keys it has the focus for (§6.8) |
+  | `delegate.pointer` | has its `on_pointer:` run for the pointer over its own windows |
+  | `delegate.signals` | has its `on_signal:` run for the signals passed on to it: an interrupt while it has the focus, a request to end always; `{delegate.signals: [SIGTERM]}` in `grants:` limits which |
+  | `extend.menubar`, `extend.context_menu`, `extend.settings` | may add to the parent's menus, right-click menus and Settings window (ARIADNE_SHELL.md SH9) |
+  | `extend.tray` | has its tray icons join the parent's tray |
+  | `access.settings`, `access.settings.read` | reads and writes, or reads, the settings the parent shares (SH9) |
+  | `request.main_view`, `request.open` | may ask for the main view (SH6), or ask its shell to open a document (SH14) |
+  | `net.origin` | reaches the origins it names, `{name: net.origin, origins: [https://api.example.org]}`, beyond its own (SH11); each written as a network policy writes one, `scheme://host[:port]`, and one with a path is refused |
+
+  A token holds when the document asked for it and the loading document granted it (`grants:`
+  on its `load:` or `mounts:` slot, §6.3, §6.8); `(has? NAME)` answers per mount, in programs, in
+  `init:` and in reactive expressions. A required token not granted fails the load, or refuses a
+  `mounts:` entry, naming it ("it requires what it is not granted: delegate.keys"); an optional
+  one leaves `(has? ...)` false, without a warning. A token the document did not ask for is not
+  given, except the two every mount has had, `extend.tray` and `extend.settings`, granted by
+  default. Alone, the outermost document holds every `delegate.*` and `extend.*` token and
+  `net.origin` (the launcher's allowlist decides), and no `access.*` or `request.*` token.
 
 Whether or not `requires:` is there, the load also reads every program (`init:`, the
 `on_*:` handlers and each widget's `on:` / `on_click:` / … programs). Any function a
@@ -6595,20 +6627,42 @@ captures `init:` and `on_tick:` onto the mount wrapper (`Widget::init_script`,
 `Widget::state_seeds`, is written at the sub-prefix just before its `init:`. So a module can own a
 loop, a request poller say, and be tested on its own with `ari test` (§13).
 
-`on_key:`, `on_pointer:` and `on_signal:` stay the outermost document's. A fragment that declares
-one loads with a warning, and the handler is ignored. Raw input and signals belong to the
-document, not to whatever it mounts: a module that saw every key could read what is typed into
-the parent's fields, and two modules could not both decide what Ctrl-C does. A module reacts to its
-own widgets. When it needs more, the parent handles the event and passes on what the module needs
-through a `link:` hole, which the module's `on_tick:` can read.
+`on_key:`, `on_pointer:` and `on_signal:` are the outermost document's unless a module asks for
+them and its parent grants them. Raw input and signals belong to the document, not to whatever
+it mounts: a module that saw every key could read what is typed into the parent's fields, and two
+modules could not both decide what Ctrl-C does. A module reacts to its own widgets. When it needs
+more, it asks in its `requires:` for a grant token (§5.7), and the `load:` grants it:
+
+```yaml
+root:
+  - load: fe_lab.ari
+    grants: [delegate.keys, {delegate.signals: [SIGTERM, SIGHUP]}]   # what it may take
+    deny: [extend.tray]                                              # ... or not (a default)
+    argv: [--preset, bone]                                           # its command line (§5.6)
+```
+
+- `grants:` lists tokens, or `{delegate.signals: [...]}` and `{net.origin: [...]}` to grant only
+  those signals or origins. With none, the module is granted `extend.tray` and `extend.settings`,
+  as every loaded application has had; `grants: []` gives nothing; `deny:` takes tokens away.
+  A module grants its own loads only what it holds, so a grant never widens down the tree. An
+  unknown token warns.
+- A module that holds `delegate.keys` has its `on_key:` and its `keys:` bindings (at its own
+  `keys.<id>`) run for the keys it has the focus for, `delegate.pointer` its `on_pointer:` for the
+  pointer over its own windows, `delegate.signals` its `on_signal:` for the signals passed on to
+  it (§6.8 says which, and when). Without the token each is ignored with a warning, as before.
+- `argv:` is the module's command line, parsed by its own `args:` block (§5.6).
+
+The parent's input still comes first: its `on_key:` sees every key, and a key one of its `keys:`
+bindings has never reaches a module. The parent can also pass on what the module needs through a
+`link:` hole, which the module's `on_tick:` can read.
 
 A module with a `menubar:` of its own is an application: its bar becomes one menu of the outer
 bar, with Restart and Quit, and its tray icons join the outer tray (§5.25). The loader names it
 by the fragment's `meta.name` (`Widget::app_name`), else by the mount id.
 
 A module keeps its scene ([ARIADNE_SHELL.md](roadmap/ARIADNE_SHELL.md) 4.3, 4.4). The loader
-carries its `scene:`, `scenes:`, `data:`, `assets:` and `keys:` on the mount
-(`Widget::mount_scene`, [`mount_scene.h`](../inc/cvc/ariadne/mount_scene.h)):
+carries its `scene:`, `scenes:`, `data:` and `assets:` on the mount (`Widget::mount_scene`,
+[`mount_scene.h`](../inc/cvc/ariadne/mount_scene.h)); its `keys:` are its grants' (above):
 
 - **Its datasets** are bound at its sub-prefix (`<sub>.data.<name>`, relative to its own
   directory) as it is first drawn, just before its `state:` and `init:`, so `init:` reads their
@@ -6921,16 +6975,20 @@ shell.apps.<id>.budget.steps      its budget, when not its principal's default (
 shell.apps.<id>.budget.time
 shell.apps.<id>.budget.memory
 shell.apps.<id>.background        run or hold: its world while its scene is drawn nowhere
+shell.apps.<id>.grants            the grant tokens it gets, picked from the slot's (below)
+shell.apps.<id>.argv              its command line (§5.6)
 shell.apps.<id>.net_policy        a local application's own network (§10.3 "Per principal"):
 shell.apps.<id>.credential_store    a --net-policy file, a --credential-store and an
 shell.apps.<id>.e2ee_store          --e2ee-store SPEC, read as it opens
 ```
 
 and the Runtime writes back `status` (`open`, `refused`, `closed`), `error` (why it was
-refused), `principal` and `name`. `<id>` is a state key segment (`[A-Za-z0-9_]`, not starting
-with a digit). `background` is the slot's `in_background:` when the entry says neither run nor
-hold (that a value, or a key holding `hold` or a true value; else run). `view`, `grants` and
-`argv` are SH6 and SH7's.
+refused), `principal`, `name`, `holds` (the grant tokens it holds) and `net_origins` (the
+origins it reaches beyond its principal's), the last two comma-separated. `<id>` is a state key
+segment (`[A-Za-z0-9_]`, not starting with a digit). `background` is the slot's `in_background:`
+when the entry says neither run nor hold (that a value, or a key holding `hold` or a true value;
+else run). `view` is SH6's. `grants` and `argv` are each a value split at spaces (and, for
+`grants`, commas) or a child per item (`argv.0`, `argv.1`, ...).
 
 - **Mounting.** When an entry with a `uri` appears, the Runtime asks its host's loader for the
   document. The loader resolves and parses it as `load: <uri>` with `as: <id>` and its `args:`
@@ -6968,6 +7026,42 @@ hold (that a value, or a key holding `hold` or a true value; else run). `view`, 
   optional entry this host lacks is not refused: the document said it copes. A mount's scene is
   drawn as a `load:` module's is (§6.3): realized as it opens, taken down as it closes.
 - **Limits.** At most 256 open mounts and 32 levels of them, as a document's `load:`s.
+- **Grants** (§5.7, ARIADNE_SHELL.md 4.5). The slot's `grants:` (and `deny:`), written as a
+  `load:`'s are (§6.3), is the most any of its applications may get; without one, `extend.tray`
+  and `extend.settings`. An entry's own `grants` picks from it: a token the slot does not grant
+  is left out. What the slot's document does not hold itself is not passed on. A document that
+  requires a token it is not granted is refused, naming it; its entry's `holds` lists what it
+  holds. An entry whose `grants` change is closed and opened again with them, resumed (its
+  `init:` not run again).
+- **Argv** (§5.6, ARIADNE_SHELL.md 4.6). An entry's `argv` is parsed by the document's `args:`;
+  `argv` and `args.*` are published under its sub-prefix before its `init:` runs. A bad one
+  refuses it, with its usage in `error` and in the feed. An entry whose `argv` changes is closed
+  and opened again as a new run, its `state:` written and its `init:` run.
+- **Input and signals** (ARIADNE_SHELL.md 4.6). The document's own come first: its `on_key:` sees
+  every key, a key one of its `keys:` bindings has never reaches an application, and its
+  `on_signal:`, when it has one, takes a signal over. Then:
+  - a key goes to at most one application, the one with the focus, when it holds
+    `delegate.keys` (its `on_key:`, and its `keys:` bindings at its own `keys.<id>`; the release
+    goes where the press went). None goes to an application while a text field outside it has the
+    keyboard (`Backend::item_has_keyboard`), nor while the Keys window waits for a key;
+  - the focus is the application whose window has it (`Backend::window_focused`: in ImGui the
+    focused window; in FTXUI the window holding the focused widget, else the one last clicked or
+    raised; in tvision the desktop's current window): it moves off every application when the
+    focus goes to the document's own window or to none. A program of the document's sets it with `(app-focus AS)`, until the focused window
+    changes. The document reads it at `ariadne.focus` (`includes.<id>`, "" for none);
+  - the pointer over an application's window (`Backend::window_hovered`) goes to its
+    `on_pointer:` when it holds `delegate.pointer`; a button's moves and release go where it went
+    down. Over the main view it goes to the front application's (SH6);
+  - without an `on_signal:` of the document's own, an interrupt (SIGINT, SIGQUIT) goes to the
+    focused application, which takes it over (the host does not end), and a request to end
+    (SIGTERM, SIGHUP, ...) to every application holding `delegate.signals` for it: their handlers
+    run in the next drain, and the host's default still ends the shell. With one, it passes a
+    signal on itself with `(app-signal AS NAME)`.
+
+  A host whose UI takes an event (arigl, where ImGui wants it; `ari`, where FTXUI or tvision
+  used it) posts it with `InputEvent::ui`: never the document's own, it can still reach the
+  application that has the focus or the window.
+  A static `load:` granted the tokens takes input the same way, focused by `(app-focus <its as>)`.
 
 **The verbs.** A document's own programs open and close entries in its first `mounts:` slot:
 
@@ -6977,6 +7071,10 @@ hold (that a value, or a key holding `hold` or a true value; else run). `view`, 
                             apps/counter.ari, numbered when taken), and an entry already open on
                             the same URI is returned as it is
 (app-close AS)              remove the entry: the mount closes at the next frame. #t when there was one
+(app-focus AS)              give the keyboard focus to application AS (an entry of the slot, else
+                            the document's load: of that id); "" takes it off every one
+(app-signal AS NAME)        pass signal NAME ("SIGTERM") on to AS's on_signal:, when it holds
+                            delegate.signals for it
 ```
 
 A mounted document's programs get a `PermissionError`: opening others needs a grant
@@ -9932,6 +10030,12 @@ time fails it too.
 `--prefix`, `--component-path` and `--image` work as for `snapshot`. A document has no command
 line of its own under `ari test`: an `args:` block's arguments take their defaults. Flags go
 before the first document.
+
+`--mounted` runs each document as an application instead: the one entry of a shell document made
+for the run, whose `mounts:` slot grants it what it would hold alone (every `delegate.*` and
+`extend.*` token and `net.origin`, §5.7). Its tests run in its scope, once it has opened; a
+refusal, or a warning its load posts, fails it. A document that passes both ways runs the same in
+a shell as on its own (ARIADNE_SHELL.md 4.5, `src/ari/tests/grants_component.ari`).
 
 The output is one line per document, then what failed, one line each, and a summary:
 

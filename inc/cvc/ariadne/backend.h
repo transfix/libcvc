@@ -612,6 +612,18 @@ public:
   virtual void reset_layout() {}
   virtual WindowGeom window_geometry() const { return {}; }
 
+  // ARIADNE_SHELL.md 4.6 where the keyboard and the pointer are, for the input a mounted document
+  // holds delegate.keys or delegate.pointer for. window_focused and window_hovered are asked right
+  // after begin_window: whether the window just begun has the keyboard focus, and whether the
+  // pointer is over it. item_has_keyboard is asked right after a text field (input_text,
+  // message_input): whether it holds the keyboard now, being typed into. reports_focus: the backend
+  // answers window_focused, so a frame in which the focus leaves every window takes it off every
+  // application; a backend that does not (the default) leaves the focus where (app-focus) put it.
+  virtual bool reports_focus() const { return false; }
+  virtual bool window_focused() const { return false; }
+  virtual bool window_hovered() const { return false; }
+  virtual bool item_has_keyboard() const { return false; }
+
   // Raise/focus the NEXT window to the front. Called right before begin_window when the core sees a
   // one-shot raise request at tree.<id>.raise (e.g. "click a user -> bring their camera window
   // forward"). Default no-op — a backend with no window z-order ignores it.

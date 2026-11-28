@@ -217,12 +217,18 @@ struct Layout {
 // see the target; a write stays on the hole's own local value, never scribbling the target).
 // One entry of a `requires:` list (roadmap §7.6): something a document or a module needs from the
 // host — a capability token, a function its programs call, or a widget type
-// (cvc/ariadne/requires.h). AppRuntime::load checks them: a missing entry fails the load, an
-// `optional: true` one warns.
+// (cvc/ariadne/requires.h) — or from the document that loads it, a grant token (grants.h).
+// AppRuntime::load checks them: a missing entry fails the load, an `optional: true` one warns.
+// `origins` is net.origin's ({name: net.origin, origins: [...]}): the network origins it asks to
+// reach.
 struct HostRequirement {
   std::string name;
   bool optional = false;
+  std::vector<std::string> origins;
 };
+
+struct MountGrants;      // grants.h: a mount's asks and grants, and the input it holds for them
+struct MountCommandLine; // doc_args.h: a mount's args: block and the argv it was given
 
 struct LinkHole {
   std::string name; // segment the module sees inside its chroot
@@ -270,7 +276,7 @@ struct TextRunSpec {
 };
 
 struct MountsSpec; // Kind::Mounts's slot, below
-struct MountScene; // a mount's scene, datasets and keys (mount_scene.h)
+struct MountScene; // a mount's scene and datasets (mount_scene.h)
 
 // Kind::Table: one of its `columns:`: the header's text, the column's track (`width:`, as a
 // col_widths entry takes it) and the key a click on the header sorts by (`sort:`; "": the column
@@ -645,6 +651,13 @@ struct WidgetNode {
   // cover them too. Only on a mount wrapper.
   std::vector<HostRequirement> requirements;
 
+  // ARIADNE_SHELL.md 4.5 and 4.6, only on a mount wrapper (null elsewhere, and on a wrapper built
+  // by hand, which then has the default grants): what the loading document grants it and it holds,
+  // with the input and signal programs it holds the tokens for (grants.h), and its command line,
+  // its args: block and argv (doc_args.h). Out of line, so every other widget stays its size.
+  std::shared_ptr<const MountGrants> grants;
+  std::shared_ptr<const MountCommandLine> command_line;
+
   // §12 load: the mounted fragment's own init: script (a state_exec program), run ONCE at the
   // mount's sub-prefix when it first appears — after its holes are wired, so init may seed through
   // them. A seed, not a per-frame action: it does not re-run on a reconcile. Only on a mount
@@ -784,6 +797,7 @@ inline Widget::~Widget() {
 // URIs resolve against it. `background` (run | hold) or `background_bind` (a state key holding one)
 // is whether its applications' worlds keep stepping while their scenes are drawn nowhere, where an
 // entry's own `background` says nothing (ARIADNE_SHELL.md 4.4); both empty: run.
+struct GrantSet; // grants.h
 struct MountsSpec {
   std::vector<std::string> allow;
   std::string allow_bind;
@@ -792,6 +806,9 @@ struct MountsSpec {
   std::string base;
   std::string background;
   std::string background_bind;
+  // ARIADNE_SHELL.md 4.5 its `grants:` with its `deny:` applied: the most any of its applications
+  // may get, an entry's own `grants` picking from it. Null: the defaults.
+  std::shared_ptr<const GrantSet> grants;
 };
 
 // §5.30 `w` with a right-click menu of `items` (named `id`, "" for none).

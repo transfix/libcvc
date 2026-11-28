@@ -214,10 +214,14 @@ public:
   bool has_signal_program() const;
   // Deliver `signal` to the on_signal program, and to the tap that takes signals
   // (set_event_tap). Returns true when one of them will handle it, false when neither is set (the
-  // host then applies the default). `source` says where it came from (e.g. "terminal" for a Ctrl-C
-  // keypress, "os" for a delivered signal). Host thread, outside a pump (it may start the
-  // program's resident; debug builds check it), like post_input; the program runs in the next
-  // drain(). A host that catches an OS signal on another thread hands it over.
+  // host then applies the default). Without an on_signal program, the document passes it on to
+  // its mounted applications that hold delegate.signals for it (docs/roadmap/ARIADNE_SHELL.md
+  // 4.6): an interrupt (SIGINT, SIGQUIT) to the focused one, which takes it over (true), a request
+  // to end to every one, whose handlers run in the next drain (the host's default still applies).
+  // `source` says where it came from (e.g. "terminal" for a Ctrl-C keypress, "os" for a delivered
+  // signal). Host thread, outside a pump (it may start the program's resident; debug builds check
+  // it), like post_input; the program runs in the next drain(). A host that catches an OS signal on
+  // another thread hands it over.
   bool post_signal(const std::string &signal, const std::string &source = "host");
 
   // §12 channel enforcement (runtime backstop): install the document's channel policy so a program
@@ -236,7 +240,10 @@ public:
   // input source (e.g. cvc::gl::SdlInput), BEFORE drain(), so the event is delivered to the
   // on_key/on_pointer residents this same frame (drain() drains the ingress + pumps). Host thread,
   // outside a pump: it may start the residents, then posts to the document's scheduler's ingress
-  // (debug builds check it). A no-op if no matching handler is registered.
+  // (debug builds check it). A no-op if no matching handler is registered. The next drain also
+  // routes it to a mounted application that holds delegate.keys or delegate.pointer: a key to the
+  // one with the focus, the pointer to the one whose window it is over (ARIADNE_SHELL.md 4.6). An
+  // event the host's UI took (InputEvent::ui) goes only there, never to the document's own.
   void post_input(const InputEvent &ev);
 
   // A listener of the document's input events and signals besides its on_key:/on_pointer:/
@@ -259,6 +266,11 @@ public:
   // ending is reported only to `done`, never as a warning. `ari test` runs a tests: case this way.
   // Host thread, outside a pump.
   void run_program(std::string script, std::function<void(const std::string &)> done);
+  // The same in the open mounts: entry `as` (docs/roadmap/ARIADNE_SHELL.md 4.2): chrooted to its
+  // sub-prefix, with its functions, its budget and what it holds. False, and nothing run, when no
+  // entry by that id is open. `ari test --mounted` runs a mounted document's tests: this way.
+  bool run_program_in_mount(const std::string &as, std::string script,
+                            std::function<void(const std::string &)> done);
 
   // Start `p` now as a process of the document's program lane on the document's scheduler (its
   // isolated group's, else app.exec_scheduler()), as an action or a resident is: in an environment
@@ -505,6 +517,9 @@ public:
   // One mount as it stands: its child's name, its sub-prefix, the URI its entry gives and where it
   // came from, its principal, why it was refused ("" when mounted), its budget and its use in the
   // last whole frame, whether it was held to its budget then, and how often it has been.
+  // ARIADNE_SHELL.md 4.5 and 4.12 too: the grant tokens it holds, the network origins it reaches
+  // beyond its principal's (SH11's net_origins), its tests: (ari test --mounted runs them), and
+  // what its load warned (each also posted to the feed).
   struct MountState {
     std::string as, scope, uri, canonical, principal, refused;
     bool mounted = false;
@@ -514,6 +529,10 @@ public:
     std::uint64_t memory = 0;
     bool held = false;
     std::uint64_t holds = 0;
+    std::vector<std::string> grants;
+    std::vector<std::string> net_origins;
+    std::vector<std::pair<std::string, std::string>> tests;
+    std::vector<std::string> warnings;
   };
   std::vector<MountState> mounts() const;
   // The local files the open mounts were parsed from (hot reload watches them with the
@@ -522,7 +541,7 @@ public:
   // Whether a mount's file changed since it was parsed; each one that did is parsed again at the
   // next frame, and keeps its on_tick: resident when its program did not change. Host thread.
   bool reload_mounts_if_changed();
-  // docs/roadmap/ARIADNE_SHELL.md 4.3 (SH3): the mounts that carry a scene, datasets or keys
+  // docs/roadmap/ARIADNE_SHELL.md 4.3 (SH3): the mounts that carry a scene or datasets
   // (Widget::mount_scene), as they stand: every load: in the tree (not one under repeat:) and
   // every open mounts: entry, less the applications the user quit. `hold` is whether its world
   // holds while its scene is drawn nowhere: its load:'s in_background:, or its entry's

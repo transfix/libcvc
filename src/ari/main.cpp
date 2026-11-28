@@ -71,6 +71,7 @@
 #include <cvc/ariadne/conference/relay_session.h> // --relay, a relay: block
 #include <cvc/ariadne/doc_args.h>
 #include <cvc/ariadne/ftxui_backend.h>
+#include <cvc/ariadne/grants.h> // ari test --mounted: the tokens a document alone holds
 #include <cvc/ariadne/host_cli.h>
 #include <cvc/ariadne/host_info.h>
 #include <cvc/ariadne/media_player.h> // §5.13 the play policy (--media-play)
@@ -189,8 +190,8 @@ bool is_python_program(const std::string &doc) {
 int usage(int code) {
   std::fprintf(code ? stderr : stdout,
                "usage: ari run|snapshot|check [flags] doc.ari [document args...]\n"
-               "       ari test [flags] [--tap] [--timeout S] [--frames N] [--action-time S]\n"
-               "                doc.ari...\n"
+               "       ari test [flags] [--tap] [--mounted] [--timeout S] [--frames N]\n"
+               "                [--action-time S] doc.ari...\n"
                "       ari validate [--structural-only] [--strict] [--json] doc.ari|-...\n"
                "       ari schema\n"
                "       ari info [--json] [--functions] [--backend B] [--graphics MODE]\n"
@@ -391,8 +392,17 @@ TestOutcome run_test_document(const cvc::ariadne::HostOptions &o, const std::str
   const double timeout = o.timeout > 0 ? o.timeout : kTestTimeoutSeconds;
   const auto deadline = start + std::chrono::duration<double>(timeout);
   const auto fail = [&](std::string why) { out.failures.push_back(std::move(why)); };
+  // --mounted (docs/roadmap/ARIADNE_SHELL.md 4.2, 4.5): the document runs as the one application
+  // of a shell document made for the run, whose mounts: slot grants it what it would hold alone,
+  // and its tests: run in its scope. A document passes alone and mounted when it runs the same.
+  const bool mounted = has_flag(o, "--mounted");
+  std::filesystem::path shell_dir;
   const auto finish = [&] {
     out.seconds = std::chrono::duration<double>(clock::now() - start).count();
+    if (!shell_dir.empty()) {
+      std::error_code ec;
+      std::filesystem::remove_all(shell_dir, ec);
+    }
     return out;
   };
 
@@ -438,8 +448,28 @@ TestOutcome run_test_document(const cvc::ariadne::HostOptions &o, const std::str
   const cvc::ariadne::python::Attachment lent = lend_python(scripting, app, rt, "headless");
 #endif
   ari::apply_state_sets(app, o.prefix.empty() ? "ui.docs.ari" : o.prefix, o.sets);
+  std::string load_path = path;
+  if (mounted) {
+    std::error_code ec;
+    const std::filesystem::path doc = std::filesystem::absolute(path, ec);
+    shell_dir = std::filesystem::temp_directory_path(ec) /
+                ("ari_test_mounted_" + std::to_string(clock::now().time_since_epoch().count()));
+    std::filesystem::create_directories(shell_dir, ec);
+    std::string grants;
+    for (const ari::GrantToken &t : ari::grant_tokens())
+      if (ari::held_alone(t.name))
+        grants += std::string(grants.empty() ? "" : ", ") + t.name;
+    const std::filesystem::path shell = shell_dir / "shell.ari";
+    std::ofstream(shell, std::ios::binary)
+        << "meta: { name: ari test --mounted, min_libcvc: \"0.0.0\" }\n"
+        << "root:\n  - mounts: ari_test.apps\n    grants: [" << grants << "]\n";
+    load_path = shell.string();
+    cvc::state::instance(app)((o.prefix.empty() ? std::string("ui.docs.ari") : o.prefix) +
+                              ".ari_test.apps.doc.uri")
+        .value((ec ? std::filesystem::path(path) : doc).generic_string());
+  }
   try {
-    for (const std::string &w : rt.load(path))
+    for (const std::string &w : rt.load(load_path))
       fail("load warning: " + trim_ari(w));
   } catch (const std::exception &e) {
     fail("load failed: " + trim_ari(e.what()));
@@ -447,7 +477,9 @@ TestOutcome run_test_document(const cvc::ariadne::HostOptions &o, const std::str
   if (!out.passed())
     return finish();
 
-  const std::vector<std::pair<std::string, std::string>> &tests = rt.tests();
+  // Mounted, its tests are the mount's, once it has opened.
+  std::vector<std::pair<std::string, std::string>> tests = mounted ? decltype(tests){} : rt.tests();
+  bool opened = !mounted;
   std::size_t next = 0; // the next tests: case to start
   bool running = false; // one is running
   bool ended = false;   // ... and has ended, with `how`
@@ -480,6 +512,25 @@ TestOutcome run_test_document(const cvc::ariadne::HostOptions &o, const std::str
     }
     if (warned)
       break;
+    if (!opened) { // --mounted: it opens as the slot's first frame reconciles, or is refused
+      const std::vector<ari::Runtime::MountState> ms = rt.runtime().mounts();
+      const auto m = std::find_if(ms.begin(), ms.end(),
+                                  [](const ari::Runtime::MountState &s) { return s.as == "doc"; });
+      if (m != ms.end() && m->mounted) {
+        opened = true;
+        tests = m->tests;
+        for (const std::string &w : m->warnings)
+          fail("load warning: " + trim_ari(w));
+        if (!out.passed())
+          break;
+      } else if (m != ms.end() && !m->refused.empty()) {
+        fail("not mounted: " + trim_ari(m->refused));
+        break;
+      } else {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        continue;
+      }
+    }
     if (ended) {
       if (!how.empty())
         fail("test '" + tests[next - 1].first + "' " + how);
@@ -488,10 +539,14 @@ TestOutcome run_test_document(const cvc::ariadne::HostOptions &o, const std::str
     }
     if (!running && next < tests.size()) { // after the first frame: init: has run, residents too
       running = true;
-      rt.runtime().run_program(tests[next++].second, [&](const std::string &h) {
+      const auto done = [&](const std::string &h) {
         how = h;
         ended = true;
-      });
+      };
+      if (mounted)
+        rt.runtime().run_program_in_mount("doc", tests[next++].second, done);
+      else
+        rt.runtime().run_program(tests[next++].second, done);
     } else if (!running && !tests.empty()) {
       break; // every test has run
     }
@@ -756,7 +811,7 @@ int main(int argc, char **argv) {
                                             std::vector<std::string>(argv + 2, argv + argc));
 #endif
   ari::HostOptions o = ari::parse_host_args(
-      argc, argv, {"--json", "--functions", "--tap", "--structural-only", "--strict"});
+      argc, argv, {"--json", "--functions", "--tap", "--mounted", "--structural-only", "--strict"});
 #ifdef CVC_ARI_WASM_BACKEND // ari_tvision: its documents run on the tvision desktop
   if (o.backend.empty())
     o.backend = CVC_ARI_WASM_BACKEND;
@@ -783,7 +838,7 @@ int main(int argc, char **argv) {
   for (const std::string &f : o.extra_flags) {
     // The command a flag is for: --tap test's, --structural-only and --strict validate's, the
     // rest info's (and --json validate's too).
-    const char *for_cmd = f == "--tap"                                    ? "test"
+    const char *for_cmd = (f == "--tap" || f == "--mounted")              ? "test"
                           : (f == "--structural-only" || f == "--strict") ? "validate"
                                                                           : "info";
     if (cmd != for_cmd && !(f == "--json" && cmd == "validate")) {

@@ -13,7 +13,7 @@
 #include <cvc/ariadne/ariadne.h> // register_widget_type (customs gate tests)
 #include <cvc/ariadne/ftxui_backend.h> // a deep document drawn in a terminal
 #include <cvc/ariadne/loader.h>
-#include <cvc/ariadne/mount_scene.h> // ARIADNE_SHELL.md 4.3 a mount's scene, datasets and keys
+#include <cvc/ariadne/mount_scene.h> // ARIADNE_SHELL.md 4.3 a mount's scene and datasets
 #include <cvc/ariadne/state_io.h>  // §13.10 save_state / restore_state
 #include <cvc/ariadne/uri.h>       // §13 resolver (import routes through it)
 #include <cvc/ariadne/uri_http.h>  // §13.6 http:// handler
@@ -8618,8 +8618,6 @@ root:
   ASSERT_EQ(ms.data.size(), 1u) << "the argument's dataset is left out";
   EXPECT_EQ(ms.data[0].name, "table");
   EXPECT_TRUE(std::filesystem::equivalent(ms.data[0].base, dir)) << "relative to the fragment";
-  ASSERT_EQ(ms.keys.size(), 1u);
-  EXPECT_EQ(ms.keys[0].id, "spin");
   EXPECT_EQ(ms.view, "window");
   EXPECT_EQ(ms.background, "hold");
   EXPECT_TRUE(has_warning(r, "data.given: its uri is the argument 'file'"));

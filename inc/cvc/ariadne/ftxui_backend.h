@@ -162,6 +162,15 @@ public:
   void reset_layout() override; // a new document: windows placed afresh, as when first drawn
   WindowGeom window_geometry() const override;
   void focus_next_window() override; // the next window to the top (hosted: HostedWindow::raise)
+  // ARIADNE_SHELL.md 4.6 where the keyboard and the pointer are, for a mounted application holding
+  // delegate.keys or delegate.pointer, as ImGui reports them: the window the focus is in (the one
+  // holding the focused widget, else the one last clicked or raised), the window under the
+  // pointer (hosted, both as the host says: set_window_focus), and whether the text field just
+  // drawn has the focus, so typed keys go into it.
+  bool reports_focus() const override;
+  bool window_focused() const override;
+  bool window_hovered() const override;
+  bool item_has_keyboard() const override;
   void next_window_resizable(bool resizable) override; // hosted: the host's frame resizes it
   void push_id(const char *id) override;
   void pop_id() override;
@@ -343,9 +352,14 @@ public:
   // then `unhandled` (the document's on_key / on_pointer). While the Keys window waits for a key
   // (Runtime::key_capture_pending) every key goes straight to `unhandled`: Tab, the arrows and
   // Return would otherwise move the UI's focus or press a button.
+  // An event the UI used goes to the Runtime marked `ui` (post_taken): never the document's, but a
+  // mounted application whose window has the focus or the pointer may take it (4.6).
   void route(Runtime &rt, const TermEvent &ev,
              const std::function<bool(const TermEvent &)> &background,
              const std::function<void(const TermEvent &)> &unhandled);
+  // Post an event the UI used to the Runtime marked `ui` (InputEvent::ui), as the GL host does
+  // what ImGui takes: keys as a press + release pair, pointer events at the cell's centre in px.
+  void post_taken(Runtime &rt, const TermEvent &e) const;
 
   // ---- hosted chrome ----
   // With Options::hosted this backend draws no window frames and no menu bar. It keeps each
@@ -443,6 +457,9 @@ public:
   // when the window opens again. Otherwise w x h is the size the host gave it, which the next
   // walk recomputes from the document and the content.
   void set_window_geometry(const std::string &id, int x, int y, int w, int h, bool user_sized);
+  // The window the host's keyboard focus is in and the one under its pointer ("" its desktop,
+  // outside every window), for window_focused and window_hovered (4.6).
+  void set_window_focus(const std::string &focused, const std::string &hovered);
   // The host's screen size in cells, which percent sizes resolve against.
   void set_screen_size(int width, int height);
 

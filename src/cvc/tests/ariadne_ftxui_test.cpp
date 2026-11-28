@@ -4137,3 +4137,199 @@ TEST(AriadneFtxuiHosted, AHostedContextMenuIsAModelForTheHost) {
     t.rt.drain();
   EXPECT_EQ(val(t.app, "c"), "");
 }
+
+// docs/roadmap/ARIADNE_SHELL.md 4.6 on the terminal as in ImGui: the backend reports which window
+// has the focus and which the pointer is over, so a mounted application holding delegate.keys takes
+// the keys while its window has the focus (the window clicked, or holding the focused widget), a
+// key its own field takes reaches it too (marked ui: never the shell's), and none reaches it while
+// the shell's own window, with its field, has the focus. A click goes to the application whose
+// window it lands on. Hosted (tvision), the host says which window has the focus and the pointer.
+namespace {
+// An application that asks for keys and the pointer, keeping what reaches it at typed and clicks;
+// NAME and POS are its own.
+const char *const kTypist = R"(meta: { name: NAME, min_libcvc: "0.0.0" }
+requires: [delegate.keys, delegate.pointer]
+on_key: |
+  (if (= (get-attr event "kind") "key_down")
+      (state-set "typed" (str-concat (if (is-null (state-get "typed")) "" (state-get "typed"))
+                                    (get-attr event "key")))
+      #f)
+on_pointer: |
+  (if (= (get-attr event "kind") "mouse_button_down")
+      (state-set "clicks" (str-concat (if (is-null (state-get "clicks")) "" (state-get "clicks"))
+                                     "c"))
+      #f)
+windows:
+  - window: NAME
+    pos: POS
+    children:
+      - input_text: NAME note
+        bind: note
+)";
+
+std::string typist_doc(const std::string &name, const std::string &pos) {
+  std::string doc = kTypist;
+  for (const auto &[from, to] : {std::pair<std::string, std::string>{"NAME", name}, {"POS", pos}})
+    for (std::size_t at = doc.find(from); at != std::string::npos;
+         at = doc.find(from, at + to.size()))
+      doc.replace(at, from.size(), to);
+  return doc;
+}
+
+const char *const kTypistShell = R"(meta: { name: Shell, min_libcvc: "0.0.0" }
+windows:
+  - window: Shell
+    id: shellwin
+    pos: [16, 320]
+    children:
+      - input_text: Search
+        bind: search
+root:
+  - mounts: apps
+    grants: [delegate.keys, delegate.pointer]
+)";
+
+struct TypistShell {
+  std::filesystem::path dir;
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art{app, "ui.shell"};
+  std::string screen;
+  TypistShell(const std::string &name, FtxuiBackend::Options opts) : be(opts) {
+    dir = std::filesystem::temp_directory_path() / name;
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    const auto write = [&](const char *file, const std::string &text) {
+      std::ofstream(dir / file, std::ios::binary) << text;
+      return (dir / file).generic_string();
+    };
+    const std::string shell = write("shell.ari", kTypistShell);
+    const std::string alpha = write("alpha.ari", typist_doc("Alpha", "[16, 64]"));
+    const std::string beta = write("beta.ari", typist_doc("Beta", "[400, 64]"));
+    art.set_backend(be);
+    art.load(shell);
+    auto &st = cvc::state::instance(app);
+    st("ui.shell.apps.a.uri").value(alpha);
+    st("ui.shell.apps.b.uri").value(beta);
+  }
+  ~TypistShell() {
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+  }
+  std::string get(const std::string &path) { return val(app, "ui.shell." + path); }
+  void frame() {
+    art.drain();
+    screen = be.render_to_string(art.runtime(), 100, 40);
+  }
+  bool until(const std::function<bool()> &done) {
+    for (int i = 0; i < 400; ++i) {
+      frame();
+      if (done())
+        return true;
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    return false;
+  }
+  // What ari's loop does with an event: the UI first, what it leaves to the document.
+  void route(const TermEvent &e) {
+    be.route(art.runtime(), e, {}, [&](const TermEvent &d) {
+      if (d.kind != TermEvent::Kind::Mouse && !d.key.empty()) {
+        art.post_key(true, d.key);
+        art.post_key(false, d.key);
+      }
+    });
+  }
+  // Left-click the first cell of `needle` under the menu bar (where each application's menu has
+  // its name), then redraw.
+  bool click(const std::string &needle) {
+    int x = 0, y = 0;
+    const std::size_t bar = screen.find('\n');
+    if (bar == std::string::npos || !find_cell(screen.substr(bar + 1), needle, x, y))
+      return false;
+    ++y;
+    route(TermEvent::mouse_event(TermEvent::Mouse::Press, x, y));
+    route(TermEvent::mouse_event(TermEvent::Mouse::Release, x, y));
+    frame();
+    return true;
+  }
+};
+} // namespace
+
+TEST(AriadneFtxuiShell, KeysAndClicksGoToTheApplicationWhoseWindowHasThem) {
+  REQUIRE_FTXUI();
+  if (!AppRuntime::have_yaml())
+    GTEST_SKIP() << "libcvc built without yaml-cpp";
+  TypistShell s("ariadne_ftxui_typists", FtxuiBackend::Options{});
+  ASSERT_TRUE(s.until([&] {
+    return s.get("apps.a.status") == "open" && s.get("apps.b.status") == "open" &&
+           s.screen.find("Beta note") != std::string::npos;
+  })) << s.get("apps.a.error")
+      << s.screen;
+  EXPECT_EQ(s.get("ariadne.focus"), "") << "no window has been clicked";
+
+  // A click on Alpha's window: its focus, and the click is Alpha's.
+  ASSERT_TRUE(s.click("Alpha")) << s.screen;
+  EXPECT_EQ(s.get("ariadne.focus"), "includes.a") << s.screen;
+  s.route(TermEvent::text_event("k"));
+  ASSERT_TRUE(s.until([&] { return s.get("includes.a.typed") == "K"; }))
+      << s.get("includes.a.typed");
+  EXPECT_EQ(s.get("includes.a.clicks"), "c");
+  EXPECT_EQ(s.get("includes.b.typed") + s.get("includes.b.clicks"), "");
+
+  // Beta's: the next key is Beta's alone.
+  ASSERT_TRUE(s.click("Beta")) << s.screen;
+  EXPECT_EQ(s.get("ariadne.focus"), "includes.b");
+  s.route(TermEvent::text_event("j"));
+  ASSERT_TRUE(s.until([&] { return s.get("includes.b.typed") == "J"; }));
+  EXPECT_EQ(s.get("includes.a.typed"), "K");
+
+  // Its own field takes the keys typed into it; Beta has them too, as the UI's.
+  ASSERT_TRUE(s.click("Beta note")) << s.screen;
+  s.route(TermEvent::text_event("x"));
+  ASSERT_TRUE(s.until([&] { return s.get("includes.b.typed") == "JX"; }))
+      << s.get("includes.b.typed");
+
+  // The shell's window, with its field: no key reaches an application, and no click.
+  ASSERT_TRUE(s.click("Search")) << s.screen;
+  EXPECT_EQ(s.get("ariadne.focus"), "");
+  s.route(TermEvent::text_event("y"));
+  for (int i = 0; i < 10; ++i)
+    s.frame();
+  EXPECT_EQ(s.get("includes.b.typed"), "JX");
+  EXPECT_EQ(s.get("includes.a.typed"), "K");
+  EXPECT_EQ(s.get("includes.a.clicks") + s.get("includes.b.clicks"), "ccc")
+      << "Alpha's title, Beta's title and its field; none on the shell's";
+}
+
+TEST(AriadneFtxuiShell, HostedTheHostSaysWhichWindowHasTheFocusAndThePointer) {
+  REQUIRE_FTXUI();
+  if (!AppRuntime::have_yaml())
+    GTEST_SKIP() << "libcvc built without yaml-cpp";
+  TypistShell s("ariadne_ftxui_hosted_typists", hosted_opts());
+  std::string alpha, beta;
+  ASSERT_TRUE(s.until([&] {
+    for (const FtxuiBackend::HostedWindow &w : s.be.hosted_windows()) {
+      if (w.title == "Alpha")
+        alpha = w.id;
+      if (w.title == "Beta")
+        beta = w.id;
+    }
+    return !alpha.empty() && !beta.empty();
+  })) << s.get("apps.a.error");
+
+  s.be.set_window_focus(beta, alpha);
+  s.frame();
+  EXPECT_EQ(s.get("ariadne.focus"), "includes.b");
+  s.art.post_key(true, "K");
+  s.art.post_key(false, "K");
+  ASSERT_TRUE(s.until([&] { return s.get("includes.b.typed") == "K"; }));
+  s.art.post_pointer(static_cast<int>(InputEvent::Kind::MouseButtonDown), 8, 8, 0, 0, 1, 1);
+  s.art.post_pointer(static_cast<int>(InputEvent::Kind::MouseButtonUp), 8, 8, 0, 0, 1, 1);
+  ASSERT_TRUE(s.until([&] { return s.get("includes.a.clicks") == "c"; }))
+      << "the pointer is over Alpha's window";
+  EXPECT_EQ(s.get("includes.a.typed") + s.get("includes.b.clicks"), "");
+
+  s.be.set_window_focus("", "");
+  s.frame();
+  EXPECT_EQ(s.get("ariadne.focus"), "") << "the desktop has the focus";
+}

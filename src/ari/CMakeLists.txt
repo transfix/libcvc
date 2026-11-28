@@ -272,8 +272,17 @@ if(NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR AND NOT EMSCRIPTEN)
            COMMAND ari test --component-path "${CMAKE_CURRENT_SOURCE_DIR}/../cvc/ariadne"
                    "${CMAKE_CURRENT_SOURCE_DIR}/tests/processes_component.ari"
            WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+  # Asks and grants, input and argv (docs/roadmap/ARIADNE_SHELL.md 4.5, 4.6): one document's tests
+  # pass on its own and mounted as a shell's application (ari test --mounted), which grants it what
+  # it would hold alone (tests/grants_component.ari).
+  add_test(NAME ari_grants_alone
+           COMMAND ari test "${CMAKE_CURRENT_SOURCE_DIR}/tests/grants_component.ari"
+           WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+  add_test(NAME ari_grants_mounted
+           COMMAND ari test --mounted "${CMAKE_CURRENT_SOURCE_DIR}/tests/grants_component.ari"
+           WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
   set_tests_properties(ari_docset ari_url_document ari_chat_component ari_processes_component
-                       ari_rich_text PROPERTIES
+                       ari_rich_text ari_grants_alone ari_grants_mounted PROPERTIES
                        SKIP_REGULAR_EXPRESSION "built without FTXUI;built without yaml-cpp")
 endif()
 

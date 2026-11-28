@@ -122,14 +122,21 @@
               {"$ref": "#/$defs/string"},
               {
                 "type": "object",
-                "properties": {"name": {"$ref": "#/$defs/string"}, "optional": {"$ref": "#/$defs/flag"}},
+                "properties": {
+                  "name": {"$ref": "#/$defs/string"},
+                  "optional": {"$ref": "#/$defs/flag"},
+                  "origins": {
+                    "$ref": "#/$defs/strings",
+                    "description": "net.origin's: the network origins (https://host[:port]) it asks to reach beyond its own (docs/roadmap/ARIADNE_SHELL.md 4.12)."
+                  }
+                },
                 "required": ["name"],
                 "patternProperties": {"^x-": true},
                 "additionalProperties": false
               }
             ]
           },
-          "description": "What the document needs from its host (docs/ARIADNE.md §5.7)."
+          "description": "What the document needs from its host, and from the document that loads it: the grant tokens (docs/ARIADNE.md §5.7, docs/roadmap/ARIADNE_SHELL.md 4.5)."
         },
         "init": {"$ref": "#/$defs/program", "description": "Runs once at load."},
         "state": {
@@ -1593,6 +1600,13 @@
           "$ref": "#/$defs/strings",
           "description": "The functions it grants the module: names, or \"*\"."
         },
+        "grants": {"$ref": "#/$defs/grants"},
+        "deny": {"$ref": "#/$defs/grant_tokens", "description": "Tokens taken away from what it is granted (the defaults, extend.tray and extend.settings, when there is no grants:)."},
+        "argv": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/scalar"},
+          "description": "The module's command line, parsed by its own args: block as a top-level document's is (docs/roadmap/ARIADNE_SHELL.md 4.6)."
+        },
         "link": {
           "type": "object",
           "description": "Holes into the parent's state: name: target (read-write), or { to, mode: ro|rw } (read-only unless mode is rw).",
@@ -1646,6 +1660,46 @@
       "additionalProperties": false,
       "required": ["load"]
     },
+    "grant_token": {
+      "enum": [
+        "delegate.keys",
+        "delegate.pointer",
+        "delegate.signals",
+        "extend.menubar",
+        "extend.tray",
+        "extend.context_menu",
+        "extend.settings",
+        "access.settings",
+        "access.settings.read",
+        "request.main_view",
+        "request.open",
+        "net.origin"
+      ],
+      "description": "A grant token (docs/roadmap/ARIADNE_SHELL.md 4.5)."
+    },
+    "grant_tokens": {
+      "anyOf": [{"$ref": "#/$defs/grant_token"}, {"type": "array", "items": {"$ref": "#/$defs/grant_token"}}],
+      "description": "One grant token or a list of them."
+    },
+    "grants": {
+      "type": "array",
+      "description": "What the mounted document may reach beyond its scope, of what it asks for in its requires: (docs/roadmap/ARIADNE_SHELL.md 4.5): grant tokens, or {delegate.signals: [SIGTERM, ...]} and {net.origin: [https://..., ...]} to grant only those signals or origins. Absent: extend.tray and extend.settings; []: nothing.",
+      "items": {
+        "anyOf": [
+          {"$ref": "#/$defs/grant_token"},
+          {
+            "type": "object",
+            "properties": {
+              "delegate.signals": {"$ref": "#/$defs/strings"},
+              "net.origin": {"$ref": "#/$defs/strings"}
+            },
+            "minProperties": 1,
+            "maxProperties": 1,
+            "additionalProperties": false
+          }
+        ]
+      }
+    },
     "uri_list": {
       "description": "URI prefixes: one, a list of them, or { bind: <key> } naming a state key that holds them.",
       "anyOf": [
@@ -1667,6 +1721,8 @@
         "mounts": {"$ref": "#/$defs/string"},
         "allow": {"$ref": "#/$defs/uri_list", "description": "The URI prefixes that may be mounted; absent or empty: any file or link."},
         "catalog": {"$ref": "#/$defs/uri_list", "description": "The catalog's documents, which run as the local principal; the rest run as file: or remote: ones."},
+        "grants": {"$ref": "#/$defs/grants", "description": "The most any of the slot's applications may get; an entry's own <key>.<as>.grants picks from it (docs/roadmap/ARIADNE_SHELL.md 4.5)."},
+        "deny": {"$ref": "#/$defs/grant_tokens", "description": "Tokens taken away from what the slot grants (the defaults when there is no grants:)."},
         "in_background": {
           "description": "Whether its applications' worlds keep stepping while their scenes are drawn nowhere, where an entry's own background says nothing: run (the default), hold, or { bind: <key> } naming a state key that holds hold (or a true value) or run.",
           "anyOf": [

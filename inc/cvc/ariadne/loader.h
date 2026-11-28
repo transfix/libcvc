@@ -40,6 +40,7 @@
 #include <cstdint>
 #include <cvc/ariadne/data.h> // DataSpec
 #include <cvc/ariadne/doc_args.h>
+#include <cvc/ariadne/grants.h>
 #include <cvc/ariadne/keys.h>
 #include <cvc/ariadne/scene.h>
 #include <cvc/ariadne/value.h>
@@ -237,6 +238,14 @@ struct MountRequest {
   std::string as;
   std::vector<std::pair<std::string, std::string>> args;
   std::string base_dir;
+  // ARIADNE_SHELL.md 4.5: what the entry is granted (its slot's grants:, picked by the entry's own
+  // grants, its deny: applied; null: the defaults), which the loader bounds by `held_by`, what the
+  // document that holds the slot holds (null: it is the outermost document, alone).
+  std::shared_ptr<const GrantSet> grants;
+  std::shared_ptr<const MountGrants> held_by;
+  // 4.6 the entry's argv, when it has one (has_argv), parsed by the document's args: block.
+  bool has_argv = false;
+  std::vector<std::string> argv;
 };
 struct MountResult {
   bool ok = false;
@@ -251,6 +260,8 @@ struct MountResult {
   // The local files read, its own first, and each one's mtime when it was read (hot reload).
   std::vector<std::string> sources;
   std::map<std::string, std::int64_t> source_stamps;
+  // Its `tests:` block, as LoadResult::tests: `ari test --mounted` runs them in its scope.
+  std::vector<std::pair<std::string, std::string>> tests;
 };
 // Resolve and parse a mounts: entry's document, against `app`'s registries and resolver, through
 // the path a static load: takes (the URI resolver, the cycle, depth and total guards, the

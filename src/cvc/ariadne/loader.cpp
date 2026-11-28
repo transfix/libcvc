@@ -20,7 +20,7 @@
 #include <cvc/ariadne/color_value.h>
 #include <cvc/ariadne/loader.h>
 #include <cvc/ariadne/media.h>    // §5.11 image: fit / shape / URI src
-#include <cvc/ariadne/mount_scene.h> // ARIADNE_SHELL.md 4.3 a mount's scene, datasets and keys
+#include <cvc/ariadne/mount_scene.h> // ARIADNE_SHELL.md 4.3 a mount's scene and datasets
 #include <cvc/ariadne/requires.h> // free_heads: a granted function brings the ones it calls
 #include <cvc/ariadne/uri.h>      // §12/§13 import: resolve library URIs (file/state/http)
 #include <cvc/core/app.h>         // app.slot: the app's block parsers
@@ -336,6 +336,16 @@ struct Ctx {
   // the ones its mount granted, so a module that redefines one is told.
   std::vector<FunctionDef> functions;
   std::set<std::string> granted;
+
+  // ARIADNE_SHELL.md 4.5 what the document being parsed holds: its mount's grants (null: it is the
+  // outermost document, alone), which bound what its own load:s grant theirs. A sub-Ctx gets its
+  // fragment's (open_mount), and `asks` its fragment's requires:, parsed once there.
+  std::shared_ptr<const MountGrants> held;
+  std::vector<HostRequirement> asks;
+  // load_mount's: what a mounts: entry grants and the argv it passes, in place of the site's own
+  // grants:/deny: and argv: keys. Read for the top site alone; a sub-Ctx never has them.
+  const GrantSet *site_grants = nullptr;
+  const std::vector<std::string> *site_argv = nullptr;
 
   // §14 the .ari schema: the file being parsed (SchemaIssue::source; "" for a string), and the
   // issues found across the whole import/mount graph — shared, like `sources`, so a sub-Ctx adds
@@ -844,6 +854,7 @@ struct LoadOutcome {
   std::string error;
   std::string canonical;
   bool has_scene = false;
+  std::vector<std::pair<std::string, std::string>> tests; // the fragment's tests:
 };
 void expand_load(Ctx &ctx, const YAML::Node &n, Widget &w,
                  LoadOutcome *outcome = nullptr);            // §12 load: an isolated fragment
@@ -851,6 +862,9 @@ void parse_mounts(Ctx &ctx, const YAML::Node &n, Widget &w); // ARIADNE_SHELL.md
 Meta parse_meta(const YAML::Node &m);                        // a document's meta: block
 std::vector<HostRequirement> parse_requires(Ctx &ctx, const YAML::Node &n,
                                             const std::string &where = ""); // §7.6
+std::vector<ArgSpec> parse_args(Ctx &ctx, const YAML::Node &a, std::string &error); // §5.6
+void parse_tests(Ctx &ctx, const YAML::Node &t,
+                 std::vector<std::pair<std::string, std::string>> &out);              // §13 tests:
 StateSeeds parse_state(Ctx &ctx, const YAML::Node &n, const std::string &where = ""); // §5.3
 void parse_document(Ctx &ctx, const YAML::Node &doc, Widget &w); // §12 a document, or a fragment
 // §9 a document's (or a fragment's) prototypes:, scene:, data:, assets: and scenes:.
@@ -3128,6 +3142,111 @@ CVC_ARI_NOINLINE bool read_fragment(Ctx &ctx, const YAML::Node &n, std::string &
   return true;
 }
 
+// A scalar, or a list of scalars, as strings (anything else: none).
+std::vector<std::string> scalar_list(const YAML::Node &v) {
+  std::vector<std::string> out;
+  if (v && v.IsScalar())
+    out.push_back(v.Scalar());
+  else if (v && v.IsSequence())
+    for (const YAML::Node &x : v)
+      if (x.IsScalar())
+        out.push_back(x.Scalar());
+  return out;
+}
+
+// ARIADNE_SHELL.md 4.5 a load: site's or a mounts: slot's `grants:` and `deny:` (in `n`): what it
+// grants a mount, before that is bounded by what the granting document holds. No grants: the
+// defaults; `grants: []` (or `grants:` alone) nothing.
+GrantSet parse_grants(Ctx &ctx, const YAML::Node &n, const std::string &where) {
+  GrantSet g = default_grant_set();
+  if (const YAML::Node gr = n["grants"]) {
+    if (gr.IsSequence() || gr.IsNull()) {
+      GrantBuilder b;
+      for (const YAML::Node &e : gr) {
+        std::string why;
+        if (e.IsScalar()) {
+          why = b.add(e.Scalar());
+        } else if (e.IsMap() && e.size() == 1) {
+          for (const auto &kv : e) {
+            const std::vector<std::string> covers = scalar_list(kv.second);
+            why = kv.first.IsScalar() ? b.add(kv.first.Scalar(), &covers)
+                                      : std::string("an item's token is a name");
+          }
+        } else {
+          why = "an item is a token, or {delegate.signals: [...]} or {net.origin: [...]}";
+        }
+        if (!why.empty())
+          ctx.warn("ari: " + where + "grants: " + why + " — ignored");
+      }
+      g = b.take();
+    } else if (gr.IsMap() && gr["ask"]) {
+      ctx.warn("ari: " + where +
+               "grants: { ask: [...] } (asking the user) comes with ARIADNE_SHELL.md SH9 — those "
+               "tokens are not granted, and the defaults are");
+    } else {
+      ctx.warn("ari: " + where +
+               "grants: is a list of grant tokens — ignored, so the defaults are "
+               "granted");
+    }
+  }
+  if (const YAML::Node d = n["deny"]) {
+    const std::vector<std::string> deny = scalar_list(d);
+    for (const std::string &t : deny)
+      if (!is_grant_token(t))
+        ctx.warn("ari: " + where + "deny: '" + t + "' is not a grant token — ignored");
+    g = deny_tokens(std::move(g), deny);
+  }
+  return g;
+}
+
+// The warning for a fragment's `what` (on_key:, keys:, ...) that it does not hold `token` for.
+std::string not_held(const std::string &uri, const std::string &what, const std::string &token) {
+  return "ari: load '" + uri + "': the fragment's " + what + " is ignored — it does not hold " +
+         token + " (list it in requires:, and grant it where it is loaded: grants: [" + token +
+         "])";
+}
+
+// ARIADNE_SHELL.md 4.6 a mount's command line: the site's argv: (or a mounts: entry's,
+// ctx.site_argv) parsed by the fragment's own args: block, as a top-level document's is. "" with
+// `out` set (left null when it has neither an args: block nor an argv), else why the mount is
+// refused: its args: block is malformed, or the argv does not match it (with its usage).
+std::string mount_command_line(Ctx &ctx, const YAML::Node &n, const std::string &uri,
+                               const YAML::Node &frag,
+                               std::shared_ptr<const MountCommandLine> &out) {
+  auto cl = std::make_shared<MountCommandLine>();
+  if (ctx.site_argv) {
+    cl->has_argv = true;
+    cl->argv = *ctx.site_argv;
+  } else if (const YAML::Node a = n["argv"]) {
+    cl->has_argv = true;
+    if (!a.IsSequence() && !a.IsNull())
+      ctx.warn("ari: load '" + uri + "': argv: is a list of strings ([--room, lobby])");
+    cl->argv = scalar_list(a);
+  }
+  if (frag.IsMap() && frag["args"]) {
+    cl->has_args_block = true;
+    std::string err;
+    cl->args = parse_args(ctx, frag["args"], err);
+    if (!err.empty())
+      return err;
+    cl->parsed = parse_document_args(cl->args, cl->argv);
+    if (cl->parsed.help || !cl->parsed.errors.empty()) {
+      std::string what;
+      for (const std::string &e : cl->parsed.errors)
+        what += (what.empty() ? "" : "; ") + e;
+      const Meta meta = frag["meta"] ? parse_meta(frag["meta"]) : Meta{};
+      const std::string usage = format_document_usage(
+          uri, !meta.description.empty() ? meta.description : meta.name, cl->args);
+      return (cl->parsed.help ? std::string("its argv asks for its usage (--help)")
+                              : "its argv does not match its args: " + what) +
+             "\n" + usage;
+    }
+  }
+  if (cl->has_args_block || cl->has_argv)
+    out = std::move(cl);
+  return {};
+}
+
 // §12 the ISOLATED sub-context fragment `frag` (at `canonical`) parses in, `sub`.
 CVC_ARI_NOINLINE void open_mount(Ctx &ctx, const YAML::Node &n, const std::string &uri,
                                  const std::string &canonical, const YAML::Node &frag, Ctx &sub) {
@@ -3144,6 +3263,15 @@ CVC_ARI_NOINLINE void open_mount(Ctx &ctx, const YAML::Node &n, const std::strin
   sub.source_stamps = ctx.source_stamps;
   sub.source = canonical; // §14 its include:s' issues name it, and add to the one list
   sub.schema_issues = ctx.schema_issues;
+  // ARIADNE_SHELL.md 4.5 what it holds, before its own load:s are parsed (they grant out of it):
+  // what the site grants (a mounts: entry's, or its own grants: and deny:), bounded by what this
+  // document holds, of what its requires: asks for.
+  const std::string where = "load '" + uri + "': ";
+  const GrantSet granted = bound_grants(
+      ctx.site_grants ? *ctx.site_grants : parse_grants(ctx, n, where), ctx.held.get());
+  if (frag.IsMap())
+    sub.asks = parse_requires(ctx, frag["requires"], where);
+  sub.held = std::make_shared<const MountGrants>(hold_grants(granted, sub.asks));
   // §6.6: the functions the mount grants come first, then the module's imports' and its own.
   sub.functions = grant_functions(ctx, n["functions"], uri);
   for (const FunctionDef &f : sub.functions)
@@ -3209,25 +3337,44 @@ CVC_ARI_NOINLINE void finish_mount(Ctx &ctx, const YAML::Node &n, const std::str
       ctx.warn("ari: load '" + uri +
                "': the fragment's on_tick: must be a scalar state_exec script string — ignored");
   }
-  // §7.6 and its requires:, which AppRuntime checks against the host like the document's.
-  if (frag.IsMap())
-    w.requirements = parse_requires(ctx, frag["requires"], "load '" + uri + "': ");
-  for (const char *lane : {"on_key", "on_pointer", "on_signal"})
-    if (frag.IsMap() && frag[lane])
-      ctx.warn("ari: load '" + uri + "': the fragment's " + lane +
-               ": is ignored — only the outermost document receives input and signals; pass "
-               "what the module needs through a link: hole");
+  // §7.6 and its requires: (parsed as it opened, open_mount), which AppRuntime checks against the
+  // host like the document's, its grant tokens against what it was granted.
+  w.requirements = sub.asks;
+  // ARIADNE_SHELL.md 4.5, 4.6 its input and signals: kept when it holds the token for them (it
+  // asked, and was granted it), else ignored with a warning, as a module's always were.
+  auto grants = std::make_shared<MountGrants>(sub.held ? *sub.held : MountGrants{});
+  struct Lane {
+    const char *key;
+    const char *token;
+    std::string MountGrants::*script;
+  };
+  for (const Lane &lane : {Lane{"on_key", "delegate.keys", &MountGrants::on_key},
+                           Lane{"on_pointer", "delegate.pointer", &MountGrants::on_pointer},
+                           Lane{"on_signal", "delegate.signals", &MountGrants::on_signal}}) {
+    const YAML::Node v = frag.IsMap() ? frag[lane.key] : YAML::Node();
+    if (!v)
+      continue;
+    if (!v.IsScalar())
+      ctx.warn("ari: load '" + uri + "': the fragment's " + lane.key +
+               ": must be a scalar state_exec script string — ignored");
+    else if (grants->holds(lane.token))
+      (*grants).*lane.script = v.Scalar();
+    else
+      ctx.warn(not_held(uri, std::string(lane.key) + ":", lane.token));
+  }
+  if (frag.IsMap() && frag["keys"]) {
+    if (grants->holds("delegate.keys"))
+      grants->keys = parse_keys(ctx, frag["keys"]);
+    else
+      ctx.warn(not_held(uri, "keys:", "delegate.keys"));
+  }
+  w.grants = std::move(grants);
   // §5.30 the main view is the outermost document's: a module's top-level context_menu: has
   // nothing to open over (its windows, groups and viewports keep theirs).
   if (frag.IsMap() && frag["context_menu"])
     ctx.warn("ari: load '" + uri +
              "': the fragment's top-level context_menu: is ignored — the main view is the "
              "outermost document's; put the menu on one of its windows or groups");
-  // Only the outermost document takes arguments (doc_args.h); a module reaches them through a hole.
-  if (frag.IsMap() && frag["args"])
-    ctx.warn("ari: load '" + uri +
-             "': the fragment's args: is ignored — only the outermost document takes arguments; "
-             "grant them with link: {args: {to: args, mode: ro}}");
   // §12 link: parent-scope holes — each entry becomes a transparent link node the Runtime plants
   // inside the mount's sub-prefix (created there, not here — the loader is state-free). Value form
   // `name: target` (rw); map form `name: { to: target, mode: ro|rw }` (no mode: ro).
@@ -3262,6 +3409,16 @@ CVC_ARI_NOINLINE void finish_mount(Ctx &ctx, const YAML::Node &n, const std::str
       if (h.name[0] == '/') {
         ctx.warn("ari: load '" + uri + "': link name '" + h.name +
                  "' must not start with '/' (it would escape the mount) — skipped");
+        continue;
+      }
+      // ARIADNE_SHELL.md 4.6 a module with a command line of its own (an args: block, or an argv:
+      // passed) has its argv and args published where a hole of that name would go.
+      const std::string head = h.name.substr(0, h.name.find('.'));
+      if (w.command_line && (head == "args" || head == "argv")) {
+        ctx.warn("ari: load '" + uri + "': link '" + h.name +
+                 "' is skipped — the module has a command line of its own (its args: block, or "
+                 "the argv: passed it), published at its own " +
+                 head);
         continue;
       }
       w.links.push_back(std::move(h));
@@ -3375,20 +3532,21 @@ void parse_mounts(Ctx &ctx, const YAML::Node &n, Widget &w) {
       ctx.warn("ari: mounts: in_background: is run, hold or { bind: <key> } — they run");
   }
   spec->base = ctx.base_dir;
+  // ARIADNE_SHELL.md 4.5 the most any of its applications may get (the defaults without grants:),
+  // bounded by what this document holds when the Runtime opens one.
+  spec->grants = std::make_shared<const GrantSet>(parse_grants(ctx, n, "mounts: "));
   w.mounts = std::move(spec);
 }
 
 // ARIADNE_SHELL.md 4.3 what fragment `frag` carries besides its widgets, parsed in its own context
-// `sub`: its scene:, scenes:, data:, assets: and keys:, and the load: node's view: and
-// in_background:. Null when the fragment has none of them.
+// `sub`: its scene:, scenes:, data: and assets:, and the load: node's view: and in_background:
+// (its keys: are its grants', finish_mount). Null when the fragment has none of them.
 CVC_ARI_NOINLINE std::shared_ptr<MountScene> parse_mount_scene(Ctx &ctx, const YAML::Node &n,
                                                                const std::string &uri,
                                                                const YAML::Node &frag, Ctx &sub) {
   auto ms = std::make_shared<MountScene>();
-  if (frag.IsMap()) {
+  if (frag.IsMap())
     parse_scene_blocks(sub, frag, ms->scene, ms->scenes, ms->data);
-    ms->keys = parse_keys(sub, frag["keys"]);
-  }
   // Only the outermost document takes arguments (doc_args.h), so a dataset whose URI is one has
   // nothing to load in a mount.
   for (auto d = ms->data.begin(); d != ms->data.end();) {
@@ -3413,7 +3571,7 @@ CVC_ARI_NOINLINE std::shared_ptr<MountScene> parse_mount_scene(Ctx &ctx, const Y
     else
       ctx.warn("ari: load '" + uri + "': in_background: is run or hold — it runs");
   }
-  if (!ms->has_scene() && ms->data.empty() && ms->keys.empty())
+  if (!ms->has_scene() && ms->data.empty())
     return nullptr;
   return ms;
 }
@@ -3457,12 +3615,24 @@ void expand_load(Ctx &ctx, const YAML::Node &n, Widget &w, LoadOutcome *outcome)
   YAML::Node frag;
   if (!read_fragment(ctx, n, uri, canonical, frag, outcome))
     return; // an empty group
+  // ARIADNE_SHELL.md 4.6 its command line, checked before anything of it is built: a bad one
+  // refuses the mount (a load:'s is left out, with a warning that carries its usage).
+  std::shared_ptr<const MountCommandLine> command_line;
+  if (const std::string why = mount_command_line(ctx, n, uri, frag, command_line); !why.empty()) {
+    if (outcome)
+      outcome->error = why;
+    else
+      ctx.warn("ari: load '" + uri + "' is not mounted: " + why);
+    return; // an empty group
+  }
   Ctx sub;
   open_mount(ctx, n, uri, canonical, frag, sub);
   w.children.emplace_back();
   parse_document(sub, frag, w.children.back());
-  // ARIADNE_SHELL.md 4.3 its scene, datasets and keys, in its own context (its warnings go up with
-  // the rest in finish_mount), and a window for its scene once the mount has its name.
+  w.command_line = std::move(command_line);
+  // ARIADNE_SHELL.md 4.3 its scene and datasets, in its own context (its warnings go up with the
+  // rest in finish_mount), and a window for its scene once the mount has its name. Its keys: are
+  // its grants' (4.6, finish_mount), bound when it holds delegate.keys.
   std::shared_ptr<MountScene> ms = parse_mount_scene(ctx, n, uri, frag, sub);
   finish_mount(ctx, n, uri, frag, sub, w);
   if (ms) {
@@ -3470,6 +3640,8 @@ void expand_load(Ctx &ctx, const YAML::Node &n, Widget &w, LoadOutcome *outcome)
       w.children.back().children.push_back(scene_window(w.app_name));
     w.mount_scene = std::move(ms);
   }
+  if (outcome && frag.IsMap()) // `ari test --mounted` runs them in the mount's scope
+    parse_tests(ctx, frag["tests"], outcome->tests);
 }
 
 // A document's settings that are widgets in its group, after its own widgets: the Windows menu's,
@@ -5152,6 +5324,26 @@ std::vector<ChannelDecl> parse_channels(Ctx &ctx, const YAML::Node &c) {
   return out;
 }
 
+// §13 a document's `tests:` block: a map of name -> program that `ari test` runs (the loader only
+// captures them), into `out`. `tests:` alone holds none.
+void parse_tests(Ctx &ctx, const YAML::Node &t,
+                 std::vector<std::pair<std::string, std::string>> &out) {
+  if (!t || t.IsNull())
+    return;
+  if (!t.IsMap()) {
+    ctx.warn("ari: tests: must be a MAP of test name -> state_exec program — ignored");
+    return;
+  }
+  for (const auto &kv : t) {
+    const std::string name = kv.first.IsScalar() ? kv.first.Scalar() : std::string();
+    if (name.empty() || !kv.second.IsScalar() || kv.second.Scalar().empty())
+      ctx.warn("ari: tests: '" + name +
+               "' must be a non-empty scalar state_exec program — ignored");
+    else
+      out.emplace_back(name, kv.second.Scalar());
+  }
+}
+
 // The document's `args:` block (doc_args.h): a MAP of name -> {type:, default:, help:, required:,
 // positional:}, or name -> a bare type. A malformed spec is the author's error, so it fails the
 // load (`error` set) rather than letting the document run on arguments nobody could pass.
@@ -5358,6 +5550,24 @@ std::vector<HostRequirement> parse_requires(Ctx &ctx, const YAML::Node &n,
     } else if (e.IsMap()) {
       req.name = str(e, "name");
       req.optional = flag(e, "optional", false);
+      // ARIADNE_SHELL.md 4.12 {name: net.origin, origins: [...]}: the origins it asks to reach.
+      if (const YAML::Node o = e["origins"]) {
+        if (req.name != "net.origin")
+          ctx.warn("ari: " + where + "requires: '" + req.name +
+                   "' takes no origins: (only net.origin does) — they are ignored");
+        else if (o.IsScalar())
+          req.origins.push_back(o.Scalar());
+        else if (o.IsSequence())
+          for (const YAML::Node &x : o)
+            if (x.IsScalar())
+              req.origins.push_back(x.Scalar());
+        for (const std::string &x : req.origins) {
+          std::string bad;
+          if (policy_origin(x, &bad).empty())
+            ctx.warn("ari: " + where + "requires: net.origin: " + bad +
+                     " — it cannot be granted (write https://host[:port])");
+        }
+      }
     }
     if (req.name.empty()) {
       ctx.warn("ari: " + where + "requires: entry with no name — ignored");
@@ -5879,19 +6089,7 @@ LoadResult load_node(cvc::app &app, const YAML::Node &doc,
       ctx.warn("ari: on_signal: must be a scalar state_exec script string — ignored");
     r.keys = parse_keys(ctx, doc["keys"]);
     // tests: a map of name -> program that `ari test` runs (the loader only captures them).
-    if (const YAML::Node ts = doc["tests"]; ts && !ts.IsNull()) { // `tests:` alone: none
-      if (!ts.IsMap())
-        ctx.warn("ari: tests: must be a MAP of test name -> state_exec program — ignored");
-      else
-        for (const auto &kv : ts) {
-          const std::string name = kv.first.IsScalar() ? kv.first.Scalar() : std::string();
-          if (name.empty() || !kv.second.IsScalar() || kv.second.Scalar().empty())
-            ctx.warn("ari: tests: '" + name +
-                     "' must be a non-empty scalar state_exec program — ignored");
-          else
-            r.tests.emplace_back(name, kv.second.Scalar());
-        }
-    }
+    parse_tests(ctx, doc["tests"], r.tests);
   }
   // §12 channel lint (A): now that root + all scripts are populated, scan static msg-* refs
   // (only if the doc declared channels:). A strict violation fails the load (r.error set).
@@ -5974,6 +6172,11 @@ MountResult load_mount(cvc::app &app, const MountRequest &req) {
     ctx.nesting = std::make_shared<Nesting>(); // §6.7 how deep the mount's widgets nest
     if (have_jsonschema())
       ctx.schema_issues = std::make_shared<std::vector<SchemaIssue>>();
+    // ARIADNE_SHELL.md 4.5, 4.6 what the entry is granted, bounded by what the slot's document
+    // holds, and the argv it passes, in place of a load: site's own keys.
+    ctx.held = req.held_by;
+    ctx.site_grants = req.grants.get(); // null: the site has no grants:, so the defaults
+    ctx.site_argv = req.has_argv ? &req.argv : nullptr;
     YAML::Node site(YAML::NodeType::Map);
     site["load"] = req.uri;
     site["as"] = req.as;
@@ -5988,6 +6191,7 @@ MountResult load_mount(cvc::app &app, const MountRequest &req) {
     expand_load(ctx, site, wrapper, &outcome);
     r.canonical = outcome.canonical;
     r.has_scene = outcome.has_scene;
+    r.tests = std::move(outcome.tests);
     r.warnings = std::move(ctx.warnings);
     if (ctx.schema_issues)
       r.schema_issues = *ctx.schema_issues;

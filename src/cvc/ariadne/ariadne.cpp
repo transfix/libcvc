@@ -28,15 +28,17 @@
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/ariadne/backend.h>
 #include <cvc/ariadne/bind.h>
-#include <cvc/ariadne/data.h> // ARIADNE_SHELL.md 4.3 a mount's datasets, bound as it opens
+#include <cvc/ariadne/data.h>     // ARIADNE_SHELL.md 4.3 a mount's datasets, bound as it opens
+#include <cvc/ariadne/doc_args.h> // ARIADNE_SHELL.md 4.6 a mount's command line
 #include <cvc/ariadne/files.h> // §10.8 (file-pick): the files the app's programs hold
+#include <cvc/ariadne/grants.h> // ARIADNE_SHELL.md 4.5 what a mount asks for and holds
 #include <cvc/ariadne/icons.h> // §5.22 a tray icon's named glyphs
 #include <cvc/ariadne/input.h>  // §4.6 InputEvent — Runtime::post_input feeds on_key/on_pointer
 #include <cvc/ariadne/loader.h> // is_builtin_widget_type (has?)
 #include <cvc/ariadne/media.h>  // §5.11 pictures by URI
 #include <cvc/ariadne/media_player.h> // §5.13 video: / audio: players
 #include <cvc/ariadne/media_save.h>   // §5.29 saving a picture or a video
-#include <cvc/ariadne/mount_scene.h>  // ARIADNE_SHELL.md 4.3 a mount's scene, datasets and keys
+#include <cvc/ariadne/mount_scene.h>  // ARIADNE_SHELL.md 4.3 a mount's scene and datasets
 #include <cvc/ariadne/net_host.h>     // net_host_status (the net capability tokens)
 #include <cvc/ariadne/oidc_host.h>    // pump_oidc
 #include <cvc/ariadne/principal.h>    // set_scope_principal: what a mount runs as (SH11)
@@ -1378,10 +1380,12 @@ private:
     rec_->paths.push_back(cvc::state::normalize_path(path));
   }
 
-  // (has? NAME), asked once a frame per name; an evaluation notes what it asked.
+  // (has? NAME), asked once a frame per name; an evaluation notes what it asked. A grant token
+  // (ARIADNE_SHELL.md 4.5) is answered for the scope the engine reads, so once a frame per scope.
   bool has_answer(const std::string &name) {
-    const auto it = has_frame_.find(name);
-    const bool v = it != has_frame_.end() ? it->second : (has_frame_[name] = has_(name));
+    const std::string key = is_grant_token(name) ? root_path_ + '\x1f' + name : name;
+    const auto it = has_frame_.find(key);
+    const bool v = it != has_frame_.end() ? it->second : (has_frame_[key] = has_(name));
     if (rec_)
       rec_->asked.emplace_back(name, v);
     return v;
@@ -1851,7 +1855,11 @@ struct Runtime::Impl {
     f.relay = relay_document;
     return f;
   }
+  // `name` here, for the document's own programs: a grant token as the outermost document alone
+  // holds it (ARIADNE_SHELL.md 4.5; a mount's are grant_holds').
   bool has(const std::string &name) const {
+    if (is_grant_token(name))
+      return held_alone(name);
     if (is_capability_token(name))
       return capability_holds(name, facts());
     return has_function(name) || is_builtin_widget_type(name) || has_widget_type(app, name);
@@ -2120,6 +2128,9 @@ struct Runtime::Impl {
     std::shared_ptr<const NotifyScope> notify; // its notify verbs', which its children bind too
     // The frame budget of the mounts: entry its scope is under (ARIADNE_SHELL.md 4.11), or null.
     std::shared_ptr<cvc::state_exec::frame_account> account;
+    // The grant tokens the mount its scope is under holds (ARIADNE_SHELL.md 4.5), which its has?
+    // answers from, taken on the host thread; null: the document's own scope. Its children's too.
+    std::shared_ptr<const std::set<std::string>> held;
   };
   std::unordered_map<int, std::shared_ptr<ActionContext>> live_actions_;
   // A program's process carries its context's chroot, as a spawned child's does, and this
@@ -2213,8 +2224,12 @@ struct Runtime::Impl {
   HostFacts facts_snapshot_;
   void snapshot_has();
   bool has_snapshot(const std::string &name) const;
-  // has? for a program in `group` (null: group 0): live on the host thread, else the snapshot.
-  std::function<bool(const std::string &)> program_has(cvc::state_exec::exec_group *group);
+  // has? for a program in `group` (null: group 0): live on the host thread, else the snapshot. A
+  // grant token from `held`, what the program's mount holds, taken on the host thread when its
+  // context was made (null: the document's own scope, which holds them as it would alone).
+  std::function<bool(const std::string &)>
+  program_has(cvc::state_exec::exec_group *group,
+              std::shared_ptr<const std::set<std::string>> held);
   // The drain's halves (Runtime::drain_begin/drain_end).
   std::uint64_t begin_generation_ = 0; // app.exec_pump_generation() at drain_begin
   bool drain_begun_ = false;
@@ -2239,9 +2254,11 @@ struct Runtime::Impl {
   // its lock fields, so a child of an action gives up after the action's default, and its spawn
   // context. It runs on the pumping thread (a worker in an `any` group). The child's process
   // keeps it alive, and the child keeps the document's owner (intrinsic_spawn), so ~Impl's
-  // kill_owner reaps it. `notify` is its parent's notify scope, taken on the host thread.
+  // kill_owner reaps it. `notify` is its parent's notify scope, taken on the host thread, and
+  // `held` its parent's grants (ActionContext::held).
   cvc::state_exec::spawn_setup spawn_child(const cvc::state_exec::intrinsics_context &parent,
-                                           std::shared_ptr<const NotifyScope> notify);
+                                           std::shared_ptr<const NotifyScope> notify,
+                                           std::shared_ptr<const std::set<std::string>> held);
 
   // Submit a program `on:` as a process on the document's scheduler (owner-tagged, chrooted
   // to `prefix`), keeping its ActionContext alive in live_actions_. Returns immediately.
@@ -2470,8 +2487,10 @@ struct Runtime::Impl {
   // matching where its binds resolve. Every reactive helper goes through here.
   ReactiveEngine &ensure_reactive() {
     if (!reactive) {
-      reactive = std::make_unique<ReactiveEngine>(app, prefix,
-                                                  [this](const std::string &n) { return has(n); });
+      // A grant token holds per mount: the walk's scope is the one the engine reads.
+      reactive = std::make_unique<ReactiveEngine>(app, prefix, [this](const std::string &n) {
+        return is_grant_token(n) ? grant_holds(current_prefix(), n) : has(n);
+      });
       for (const auto &[name, fn] : read_functions)
         reactive->bind_read_function(name, fn);
       reactive->begin_frame(reactive_budget); // made mid-frame: this frame's budget is the host's
@@ -2743,9 +2762,19 @@ struct Runtime::Impl {
     double held_since = -1.0; // the frame clock since which it has been held every frame; -1 not
     bool noticed = false;     // the notice for this stretch at its limit was posted
     bool by_memory = false;   // its memory, not its time, is what holds it
+    // ARIADNE_SHELL.md 4.5, 4.6 the entry's own grants (picked from the slot's; has_grants: it
+    // names any) and argv (has_argv: it has one), as the entry gave them when it opened.
+    bool has_grants = false;
+    std::vector<std::string> grants;
+    bool has_argv = false;
+    std::vector<std::string> argv;
+    // 4.12 the network origins it holds beyond its principal's (SH11's net_origins).
+    std::vector<std::string> net_origins;
+    std::vector<std::pair<std::string, std::string>> tests; // its tests: (ari test --mounted)
+    std::vector<std::string> warnings;                      // what its last parse warned
   };
   std::map<std::string, MountSlot> mount_slots_;
-  // ARIADNE_SHELL.md 4.3 (SH3): the mounts that carry a scene, datasets or keys, as
+  // ARIADNE_SHELL.md 4.3 (SH3): the mounts that carry a scene or datasets, as
   // plan_windows_menu last walked the tree: each load: (not one under repeat:) and each open
   // mounts: entry, with what its world does in the background (Runtime::scene_mounts).
   struct ScenePlan {
@@ -2789,6 +2818,8 @@ struct Runtime::Impl {
   void close_mount(const std::string &sub_prefix, bool forget_init);
   void refuse_mount(MountSlot &slot, const std::string &why);
   void publish_mount_status(const MountSlot &slot);
+  // What the loader is asked for an entry: its URI, args, grants and argv (4.2, 4.5, 4.6).
+  MountRequest mount_request(const MountSlot &slot, const MountsSpec &spec) const;
   std::vector<std::string> mount_list(const std::vector<std::string> &literal,
                                       const std::string &bind, const std::string &scope) const;
   std::string mount_norm(const std::string &uri, const std::string &base) const;
@@ -2802,6 +2833,83 @@ struct Runtime::Impl {
   void bind_mount_verbs(const cvc::state_exec::environment_ptr &env,
                         const std::string &scope) const;
   bool is_mounts_app(const std::string &scope) const { return mount_slots_.count(scope) != 0; }
+
+  // ---- asks and grants: what a mount holds, its input, signals and command line
+  // (docs/roadmap/ARIADNE_SHELL.md 4.5, 4.6) ----
+  // The static load:s' mounts as the walk last met them, by sub-prefix, and what each holds (null:
+  // a wrapper built without grants, which holds the defaults). The mounts: slots' are on their
+  // wrappers. Cleared with the tree.
+  std::map<std::string, std::shared_ptr<const MountGrants>> load_grants_;
+  // The static mounts whose command line and key defaults are published (publish_command_line,
+  // once each since the tree was set, before their init:).
+  std::set<std::string> prepared_mounts_;
+  MountGrants default_mount_grants_ = hold_grants(default_grant_set(), {});
+  // The mount at sub-prefix `sub` (a mounts: slot's open one, or a static load: the walk met):
+  // what it holds, or null when there is none there.
+  const MountGrants *grants_of(const std::string &sub) const;
+  // The innermost mount `scope` is in, its sub-prefix; "" for the document's own scope.
+  std::string app_of(const std::string &scope) const;
+  // What a program at `scope` holds: its mount's tokens (null: the document's own scope).
+  std::shared_ptr<const std::set<std::string>> held_at(const std::string &scope) const;
+  // Whether grant token `name` holds at `scope` (the read lane's has?).
+  bool grant_holds(const std::string &scope, const std::string &name) const {
+    const std::string sub = app_of(scope);
+    if (sub.empty())
+      return held_alone(name);
+    const MountGrants *g = grants_of(sub);
+    return g && g->holds(name);
+  }
+  // 4.6 publish a mount's command line at its sub-prefix, before its init: runs.
+  void publish_command_line(const std::string &sub, const Widget &wrapper);
+  // The keyboard focus: the application (a mount's sub-prefix, "" none) that keys go to, when it
+  // holds delegate.keys. It moves to the application whose window takes the focus
+  // (Backend::window_focused), off every one when the focus leaves every window (a backend that
+  // reports it), and to the one (app-focus) names.
+  std::string focused_app_;
+  std::optional<std::string> last_focus_window_; // the scope of the window focused last frame
+  // This frame's, as the walk meets them, and the last whole frame's: the scope of the focused
+  // window, of the window the pointer is over, of the text field that holds the keyboard.
+  std::optional<std::string> frame_focus_, frame_hover_, frame_keyboard_;
+  std::optional<std::string> hover_scope_, keyboard_scope_;
+  void note_window(Backend &b) {
+    if (b.window_focused())
+      frame_focus_ = current_prefix();
+    if (b.window_hovered())
+      frame_hover_ = current_prefix();
+  }
+  void note_text_field(Backend &b) {
+    if (b.item_has_keyboard())
+      frame_keyboard_ = current_prefix();
+  }
+  void end_frame_focus(); // the frame's focus, hover and keyboard become the last whole frame's
+  // The input events a mount may take, queued by post_input (any thread) when one could take it,
+  // routed by the next drain (route_mount_input): a key to the focused application, the pointer to
+  // the one whose window it is over.
+  std::mutex mount_input_mutex_;
+  std::vector<InputEvent> mount_input_;
+  std::atomic<bool> mount_input_wanted_{false};  // a known mount holds delegate.keys or .pointer
+  std::map<std::string, std::string> keys_down_; // a key that went down to an application: its up
+  std::string pointer_app_; // the application a button went down over: its moves and up go there
+  void want_mount_input();  // mount_input_wanted_ from the mounts as they stand
+  void route_mount_input();
+  // Run `body` (a mount's on_key:, on_pointer: or on_signal:, or a binding's on:) as an action in
+  // the mount at `sub`, with its functions and `event` bound to `fields`.
+  void run_in_mount(const std::string &sub, const std::string &body,
+                    std::vector<std::pair<std::string, cvc::state_exec::value_t>> fields);
+  // 4.6 `signal` to the mounts that hold delegate.signals for it and have an on_signal:: an
+  // interrupt to the focused one, a request to end to every one. True when an interrupt reached
+  // one (the host then does not apply its default; a request to end always ends the shell).
+  bool signal_mounts(const std::string &signal, const std::string &source);
+  bool signal_mount(const std::string &sub, const std::string &signal, const std::string &source);
+  // (app-focus AS) and (app-signal AS NAME) from the document's programs (any thread), handled by
+  // the next drain. Shared, as the slot key is.
+  struct AppRequests {
+    std::mutex m;
+    std::optional<std::string> focus;
+    std::vector<std::pair<std::string, std::string>> signals; // as, signal
+  };
+  std::shared_ptr<AppRequests> app_requests_ = std::make_shared<AppRequests>();
+  void take_app_requests();
   static constexpr const char *kAppEvent = "\x1F"
                                            "app.";
   // Draw as if inside the mount at `scope` (its prefix and functions), for an application's menus
@@ -3424,9 +3532,15 @@ void Runtime::Impl::wire_holes(const std::string &parent_prefix, const std::stri
 void Runtime::Impl::run_mount_init(const std::string &sub_prefix, const std::string &script) {
   std::vector<std::string> errs;
   // (has? ...) and the document's own intrinsics as in its own init: and every action: a module's
-  // host is the same host.
+  // host is the same host. A grant token answers from what the mount holds (ARIADNE_SHELL.md 4.5).
+  const std::shared_ptr<const std::set<std::string>> held = held_at(sub_prefix);
   run_init(
-      app, sub_prefix, script, &errs, [this](const std::string &n) { return has(n); },
+      app, sub_prefix, script, &errs,
+      [this, held](const std::string &n) {
+        if (is_grant_token(n))
+          return held ? held->count(n) != 0 : held_alone(n);
+        return has(n);
+      },
       [this](const std::shared_ptr<cvc::state_exec::environment> &env,
              cvc::state_exec::intrinsics_context &ictx) {
         bind_own_intrinsics(env, ictx, nullptr);
@@ -3450,6 +3564,11 @@ void Runtime::Impl::emit_container(const Widget &w) {
     // Plant the mount's parent-scope holes once, BEFORE emitting the fragment that reads them.
     if (!w.links.empty() && wired_mounts.insert(sub_prefix).second)
       wire_holes(parent_prefix, sub_prefix, w.links);
+    // ARIADNE_SHELL.md 4.6 a load:'s command line and its keys' defaults, once, before its init:
+    // (a mounts: entry's are published as it opens, open_mount).
+    if ((w.command_line || w.grants) && !is_mounts_app(sub_prefix) &&
+        prepared_mounts_.insert(sub_prefix).second)
+      publish_command_line(sub_prefix, w);
     // ARIADNE_SHELL.md 4.3 its datasets at its sub-prefix, before its init: (which may read their
     // status), as a document's are bound before its own.
     if (w.mount_scene && !w.mount_scene->data.empty() && data_bound_.insert(sub_prefix).second)
@@ -3939,6 +4058,7 @@ void Runtime::Impl::emit_node(const Widget &w) {
     const std::string backend_id = scope_stack.empty() ? id : id + "@" + current_prefix();
     const bool visible = b.begin_window(wtitle.c_str(), backend_id.c_str(), w.size, w.frame_border,
                                         w.closable ? &open : nullptr);
+    note_window(b); // ARIADNE_SHELL.md 4.6 whose window has the focus, and the pointer
     if (can_maximize && maximized != was_maximized)
       write<int>(app, max_path, maximized ? 1 : 0); // its button
     if (maximized)
@@ -4364,6 +4484,7 @@ void Runtime::Impl::emit_node(const Widget &w) {
     const std::string path = resolve(w.bind);
     const std::string cur = read_or_seed<std::string>(app, path, w.sdef);
     const StringEdit e = b.input_text(label, path.c_str(), cur, w.password);
+    note_text_field(b); // ARIADNE_SHELL.md 4.6 a field being typed into keeps keys from mounts
     if (e.committed) {
       write<std::string>(app, path, e.value);
       if (!w.on.empty()) // send-on-commit (e.g. a chat box's Enter) — fire AFTER the write so the
@@ -4383,6 +4504,7 @@ void Runtime::Impl::emit_node(const Widget &w) {
     o.send = w.send;
     o.live = w.live || !w.on_change.empty();
     const MessageEdit e = b.message_input(label, path.c_str(), cur, o);
+    note_text_field(b);
     if (e.submitted) {
       write<std::string>(app, path, std::string()); // sent: the draft is done with
       enqueue_fields(w.on, {{"text", e.value}});    // a program reads (get-attr event "text")
@@ -4421,6 +4543,7 @@ void Runtime::Impl::emit_node(const Widget &w) {
     const std::string path = resolve(w.bind);
     const int cur = read_or_seed<int>(app, path, w.idef);
     const StringEdit e = b.input_text(label, path.c_str(), std::to_string(cur), false);
+    note_text_field(b);
     if (e.committed) {
       int next = cur; // fail-safe: a non-numeric entry keeps the current value
       try {
@@ -5786,6 +5909,9 @@ void Runtime::Impl::render() {
     wired_mounts.clear();
     data_bound_.clear(); // the new tree's load:s bind theirs as they first draw
     drop_mount_ticks(); // §12 the old tree's module ticks the new one does not keep
+    // ARIADNE_SHELL.md 4.6 the new tree's load:s publish their command lines again as the walk
+    // meets them (plan_windows_menu, above, found them and what they hold).
+    prepared_mounts_.clear();
     if (fullscreen.active)
       close_fullscreen(); // §5.13 its widget is the old tree's
   }
@@ -5860,6 +5986,7 @@ void Runtime::Impl::render() {
   std::erase_if(menu_events, [this](const auto &kv) { return kv.second.walk != walk_no; });
   ++walk_no;
   backend->end_frame();
+  end_frame_focus(); // ARIADNE_SHELL.md 4.6 where the keyboard and the pointer were this frame
   autofocus_shown.swap(autofocus_now);
   autofocus_now.clear();
   maximized_shown.swap(maximized_now);
@@ -5886,10 +6013,11 @@ void Runtime::Impl::render() {
 void Runtime::Impl::plan_windows_menu() {
   WindowsMenuPlan p;
   std::vector<std::pair<const Widget *, std::string>> mounts; // the mounts: slots met
+  std::map<std::string, std::shared_ptr<const MountGrants>> loads; // the load:s' mounts met
   std::set<std::string> toggled;   // open-state paths a menu item of the document already toggles
   std::set<std::string> bar_menus; // the titles of the menus straight in a menubar
   std::vector<WindowsMenuPlan::Item> windows;
-  // ARIADNE_SHELL.md 4.3 the mounts with a scene, datasets or keys (scene_plan_), and the open
+  // ARIADNE_SHELL.md 4.3 the mounts with a scene or datasets (scene_plan_), and the open
   // mounts: entries' wrappers among them (a load: met in the walk is any other mount).
   std::vector<ScenePlan> scene_plan;
   std::set<const Widget *> slot_wrappers;
@@ -5982,6 +6110,9 @@ void Runtime::Impl::plan_windows_menu() {
         v.mount = &w;
         v.mount_scope = inner;
         v.mount_parent = scope;
+        // ARIADNE_SHELL.md 4.5 a load:'s mount and what it holds (a mounts: entry's is its slot's)
+        if (!is_mounts_app(inner))
+          loads[inner] = w.grants;
         if (w.mount_scene && !slot_wrappers.count(&w)) // a load:'s (4.3)
           scene_plan.push_back(
               {inner, !w.app_name.empty() ? w.app_name : w.scope.substr(w.scope.rfind('.') + 1),
@@ -6058,7 +6189,7 @@ void Runtime::Impl::plan_windows_menu() {
           todo.push_back({nullptr, scope, false, nullptr, {}, {}, *e}); // then its application
           todo.push_back({(*e)->second.wrapper.get(), scope, false, nullptr, {}, {}});
         }
-        for (const auto *e : open) // 4.3 each one's scene, datasets and keys
+        for (const auto *e : open) // 4.3 each one's scene and datasets
           if (const Widget *wr = e->second.wrapper.get(); wr->mount_scene) {
             slot_wrappers.insert(wr);
             scene_plan.push_back({e->first, e->second.name, scope, wr->mount_scene,
@@ -6099,6 +6230,7 @@ void Runtime::Impl::plan_windows_menu() {
   p.toggled = std::move(toggled);
   windows_menu = std::move(p);
   mounts_widgets_ = std::move(mounts);
+  load_grants_ = std::move(loads);
   scene_plan_ = std::move(scene_plan);
 }
 
@@ -6547,6 +6679,49 @@ bool clean_mount_id(const std::string &as) {
   });
 }
 
+// ARIADNE_SHELL.md 4.5, 4.6 a mounts: entry's list at `path` (its grants, its argv): its children's
+// values, in order (numbered children by their number), else its own value split at spaces (and
+// at commas, with `commas`). `has` says whether the entry has the key at all.
+std::vector<std::string> entry_list(cvc::app &app, const std::string &path, bool &has,
+                                    bool commas) {
+  std::vector<std::string> out;
+  has = false;
+  try {
+    cvc::state *n = cvc::state::instance(app).findDescendant(path);
+    if (!n)
+      return out;
+    has = true;
+    std::vector<std::string> kids = n->childNames();
+    if (!kids.empty()) {
+      const auto number = [](const std::string &s) {
+        return !s.empty() &&
+               std::all_of(s.begin(), s.end(), [](unsigned char c) { return std::isdigit(c); });
+      };
+      if (std::all_of(kids.begin(), kids.end(), number))
+        std::sort(kids.begin(), kids.end(), [](const std::string &a, const std::string &b) {
+          return a.size() != b.size() ? a.size() < b.size() : a < b;
+        });
+      for (const std::string &k : kids)
+        out.push_back(read_string(app, path + cvc::state::SEPARATOR + k));
+      return out;
+    }
+    std::string item;
+    for (const char c : read_string(app, path)) {
+      if (c == ' ' || c == '\t' || c == '\n' || (commas && c == ',')) {
+        if (!item.empty())
+          out.push_back(std::move(item));
+        item.clear();
+      } else {
+        item.push_back(c);
+      }
+    }
+    if (!item.empty())
+      out.push_back(std::move(item));
+  } catch (const std::exception &) {
+  }
+  return out;
+}
+
 // `uri` as an id: its last path segment without its extension, made a clean segment.
 std::string mount_id_from_uri(const std::string &uri) {
   std::string s = uri;
@@ -6742,8 +6917,56 @@ void Runtime::Impl::publish_mount_status(const MountSlot &slot) {
     write<std::string>(app, at + "error", slot.refused);
     write<std::string>(app, at + "principal", slot.principal);
     write<std::string>(app, at + "name", slot.name);
+    // ARIADNE_SHELL.md 4.5 the grant tokens it holds, and 4.12 the origins it reaches beyond its
+    // principal's, each a comma-separated list ("" when refused).
+    std::string holds, origins;
+    if (slot.wrapper && slot.wrapper->grants)
+      for (const std::string &t : slot.wrapper->grants->held)
+        holds += (holds.empty() ? "" : ",") + t;
+    else if (slot.wrapper)
+      for (const std::string &t : default_mount_grants_.held)
+        holds += (holds.empty() ? "" : ",") + t;
+    for (const std::string &o : slot.wrapper ? slot.net_origins : std::vector<std::string>{})
+      origins += (origins.empty() ? "" : ",") + o;
+    write<std::string>(app, at + "holds", holds);
+    write<std::string>(app, at + "net_origins", origins);
   } catch (const std::exception &) {
   }
+}
+
+namespace {
+// 4.12 the origins a mount holds beyond its principal's default: what it asked for and was granted
+// (in the form SH11's net host reads), less a remote principal's own origin, which it reaches
+// anyway.
+std::vector<std::string> held_origins(const Widget &wrapper, const std::string &principal) {
+  std::vector<std::string> out =
+      wrapper.grants ? wrapper.grants->net_origins : std::vector<std::string>{};
+  const std::string remote = "remote:";
+  if (principal.rfind(remote, 0) == 0)
+    std::erase(out, policy_origin(principal.substr(remote.size())));
+  return out;
+}
+} // namespace
+
+MountRequest Runtime::Impl::mount_request(const MountSlot &slot, const MountsSpec &spec) const {
+  MountRequest rq;
+  rq.uri = slot.uri;
+  rq.as = slot.as;
+  rq.args = slot.args;
+  rq.base_dir = spec.base;
+  // 4.5 what the entry is granted: its slot's grants: (the defaults without one), picked by its
+  // own grants, which the loader bounds by what the document holding the slot holds.
+  GrantSet granted = spec.grants ? *spec.grants : default_grant_set();
+  if (slot.has_grants)
+    granted = pick_tokens(std::move(granted), slot.grants);
+  rq.grants = std::make_shared<const GrantSet>(std::move(granted));
+  if (const std::string up = app_of(slot.parent_scope); !up.empty())
+    if (const MountGrants *g = grants_of(up))
+      rq.held_by = std::make_shared<const MountGrants>(*g);
+  // 4.6 and its command line.
+  rq.has_argv = slot.has_argv;
+  rq.argv = slot.argv;
+  return rq;
 }
 
 void Runtime::Impl::refuse_mount(MountSlot &slot, const std::string &why) {
@@ -6784,11 +7007,7 @@ void Runtime::Impl::open_mount(MountSlot &slot, const Widget &w) {
     return refuse_mount(slot, "it is mounted too deep (" + std::to_string(kMaxMountDepth) + ")");
   if (!mount_loader_)
     return refuse_mount(slot, "this host does not mount documents (it has no loader)");
-  MountRequest rq;
-  rq.uri = slot.uri;
-  rq.as = slot.as;
-  rq.args = slot.args;
-  rq.base_dir = spec.base;
+  const MountRequest rq = mount_request(slot, spec);
   MountResult r;
   try {
     r = mount_loader_(rq);
@@ -6805,12 +7024,16 @@ void Runtime::Impl::open_mount(MountSlot &slot, const Widget &w) {
     n.source = slot.as;
     cvc::notify(app, std::move(n));
   }
+  slot.warnings = r.warnings;
   slot.canonical = r.canonical;
   slot.sources = std::move(r.sources);
   slot.stamps = std::move(r.source_stamps);
   if (!r.ok)
     return refuse_mount(slot, r.error.empty() ? "it could not be loaded" : r.error);
   slot.principal = mount_principal(w, slot.parent_scope, slot.uri, slot.canonical, slot.catalog);
+  // 4.12 the origins it holds beyond its principal's default (its net.origin asks, as granted),
+  // recorded with its principal below, where SH11's net host reads them.
+  slot.net_origins = held_origins(r.wrapper, slot.principal);
   // 4.12 SH11: what its programs and widgets reach (the network, its credentials, end-to-end keys
   // and sign-ins) is its principal's, recorded under its scope before any of them is built. The
   // entry may give a local application a network of its own (shell.apps.<as>.net_policy,
@@ -6819,6 +7042,7 @@ void Runtime::Impl::open_mount(MountSlot &slot, const Widget &w) {
   {
     ScopePrincipal who;
     who.principal = slot.principal;
+    who.net_origins = slot.net_origins;
     const std::string entry =
         slot.slot_key + cvc::state::SEPARATOR + slot.as + cvc::state::SEPARATOR;
     who.net_policy = read_string(app, entry + "net_policy");
@@ -6832,6 +7056,7 @@ void Runtime::Impl::open_mount(MountSlot &slot, const Widget &w) {
   if (!slot.wrapper->app_name.empty())
     slot.name = slot.wrapper->app_name;
   slot.refused.clear();
+  slot.tests = std::move(r.tests);
   slot.account = std::make_shared<cvc::state_exec::frame_account>();
   apply_mount_budget(slot);
   publish_mount_status(slot);
@@ -6843,6 +7068,7 @@ void Runtime::Impl::open_mount(MountSlot &slot, const Widget &w) {
   if (!fns.empty())
     mount_functions[sub] = fns;
   const Widget &wrapper = *slot.wrapper;
+  publish_command_line(sub, wrapper); // 4.6 its argv and args, before its init: reads them
   if (wrapper.mount_scene && !wrapper.mount_scene->data.empty()) // before its init: (4.3)
     bind_mount_data(sub, *wrapper.mount_scene);
   if ((!wrapper.state_seeds.empty() || !wrapper.init_script.empty()) &&
@@ -6880,6 +7106,12 @@ void Runtime::Impl::close_mount(const std::string &sub, bool forget_init) {
   clear_scope_principal(app, sub);
   for (auto q = quit_apps.begin(); q != quit_apps.end();)
     q = path_under(*q, sub) ? quit_apps.erase(q) : std::next(q);
+  // 4.6 the keyboard focus, the keys held down and the pointer's button go with it.
+  if (!focused_app_.empty() && path_under(focused_app_, sub))
+    focused_app_.clear();
+  if (!pointer_app_.empty() && path_under(pointer_app_, sub))
+    pointer_app_.clear();
+  std::erase_if(keys_down_, [&](const auto &kv) { return path_under(kv.second, sub); });
   for (std::map<std::string, std::string> *m : {&mount_names, &mount_functions})
     for (auto e = m->begin(); e != m->end();)
       e = path_under(e->first, sub) ? m->erase(e) : std::next(e);
@@ -6920,6 +7152,8 @@ bool Runtime::Impl::reconcile_mounts_once() {
     std::string key, scope, as, uri, sub;
     std::vector<std::pair<std::string, std::string>> args;
     bool catalog = false; // 4.12 <entry>.catalog: the slot's document says it is its catalog's
+    bool has_grants = false, has_argv = false; // ARIADNE_SHELL.md 4.5, 4.6
+    std::vector<std::string> grants, argv;
   };
   std::vector<Want> want;
   std::set<std::string> wanted;
@@ -6959,6 +7193,9 @@ bool Runtime::Impl::reconcile_mounts_once() {
                                                         cvc::state::SEPARATOR + a));
       } catch (const std::exception &) {
       }
+      // Its own grants (picked from the slot's) and its argv, when it names them.
+      x.grants = entry_list(app, entry + cvc::state::SEPARATOR + "grants", x.has_grants, true);
+      x.argv = entry_list(app, entry + cvc::state::SEPARATOR + "argv", x.has_argv, false);
       if (!wanted.insert(x.sub).second) {
         warn_once("ari: two mounts: slots mount '" + as + "' in one scope — the first is kept");
         continue;
@@ -6976,8 +7213,11 @@ bool Runtime::Impl::reconcile_mounts_once() {
         std::find_if(want.begin(), want.end(), [&](const Want &v) { return v.sub == sub; });
     if (x == want.end() || x->key != slot.slot_key) {
       closing.emplace_back(sub, false);
-    } else if (x->uri != slot.uri || x->args != slot.args) {
+    } else if (x->uri != slot.uri || x->args != slot.args || x->has_argv != slot.has_argv ||
+               x->argv != slot.argv) { // another command line: its state: and init: as at a new run
       closing.emplace_back(sub, true);
+    } else if (x->has_grants != slot.has_grants || x->grants != slot.grants) {
+      closing.emplace_back(sub, false); // other grants: opened again with them, resumed
     } else if (x->catalog != slot.catalog) {
       if (mount_principal(*x->w, slot.parent_scope, slot.uri, slot.canonical, x->catalog) !=
           slot.principal)
@@ -7004,6 +7244,10 @@ bool Runtime::Impl::reconcile_mounts_once() {
       slot.uri = x.uri;
       slot.args = x.args;
       slot.catalog = x.catalog;
+      slot.has_grants = x.has_grants;
+      slot.grants = x.grants;
+      slot.has_argv = x.has_argv;
+      slot.argv = x.argv;
       MountSlot &s = mount_slots_.emplace(x.sub, std::move(slot)).first->second;
       open_mount(s, *x.w);
       changed = true;
@@ -7030,11 +7274,8 @@ bool Runtime::Impl::reconcile_mounts_once() {
         mount_slots_.at(x.sub).stale = true; // parsed at the next pass, with the plan made again
         return true;
       }
-      MountRequest rq;
-      rq.uri = s.uri;
-      rq.as = s.as;
-      rq.args = s.args;
-      rq.base_dir = x.w->mounts ? x.w->mounts->base : std::string();
+      const MountsSpec none{}; // a slot without a spec (a local, so no static state)
+      const MountRequest rq = mount_request(s, x.w->mounts ? *x.w->mounts : none);
       MountResult r;
       try {
         r = mount_loader_ ? mount_loader_(rq) : MountResult{};
@@ -7051,6 +7292,17 @@ bool Runtime::Impl::reconcile_mounts_once() {
       s.wrapper = std::make_unique<Widget>(std::move(r.wrapper));
       if (!s.wrapper->app_name.empty())
         s.name = s.wrapper->app_name;
+      // 4.5, 4.6 what it holds now, and its command line as the new text has it; its origins also
+      // where the net host reads them (4.12), for the programs built from now on.
+      s.net_origins = held_origins(*s.wrapper, s.principal);
+      if (ScopePrincipal who = scope_principal(app, x.sub); who.net_origins != s.net_origins) {
+        who.net_origins = s.net_origins;
+        if (const std::string why = set_scope_principal(app, x.sub, std::move(who)); !why.empty())
+          warn_once("ari: mount '" + s.as + "' keeps the origins it had: " + why);
+      }
+      s.tests = std::move(r.tests);
+      publish_mount_status(s);
+      publish_command_line(x.sub, *s.wrapper);
       if (s.wrapper->mount_scene && !s.wrapper->mount_scene->data.empty())
         bind_mount_data(x.sub, *s.wrapper->mount_scene); // its data: as it is now
       mount_instances_.clear();
@@ -7080,6 +7332,274 @@ void Runtime::Impl::reconcile_mounts() {
       break;
     plan_windows_menu();
   }
+}
+
+// ── asks and grants: what a mount holds, its input, signals and command line ────────────────────
+// (docs/roadmap/ARIADNE_SHELL.md 4.5, 4.6)
+
+const MountGrants *Runtime::Impl::grants_of(const std::string &sub) const {
+  if (const auto s = mount_slots_.find(sub); s != mount_slots_.end()) {
+    const Widget *w = s->second.wrapper.get();
+    return !w ? nullptr : w->grants ? w->grants.get() : &default_mount_grants_;
+  }
+  if (const auto l = load_grants_.find(sub); l != load_grants_.end())
+    return l->second ? l->second.get() : &default_mount_grants_;
+  return nullptr;
+}
+
+std::string Runtime::Impl::app_of(const std::string &scope) const {
+  std::string best;
+  for (const auto &[sub, slot] : mount_slots_)
+    if (slot.wrapper && sub.size() > best.size() && path_under(scope, sub))
+      best = sub;
+  for (const auto &[sub, g] : load_grants_)
+    if (sub.size() > best.size() && path_under(scope, sub))
+      best = sub;
+  return best;
+}
+
+std::shared_ptr<const std::set<std::string>>
+Runtime::Impl::held_at(const std::string &scope) const {
+  const std::string sub = app_of(scope);
+  if (sub.empty())
+    return nullptr;
+  const MountGrants *g = grants_of(sub);
+  return std::make_shared<const std::set<std::string>>(g ? g->held : std::set<std::string>{});
+}
+
+void Runtime::Impl::publish_command_line(const std::string &sub, const Widget &wrapper) {
+  // Its keys: bindings' defaults too, where nothing has rebound them yet (keys.h): its keys live at
+  // <sub>.keys.<id>, its own, as the document's live at keys.<id>.
+  if (wrapper.grants)
+    for (const KeyBinding &b : wrapper.grants->keys) {
+      const std::string at = resolve_bind(sub, key_binding_path(b));
+      try {
+        if (!cvc::state::instance(app).findDescendant(at))
+          write<std::string>(app, at, join_keys(b.keys));
+      } catch (const std::exception &) {
+      }
+    }
+  if (!wrapper.command_line)
+    return;
+  const MountCommandLine &cl = *wrapper.command_line;
+  try {
+    publish_document_args(app, sub, cl.argv, cl.has_args_block ? &cl.args : nullptr,
+                          cl.has_args_block ? &cl.parsed : nullptr);
+  } catch (const std::exception &e) {
+    warn_once("ari: mount '" + sub + "': its command line was not published: " + e.what());
+  }
+}
+
+void Runtime::Impl::end_frame_focus() {
+  hover_scope_ = std::move(frame_hover_);
+  keyboard_scope_ = std::move(frame_keyboard_);
+  // The focus follows the window that has it, when the backend says which: to its application,
+  // or off every application when it went to the document's own window or to none. Between moves
+  // it stays where (app-focus) put it.
+  if (backend && backend->reports_focus()) {
+    if (frame_focus_ != last_focus_window_)
+      focused_app_ = frame_focus_ ? app_of(*frame_focus_) : std::string();
+    last_focus_window_ = frame_focus_;
+  }
+  frame_focus_.reset();
+  frame_hover_.reset();
+  frame_keyboard_.reset();
+  if (!focused_app_.empty() && !grants_of(focused_app_))
+    focused_app_.clear(); // its mount went
+  // The focused application, for the document to show: its scope ("includes.<as>"), as the
+  // ariadne.apps mirror names it.
+  const std::string focus = focused_app_.empty() ? std::string()
+                            : prefix.empty()     ? focused_app_
+                            : path_under(focused_app_, prefix) && focused_app_ != prefix
+                                ? focused_app_.substr(prefix.size() + 1)
+                                : focused_app_;
+  const std::string at = resolve_bind(prefix, "ariadne.focus");
+  if (read_or<std::string>(app, at, std::string(1, '\x01')) != focus)
+    write<std::string>(app, at, focus);
+  want_mount_input();
+}
+
+void Runtime::Impl::want_mount_input() {
+  const auto takes = [this](const std::string &sub) {
+    const MountGrants *g = grants_of(sub);
+    return g && ((g->holds("delegate.keys") && (!g->on_key.empty() || !g->keys.empty())) ||
+                 (g->holds("delegate.pointer") && !g->on_pointer.empty()));
+  };
+  bool want = false;
+  for (const auto &[sub, slot] : mount_slots_)
+    want = want || takes(sub);
+  for (const auto &[sub, g] : load_grants_)
+    want = want || takes(sub);
+  mount_input_wanted_.store(want);
+}
+
+void Runtime::Impl::run_in_mount(
+    const std::string &sub, const std::string &body,
+    std::vector<std::pair<std::string, cvc::state_exec::value_t>> fields) {
+  QueuedAction a;
+  // A handler's body may be several forms, as the document's on_key: is; a binding's on: is a
+  // program or a bare event name, as it is as the document's.
+  a.event = fields.empty() && !is_expr(body) ? body : "(begin\n" + body + "\n)";
+  a.prefix = sub;
+  a.event_values = std::move(fields);
+  if (const auto fn = mount_functions.find(sub); fn != mount_functions.end())
+    a.functions = fn->second;
+  queued_events.push_back(std::move(a));
+}
+
+namespace {
+// An input event as the dict an on_key:/on_pointer: program reads as `event` (deliver_input's).
+std::vector<std::pair<std::string, cvc::state_exec::value_t>> input_fields(const InputEvent &ev) {
+  namespace se = cvc::state_exec;
+  std::vector<std::pair<std::string, se::value_t>> f;
+  f.emplace_back("kind", se::value_t(std::string(ev.kind_name())));
+  f.emplace_back("key", se::value_t(ev.key));
+  f.emplace_back("mods", se::value_t(static_cast<int64_t>(ev.mods)));
+  f.emplace_back("repeat", se::value_t(ev.repeat));
+  f.emplace_back("x", se::value_t(static_cast<double>(ev.x)));
+  f.emplace_back("y", se::value_t(static_cast<double>(ev.y)));
+  f.emplace_back("dx", se::value_t(static_cast<double>(ev.dx)));
+  f.emplace_back("dy", se::value_t(static_cast<double>(ev.dy)));
+  f.emplace_back("button", se::value_t(static_cast<int64_t>(ev.button)));
+  f.emplace_back("clicks", se::value_t(static_cast<int64_t>(ev.clicks)));
+  return f;
+}
+} // namespace
+
+void Runtime::Impl::route_mount_input() {
+  std::vector<InputEvent> events;
+  {
+    std::lock_guard<std::mutex> lock(mount_input_mutex_);
+    events.swap(mount_input_);
+  }
+  if (events.empty())
+    return;
+  // A binding of the document's, or of a mount between it and `target`, that has `key`: the key
+  // is theirs, and never reaches the application (4.6).
+  const auto bound_above = [this](const std::string &target, const std::string &key) {
+    for (const KeyBinding &b : key_bindings_)
+      if (key_matches(read_or<std::string>(app, resolve_bind(prefix, key_binding_path(b)), ""),
+                      key))
+        return true;
+    for (std::string up = app_of(target.substr(0, target.rfind('.'))); !up.empty();
+         up = app_of(up.substr(0, up.rfind('.'))))
+      if (const MountGrants *g = grants_of(up))
+        for (const KeyBinding &b : g->keys)
+          if (key_matches(read_or<std::string>(app, resolve_bind(up, key_binding_path(b)), ""),
+                          key))
+            return true;
+    return false;
+  };
+  const bool capture = key_capture_pending(); // the Keys window waits for a key: it is its
+  for (const InputEvent &ev : events) {
+    if (ev.is_keyboard()) {
+      if (capture)
+        continue;
+      const std::string key = canonical_key(ev.key);
+      if (ev.kind == InputEvent::Kind::KeyUp) { // to the application its key went down to
+        const auto it = keys_down_.find(key);
+        if (it == keys_down_.end())
+          continue;
+        const std::string target = it->second;
+        keys_down_.erase(it);
+        const MountGrants *g = grants_of(target);
+        if (g && g->holds("delegate.keys") && !g->on_key.empty())
+          run_in_mount(target, g->on_key, input_fields(ev));
+        continue;
+      }
+      // A key goes to the focused application, when it holds delegate.keys, no text field outside
+      // it has the keyboard, and no binding above it has the key.
+      const std::string &target = focused_app_;
+      const MountGrants *g = target.empty() ? nullptr : grants_of(target);
+      if (!g || !g->holds("delegate.keys") || !app_running(target))
+        continue;
+      if (keyboard_scope_ && !path_under(*keyboard_scope_, target))
+        continue;
+      if (bound_above(target, ev.key))
+        continue;
+      keys_down_[key] = target;
+      if (!g->on_key.empty())
+        run_in_mount(target, g->on_key, input_fields(ev));
+      for (const KeyBinding &b : g->keys)
+        if (!b.on.empty() &&
+            key_matches(read_or<std::string>(app, resolve_bind(target, key_binding_path(b)), ""),
+                        ev.key))
+          run_in_mount(target, b.on, {});
+      continue;
+    }
+    // The pointer: to the application whose window it is over, when it holds delegate.pointer; a
+    // button's moves and its release to the one it went down over.
+    std::string target = hover_scope_ ? app_of(*hover_scope_) : std::string();
+    if (ev.kind == InputEvent::Kind::MouseButtonDown)
+      pointer_app_ = target;
+    else if (!pointer_app_.empty() &&
+             (ev.kind == InputEvent::Kind::MouseMove || ev.kind == InputEvent::Kind::MouseButtonUp))
+      target = pointer_app_;
+    if (ev.kind == InputEvent::Kind::MouseButtonUp)
+      pointer_app_.clear();
+    const MountGrants *g = target.empty() ? nullptr : grants_of(target);
+    if (g && g->holds("delegate.pointer") && !g->on_pointer.empty() && app_running(target))
+      run_in_mount(target, g->on_pointer, input_fields(ev));
+  }
+}
+
+bool Runtime::Impl::signal_mount(const std::string &sub, const std::string &signal,
+                                 const std::string &source) {
+  namespace se = cvc::state_exec;
+  const MountGrants *g = grants_of(sub);
+  if (!g || g->on_signal.empty() || !g->takes_signal(signal) || !app_running(sub))
+    return false;
+  run_in_mount(sub, g->on_signal,
+               {{"kind", se::value_t(std::string("signal"))},
+                {"signal", se::value_t(signal)},
+                {"source", se::value_t(source)}});
+  return true;
+}
+
+bool Runtime::Impl::signal_mounts(const std::string &signal, const std::string &source) {
+  const std::string name = signal_name(signal);
+  // An interrupt (Ctrl-C, Ctrl-\) is the focused application's, as a terminal's is its foreground
+  // program's: taken, it does not end the shell.
+  if (name == "SIGINT" || name == "SIGQUIT")
+    return !focused_app_.empty() && signal_mount(focused_app_, signal, source);
+  // A request to end goes to every one, so each can save: their handlers run in the next drain,
+  // before the host's default ends the shell.
+  std::vector<std::string> subs;
+  for (const auto &[sub, slot] : mount_slots_)
+    if (slot.wrapper)
+      subs.push_back(sub);
+  for (const auto &[sub, g] : load_grants_)
+    subs.push_back(sub);
+  for (const std::string &sub : subs)
+    signal_mount(sub, signal, source);
+  return false;
+}
+
+void Runtime::Impl::take_app_requests() {
+  std::optional<std::string> focus;
+  std::vector<std::pair<std::string, std::string>> signals;
+  {
+    std::lock_guard<std::mutex> lock(app_requests_->m);
+    focus.swap(app_requests_->focus);
+    signals.swap(app_requests_->signals);
+  }
+  if (!focus && signals.empty())
+    return;
+  // The document's own application named AS: an entry of its first mounts: slot, else its load:
+  // of that id.
+  const std::string key = doc_slot_->get();
+  const auto sub_of = [&](const std::string &as) -> std::string {
+    for (const auto &[sub, slot] : mount_slots_)
+      if (slot.slot_key == key && slot.as == as && slot.wrapper)
+        return sub;
+    const std::string sub = resolve_bind(prefix, "includes." + as);
+    return load_grants_.count(sub) ? sub : std::string();
+  };
+  if (focus)
+    focused_app_ = focus->empty() ? std::string() : sub_of(*focus);
+  for (const auto &[as, signal] : signals)
+    if (const std::string sub = sub_of(as); !sub.empty())
+      signal_mount(sub, signal, "app-signal");
 }
 
 // 4.11 Each frame: every mount's memory (once every quarter second: the bytes each of its processes
@@ -7270,6 +7790,51 @@ void Runtime::Impl::bind_mount_verbs(const cvc::state_exec::environment_ptr &env
         } catch (const std::exception &) {
         }
         return se::value_t(false);
+      });
+  // ARIADNE_SHELL.md 4.6 the document's own applications (its first mounts: slot's entries, else
+  // its load:s by id): which one the keys go to, and a signal passed on, both taken by the next
+  // drain. A mounted document's programs may do neither: the focus and the signals are its
+  // parent's to give.
+  const auto mine = [own](const char *verb) {
+    if (!own)
+      throw se::dsl_error("PermissionError",
+                          std::string(verb) + ": a mounted document moves no focus and passes on "
+                                              "no signals (docs/roadmap/ARIADNE_SHELL.md 4.6)");
+  };
+  const auto id_arg = [](const char *verb, const se::value_t &v, bool empty_ok) {
+    const auto *s = std::get_if<std::string>(&v.v);
+    if (!s)
+      throw se::dsl_error("TypeError", std::string(verb) + ": AS is a string");
+    if (!(empty_ok && s->empty()) && !clean_mount_id(*s))
+      throw se::dsl_error("ValueError", std::string(verb) + ": AS '" + *s +
+                                            "' is not an id ([A-Za-z0-9_], not starting with a "
+                                            "digit)");
+    return *s;
+  };
+  se::builtins::register_fn(
+      env, "app-focus",
+      [mine, id_arg, requests = app_requests_](std::span<const se::value_t> args) -> se::value_t {
+        mine("app-focus");
+        if (args.size() != 1)
+          throw se::dsl_error("TypeError", "app-focus: expected (app-focus AS), \"\" for none");
+        const std::string as = id_arg("app-focus", args[0], true);
+        std::lock_guard<std::mutex> lock(requests->m);
+        requests->focus = as;
+        return se::value_t(true);
+      });
+  se::builtins::register_fn(
+      env, "app-signal",
+      [mine, id_arg, requests = app_requests_](std::span<const se::value_t> args) -> se::value_t {
+        mine("app-signal");
+        if (args.size() != 2)
+          throw se::dsl_error("TypeError", "app-signal: expected (app-signal AS NAME)");
+        const std::string as = id_arg("app-signal", args[0], false);
+        const auto *name = std::get_if<std::string>(&args[1].v);
+        if (!name || signal_name(*name).size() <= 3)
+          throw se::dsl_error("TypeError", "app-signal: NAME is a signal's name (\"SIGTERM\")");
+        std::lock_guard<std::mutex> lock(requests->m);
+        requests->signals.emplace_back(as, signal_name(*name));
+        return se::value_t(true);
       });
 }
 
@@ -7715,6 +8280,9 @@ std::vector<Runtime::Impl::TrayEntry> Runtime::Impl::tray_entries(const Widget &
   if (!apps_drawn)
     for (const WindowsMenuPlan::App &a : frame_apps) {
       if (!app_running(a.scope) || !a.bar)
+        continue;
+      // ARIADNE_SHELL.md 4.5 only one that holds extend.tray (granted by default; deny: takes it).
+      if (!grant_holds(a.scope, "extend.tray"))
         continue;
       const ScopedTo in(*this, a.scope, a.functions);
       for (const Widget &c : a.bar->children) {
@@ -8340,10 +8908,14 @@ bool Runtime::Impl::has_snapshot(const std::string &name) const {
 }
 
 std::function<bool(const std::string &)>
-Runtime::Impl::program_has(cvc::state_exec::exec_group *group) {
-  if (group && group->opts().affinity == cvc::state_exec::group_affinity::any)
-    return [this](const std::string &n) { return has_snapshot(n); };
-  return [this](const std::string &n) { return has(n); };
+Runtime::Impl::program_has(cvc::state_exec::exec_group *group,
+                           std::shared_ptr<const std::set<std::string>> held) {
+  const bool snapshot = group && group->opts().affinity == cvc::state_exec::group_affinity::any;
+  return [this, snapshot, held](const std::string &n) {
+    if (is_grant_token(n)) // ARIADNE_SHELL.md 4.5: the mount's own, fixed when it was made
+      return held ? held->count(n) != 0 : held_alone(n);
+    return snapshot ? has_snapshot(n) : has(n);
+  };
 }
 
 std::shared_ptr<Runtime::Impl::ActionContext>
@@ -8370,6 +8942,7 @@ Runtime::Impl::make_action_context(const std::string &scope_prefix,
   ac->scope = scope_prefix;
   ac->notify = std::make_shared<const NotifyScope>(notify_scope(scope_prefix));
   ac->account = account_for(scope_prefix); // under a mounts: entry: its frame budget
+  ac->held = held_at(scope_prefix);        // ... and what its mount holds (ARIADNE_SHELL.md 4.5)
   finish_context(*ac, group);
   return ac;
 }
@@ -8383,7 +8956,7 @@ void Runtime::Impl::finish_context(ActionContext &ac, cvc::state_exec::exec_grou
   install_providers(app, ac.env, ac.ictx, group);
   bind_own_intrinsics(ac.env, ac.ictx, group);
   install_host_verbs(ac.env, group, *ac.ictx.host, *ac.notify, ac.ictx.root_path);
-  bind_has(ac.env, program_has(group));
+  bind_has(ac.env, program_has(group, ac.held));
 }
 
 void Runtime::Impl::install_host_verbs(const cvc::state_exec::environment_ptr &env,
@@ -9031,7 +9604,8 @@ void Runtime::Impl::finish_save(const SaveJob &job, const SaveOutcome &o) {
 
 cvc::state_exec::spawn_setup
 Runtime::Impl::spawn_child(const cvc::state_exec::intrinsics_context &parent,
-                           std::shared_ptr<const NotifyScope> notify) {
+                           std::shared_ptr<const NotifyScope> notify,
+                           std::shared_ptr<const std::set<std::string>> held) {
   namespace se = cvc::state_exec;
   // Everything from the parent's context (td 4.15), nothing by path: no tree walk, so it is safe on
   // the pumping thread, and a child of a deleted chroot keeps writing its parent's detached node,
@@ -9056,6 +9630,7 @@ Runtime::Impl::spawn_child(const cvc::state_exec::intrinsics_context &parent,
   ac->ictx.spawn_context = parent.spawn_context; // grandchildren get one too
   ac->scope = parent.root_path;
   ac->notify = std::move(notify); // its parent's: mount_names is the host thread's
+  ac->held = std::move(held);     // ... and its grants, for the same reason
   se::exec_group *const group = group_ && parent.sched == &group_->sched() ? group_.get() : nullptr;
   finish_context(*ac, group);
   // A child it forks shares `ac`, which the fork's process keeps alive too (process::keep_alive).
@@ -9080,8 +9655,9 @@ void Runtime::Impl::submit_action(const QueuedAction &action) {
         make_action_context(action_prefix, action_lock_timeout(root));
     se::async_scheduler &sched = current_sched(); // the document's: its group's, else group 0's
     // A child it spawns runs in the document's scope with the action's lock default.
-    ac->ictx.spawn_context = [this, notify = ac->notify](const se::intrinsics_context &parent) {
-      return spawn_child(parent, notify);
+    ac->ictx.spawn_context = [this, notify = ac->notify,
+                              held = ac->held](const se::intrinsics_context &parent) {
+      return spawn_child(parent, notify, held);
     };
     // §4.6 event scope: a widget pointer handler runs with an `event` dict of the item's local
     // pointer coords, so the program can read (get-attr event "x"/"y"/"dx"/"dy"/"button").
@@ -9324,8 +9900,9 @@ void Runtime::Impl::ensure_resident(const std::string &channel, const std::strin
     // A child it spawns runs in the resident's scope (its document's or its mount's); one it forks
     // shares the resident's context, which lives until the Runtime does. Both are reaped once they
     // end.
-    ac->ictx.spawn_context = [this, notify = ac->notify](const se::intrinsics_context &parent) {
-      return spawn_child(parent, notify);
+    ac->ictx.spawn_context = [this, notify = ac->notify,
+                              held = ac->held](const se::intrinsics_context &parent) {
+      return spawn_child(parent, notify, held);
     };
     ac->ictx.on_child = [this](int pid) { spawned_children_.push_back(pid); };
     // Park-then-run loop on `channel`: msg-recv parks the process between deliveries and BINDS each
@@ -9684,8 +10261,12 @@ bool Runtime::post_signal(const std::string &signal, const std::string &source) 
     m_->ensure_resident(m_->signal_channel(), m_->signal_script_, m_->signal_resident_);
     resident = m_->signal_resident_.pid >= 0; // one that failed to start has warned
   }
+  // ARIADNE_SHELL.md 4.6 without an on_signal: of its own (which passes signals on itself, with
+  // app-signal), the document passes them on to its applications that hold delegate.signals: an
+  // interrupt to the focused one, which takes it over, a request to end to every one.
+  const bool taken = !resident && m_->signal_mounts(signal, source);
   if (!resident && !tapped)
-    return false; // no handler (or it failed to start): the host applies the signal's default
+    return taken; // no handler (or it failed to start): the host applies the signal's default
   namespace se = cvc::state_exec;
   std::vector<std::pair<std::string, se::value_t>> f;
   f.emplace_back("kind", se::value_t(std::string("signal")));
@@ -9726,6 +10307,15 @@ void Runtime::post_input(const InputEvent &ev) {
   // deliver it. The pump in drain() steps the resident; feed input BEFORE drain() for same-frame
   // delivery (see the header contract). Host thread, outside a pump (S1.10).
   assert_outside_pump(m_->app, m_->group_.get());
+  // ARIADNE_SHELL.md 4.6 a mounted application that holds delegate.keys or delegate.pointer may
+  // take it: the next drain routes it (route_mount_input), after the document's bindings.
+  if (m_->mount_input_wanted_.load()) {
+    std::lock_guard<std::mutex> lock(m_->mount_input_mutex_);
+    if (m_->mount_input_.size() < 1024) // a host that feeds input and never drains
+      m_->mount_input_.push_back(ev);
+  }
+  if (ev.ui)
+    return; // the host's UI took it: never the document's own
   m_->ensure_input_residents();
   if (ev.kind == InputEvent::Kind::KeyDown && m_->have_key_bindings_.load()) {
     const bool capture = m_->key_capture_pending();
@@ -9864,6 +10454,23 @@ void Runtime::run_program(std::string script, std::function<void(const std::stri
   m_->queued_events.push_back(std::move(a));
 }
 
+bool Runtime::run_program_in_mount(const std::string &as, std::string script,
+                                   std::function<void(const std::string &)> done) {
+  for (const auto &[sub, slot] : m_->mount_slots_) {
+    if (slot.as != as || !slot.wrapper)
+      continue;
+    Impl::QueuedAction a;
+    a.event = std::move(script);
+    a.prefix = sub;
+    a.done = std::move(done);
+    if (slot.wrapper->functions)
+      a.functions = slot.wrapper->functions->prelude;
+    m_->queued_events.push_back(std::move(a));
+    return true;
+  }
+  return false;
+}
+
 int Runtime::start_process(LaneProcess p) {
   namespace se = cvc::state_exec;
   // Host thread, from a step too: an exported script call and an on: hook start their activations
@@ -9892,8 +10499,9 @@ int Runtime::start_process(LaneProcess p) {
   std::shared_ptr<Impl::ActionContext> ac = m_->make_action_context(
       p.scope.empty() ? m_->prefix : p.scope,
       action ? std::optional<double>(action_lock_timeout(root)) : std::nullopt);
-  ac->ictx.spawn_context = [this, notify = ac->notify](const se::intrinsics_context &parent) {
-    return m_->spawn_child(parent, notify);
+  ac->ictx.spawn_context = [this, notify = ac->notify,
+                            held = ac->held](const se::intrinsics_context &parent) {
+    return m_->spawn_child(parent, notify, held);
   };
   ac->ictx.on_child = [raw = ac.get()](int pid) { raw->children.push_back(pid); };
   ac->done = std::move(p.done); // without one, the sweep warns of a failure as it does an action's
@@ -9981,6 +10589,10 @@ void Runtime::drain_begin() {
   // from inside render() (the deferred intent-buffer discipline, §7.2/§4.7). The keys pressed since
   // the last drain queue theirs first.
   m.run_key_bindings();
+  // ARIADNE_SHELL.md 4.6 then the applications': (app-focus) and (app-signal) since, and the input
+  // a mounted application holds the token for, each queued as an action in its mount.
+  m.take_app_requests();
+  m.route_mount_input();
   m.pump_saves(); // §5.29 the saves asked for since, and the steps of those under way
   if (m.images) // §5.11: a build without threads loads its pictures here, a step per drain
     m.images->pump();
@@ -10103,6 +10715,14 @@ std::vector<Runtime::MountState> Runtime::mounts() const {
     m.refused = slot.refused;
     m.mounted = slot.wrapper != nullptr;
     m.budget = slot.budget;
+    if (slot.wrapper) {
+      const MountGrants &g =
+          slot.wrapper->grants ? *slot.wrapper->grants : m_->default_mount_grants_;
+      m.grants.assign(g.held.begin(), g.held.end());
+      m.net_origins = slot.net_origins;
+      m.tests = slot.tests;
+    }
+    m.warnings = slot.warnings;
     if (slot.account) {
       m.steps = slot.account->last_steps.load(std::memory_order_relaxed);
       m.time = slot.account->last_seconds.load(std::memory_order_relaxed);

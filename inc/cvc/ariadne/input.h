@@ -41,6 +41,13 @@ struct InputEvent {
   int button = 0;
   int clicks = 0;
 
+  // The host's UI took it: a key while a window has the keyboard, the pointer over a window
+  // (arigl: what ImGui wants). Never the document's own on_key:/on_pointer:, its keys: bindings or
+  // the tap; only a mounted application's that holds delegate.keys or delegate.pointer and has the
+  // focus or the window (docs/roadmap/ARIADNE_SHELL.md 4.6). A host that drops what its UI takes
+  // leaves it false.
+  bool ui = false;
+
   // The event kind as a stable lowercase string, used as the "kind" field of the delivered dict
   // and by post_input to route keyboard vs pointer events to their channels. An on_* body reads
   // it with (get-attr event "kind").

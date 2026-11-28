@@ -55,6 +55,12 @@ public:
   void seed_window_geometry(const cvc::ariadne::WindowGeom &g) override; // §11.4 (pre begin_window)
   cvc::ariadne::WindowGeom window_geometry() const override; // §11.4 (post begin_window)
   void focus_next_window() override;                         // raise edge (pre begin_window)
+  // ARIADNE_SHELL.md 4.6 where the keyboard and the pointer are: the window just begun (post
+  // begin_window) and the text field just drawn (post input_text / message_input).
+  bool reports_focus() const override { return true; }
+  bool window_focused() const override { return m_windowFocused; }
+  bool window_hovered() const override { return m_windowHovered; }
+  bool item_has_keyboard() const override { return m_fieldKeyboard; }
   bool next_window_maximize(bool *maximized) override;       // §5.9 a title-bar square button
   void next_window_resizable(bool resizable) override;       // §5.9 `resizable: false`: NoResize
   void reset_layout() override; // a new document: each window is laid out afresh when next drawn
@@ -344,6 +350,9 @@ private:
   // window_geometry() / grid_tracks() return. No ImGui types (backend-header-clean).
   cvc::ariadne::WindowGeom m_pendingSeed;
   bool m_haveSeed = false;
+  // ARIADNE_SHELL.md 4.6 the last window begun had the focus / the pointer; the last text field
+  // drawn was being typed into.
+  bool m_windowFocused = false, m_windowHovered = false, m_fieldKeyboard = false;
   // The menubar's tray this frame: where its next icon goes (screen x), and whether it is drawn at
   // all (not when even the overflow icon has no room beside the menus).
   float m_trayX = 0.0f, m_trayY = 0.0f;
