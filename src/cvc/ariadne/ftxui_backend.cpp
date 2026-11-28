@@ -211,6 +211,33 @@ public:
 
 fx::Element isolated(fx::Element e) { return std::make_shared<Isolated>(std::move(e)); }
 
+// Records the box its child is laid out in. Inside a frame that scrolls, a window's body is laid
+// out past the frame's edges and moved by the frame's scroll, so this box's top-left against the
+// frame's is where the body shows from. (fx::reflect can't tell: it keeps only what shows.)
+class LayoutBox : public fx::Node {
+public:
+  LayoutBox(fx::Element child, fx::Box &box)
+      : fx::Node(fx::Elements{std::move(child)}), layout_(box) {}
+
+  void ComputeRequirement() override {
+    children_[0]->ComputeRequirement();
+    requirement_ = children_[0]->requirement();
+  }
+
+  void SetBox(fx::Box box) override {
+    layout_ = box;
+    fx::Node::SetBox(box);
+    children_[0]->SetBox(box);
+  }
+
+private:
+  fx::Box &layout_;
+};
+
+fx::Decorator layout_box(fx::Box &box) {
+  return [&box](fx::Element e) { return std::make_shared<LayoutBox>(std::move(e), box); };
+}
+
 // §5.20 where a rich text's links are on the screen, as of the frame last drawn: each piece of a
 // link (one a line, for a link that wraps) and its cells. The hit-test reads it (Impl::link_at).
 struct RichHits {
@@ -985,6 +1012,10 @@ struct FtxuiBackend::Impl {
     // and view_h its height and the rows that show, as of the last layout.
     int scroll_top = -1;
     int content_h = 0, view_h = 0;
+    // Hosted (render_window), sideways as well: a host's scroll bar sets scroll_left (-1: it
+    // follows the focus), content_w / view_w the body's width and the columns that show.
+    int scroll_left = -1;
+    int content_w = 0, view_w = 0;
   };
   struct Edit {
     std::string text;
@@ -1646,7 +1677,7 @@ struct FtxuiBackend::Impl {
     set_focus(order[static_cast<std::size_t>(i)]);
     // Moved by the keys: its window follows the focus again, however the wheel left it.
     if (const Item *it = find_item(last, focused); it && windows.count(it->win))
-      windows[it->win].scroll_top = -1;
+      windows[it->win].scroll_top = windows[it->win].scroll_left = -1;
   }
 
   // Scroll window `win`'s body `dir` notches (3 rows each, up < 0), from where it shows now.
@@ -3265,7 +3296,7 @@ void FtxuiBackend::end_window() {
   Impl::Win &wm = m.windows[f.id];
   wm.content_h = content_h;
   wm.view_h = scroll_y ? win_h - 2 - (scroll_x ? 1 : 0) : 0;
-  body = body | fx::reflect(m.boxes["wbody|" + f.id]);
+  body = body | layout_box(m.boxes["wbody|" + f.id]);
   if (scroll_y && wm.scroll_top >= 0) {
     wm.scroll_top = std::min(wm.scroll_top, std::max(0, content_h - wm.view_h));
     body = Impl::scrolled(body, wm.scroll_top, wm.view_h);
@@ -5107,19 +5138,36 @@ TermRows FtxuiBackend::render_window(const std::string &id, int width, int heigh
   if (b == m.last.bodies.end() || width <= 0 || height <= 0)
     return rows;
   m.body_h[id] = height;
-  // The wheel's scroll, as in a window of our own (end_window): the host's rows are the view.
+  // The wheel's scroll, as in a window of our own (end_window): the host's cells are the view.
+  // A body wider than them scrolls sideways too, under the host's scroll bar (scroll_window_to).
   fx::Element body = b->second.body;
   if (body) {
     body->ComputeRequirement();
     Impl::Win &w = m.windows[id];
+    w.content_w = body->requirement().min_x;
     w.content_h = body->requirement().min_y;
+    w.view_w = width;
     w.view_h = height;
-    body = body | fx::reflect(m.boxes["wbody|" + id]);
-    if (w.scroll_top >= 0 && w.content_h > height) {
-      w.scroll_top = std::min(w.scroll_top, w.content_h - height);
-      body = Impl::scrolled(body, w.scroll_top, height);
+    const bool tall = w.content_h > height, wide = w.content_w > width;
+    if (!tall)
+      w.scroll_top = -1;
+    if (!wide)
+      w.scroll_left = -1;
+    if (w.scroll_top >= 0 || w.scroll_left >= 0) {
+      // Moved on one axis: the other stays where it shows now (it no longer follows the focus,
+      // which would pull the moved one back).
+      const HostedScroll now = window_scroll(id);
+      if (tall)
+        w.scroll_top = std::min(w.scroll_top >= 0 ? w.scroll_top : now.top, w.content_h - height);
+      if (wide)
+        w.scroll_left =
+            std::min(w.scroll_left >= 0 ? w.scroll_left : now.left, w.content_w - width);
     }
-    body = body | fx::yframe | fx::reflect(m.boxes["wview|" + id]);
+    body = body | layout_box(m.boxes["wbody|" + id]);
+    if (w.scroll_top >= 0 || w.scroll_left >= 0) // a frame centres the focus: half a view on
+      body = body | fx::focusPosition(std::max(0, w.scroll_left) + (width - 1) / 2,
+                                      std::max(0, w.scroll_top) + (height - 1) / 2);
+    body = body | (wide ? fx::frame : fx::yframe) | fx::reflect(m.boxes["wview|" + id]);
   }
   fx::Elements stack{body ? body : fx::emptyElement()};
   for (const fx::Element &p : b->second.popups)
@@ -5146,6 +5194,32 @@ TermRows FtxuiBackend::render_window(const std::string &id, int width, int heigh
     }
   }
   return rows;
+}
+
+FtxuiBackend::HostedScroll FtxuiBackend::window_scroll(const std::string &id) const {
+  const Impl &m = *m_;
+  HostedScroll s;
+  const auto w = m.windows.find(id);
+  if (w == m.windows.end())
+    return s;
+  s.content_w = w->second.content_w;
+  s.content_h = w->second.content_h;
+  s.view_w = w->second.view_w;
+  s.view_h = w->second.view_h;
+  // The body's box is its whole layout, moved by the frame's scroll (layout_box); the view's is
+  // what shows.
+  const auto body = m.boxes.find("wbody|" + id), view = m.boxes.find("wview|" + id);
+  if (body != m.boxes.end() && view != m.boxes.end()) {
+    s.left = std::max(0, view->second.x_min - body->second.x_min);
+    s.top = std::max(0, view->second.y_min - body->second.y_min);
+  }
+  return s;
+}
+
+void FtxuiBackend::scroll_window_to(const std::string &id, int left, int top) {
+  Impl::Win &w = m_->windows[id];
+  w.scroll_left = std::max(0, left);
+  w.scroll_top = std::max(0, top);
 }
 
 bool FtxuiBackend::feed_window(Runtime &rt, const std::string &id, const TermEvent &ev) {
@@ -5671,6 +5745,8 @@ std::vector<FtxuiBackend::HostedTrayIcon> FtxuiBackend::hosted_tray() const { re
 bool FtxuiBackend::hosted_root() const { return false; }
 std::string FtxuiBackend::tooltip() const { return {}; }
 TermRows FtxuiBackend::render_window(const std::string &, int, int) { return {}; }
+FtxuiBackend::HostedScroll FtxuiBackend::window_scroll(const std::string &) const { return {}; }
+void FtxuiBackend::scroll_window_to(const std::string &, int, int) {}
 bool FtxuiBackend::feed_window(Runtime &, const std::string &, const TermEvent &) { return false; }
 void FtxuiBackend::activate_menu_item(Runtime &, const std::string &) {}
 FtxuiBackend::HostedContextMenu FtxuiBackend::hosted_context_menu() const { return {}; }

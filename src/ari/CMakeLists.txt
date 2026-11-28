@@ -387,6 +387,13 @@ if(CVC_BUILD_TESTS AND NOT EMSCRIPTEN AND CMAKE_SYSTEM_NAME STREQUAL "Linux"
         COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/reopen_refit_test.sh" $<TARGET_FILE:ari>
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/reopen_refit.ari" ${_backend})
       set_tests_properties(ari_run_reopen_refit_${_backend} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
+      # The mouse wheel over a window whose content is taller than it (tests/wheel_scroll.ari),
+      # beside the window in front: it scrolls the window under the pointer, and on tvision that
+      # window has a scroll bar on its frame.
+      add_test(NAME ari_run_wheel_scroll_${_backend}
+        COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/wheel_scroll_test.sh" $<TARGET_FILE:ari>
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/wheel_scroll.ari" ${_backend})
+      set_tests_properties(ari_run_wheel_scroll_${_backend} PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
       # A right-click menu (§5.30, tests/context_menu.ari) opened by the key a terminal sends for
       # Shift+F10, worked with Down, Enter and Esc; an item runs with the menu's event.
       add_test(NAME ari_run_context_menu_${_backend}

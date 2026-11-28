@@ -4019,8 +4019,16 @@ How each backend does it:
   window stays where the wheel left it: a click there focuses a widget without jumping to it.
   Tab and the arrows move the focus and the window follows it again. The wheel over a window
   that fits, or over the background, is left to the host and the document (`on_pointer:`), as
-  before. On the tvision desktop the wheel over a window's body scrolls it the same way.
-  `ariadne_ftxui_test`'s `TheWheelScrolls*` tests turn it.
+  before. On the tvision desktop the wheel over a window scrolls it the same way, whether or
+  not it is the window in front (libcvc 4.0.11; before it, the window in front took the wheel
+  wherever the pointer was). There the scroll bars are tvision's own, on the window's frame: a
+  vertical one in its right edge when the body is taller than the window, a horizontal one in
+  its bottom edge when it is wider, each with its arrows, its track and a thumb to drag. A
+  window narrower than its body scrolls sideways under that bar instead of cutting the body off,
+  and a sideways turn of the wheel moves it. After a bar or the wheel moves the body it stays
+  there until Tab or an arrow key moves the focus.
+  `ariadne_ftxui_test`'s `TheWheelScrolls*` and `AHostScrollBar*` tests turn it, and
+  `ari_run_wheel_scroll_*` on a real terminal.
   On the tvision desktop, tvision's frame holds the window, and the host sizes that frame on every
   walk, in each axis: the document's size where it gave one, else the content's. That stops when
   the user resizes the window (the frame's corner, Ctrl-F5 then Shift and the arrows, or the zoom
