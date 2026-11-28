@@ -208,6 +208,31 @@ def skeletonize_job(geom, params=None, **keywords):
         raise TypeError("skeletonize_job: pass a skeleton_params or keywords, not both")
     return _skeletonize_job(geom, params)
 %}
+// The Tight Cocone job (cvc/geometry/tight_cocone.h; pycvc_tight_cocone.i wraps the result and its
+// parameters): pycvc.tight_cocone_job(g, robust=True, ...) or (g, pycvc.tight_cocone_params(...)).
+PYCVC_RESULT_JOB(result_job_tight_cocone_result, cvc::tight_cocone_result)
+%exception _tight_cocone_job {
+  try {
+    $action
+  } catch (const std::exception &e) {
+    SWIG_exception(SWIG_RuntimeError, e.what());
+  }
+}
+%inline %{
+std::unique_ptr<cvc::result_job<cvc::tight_cocone_result>>
+_tight_cocone_job(const cvc::geometry &g, const cvc::tight_cocone_params &p) {
+  return cvc::tight_cocone_job(g, p);
+}
+%}
+%pythoncode %{
+def tight_cocone_job(geom, params=None, **keywords):
+    """tight_cocone as a resumable job: step(budget), progress(), phase(), cancel(), result()."""
+    if params is None:
+        params = tight_cocone_params(**keywords)
+    elif keywords:
+        raise TypeError("tight_cocone_job: pass a tight_cocone_params or keywords, not both")
+    return _tight_cocone_job(geom, params)
+%}
 // The tiler job (cvc/geometry/tiler.h; pycvc_tiler.i wraps the result and its parameters):
 // pycvc.tile_contours_job(stack, curation_delta=0.01, ...) or (stack, pycvc.tile_params(...)).
 PYCVC_RESULT_JOB(result_job_tile_result, cvc::tile_result)

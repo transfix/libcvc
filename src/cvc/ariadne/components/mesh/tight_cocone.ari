@@ -1,0 +1,195 @@
+# tight_cocone.ari — a REUSABLE Ariadne component: Tight Cocone, a watertight surface through a
+# point cloud (cvc::tight_cocone, the VolumeRover TightCocone port; docs/roadmap/
+# VOLROVER-TEXMOL-APPS-ROADMAP.md §2.4, V1). VolumeRover2's Tools > Tight Cocone.
+#
+# It views a point set the app put on the state tree, a dataset's geometry (only its points are
+# read: a point cloud, or a mesh's vertices), and never loads a file: opening one is the app's job
+# (a `data:` entry). Run starts cocone.tight-start on it, a sliced job beside the frame (on
+# single-threaded wasm too), its progress in the window; Stop ends it at its next step. When the
+# job is done, (tight-cocone-step) puts the surface on the same tree as a new geometry, the output
+# `surface` of the result dataset (data-put), where a scene node draws it:
+#     - node: surface
+#       source: { data: points, item: surface }   # drawn once the first run is done
+# Each run replaces it (the dataset's rev goes up, so every node viewing it redraws).
+#
+# The parameters are tight_cocone_params' (cvc/geometry/tight_cocone_params.h), under
+# <job>.params.*, seeded from the op's table (params.defaults "cocone.tight") the first time.
+# Robust Cocone first leaves out the points off a smooth surface, for a noisy sample; the angles
+# are in radians.
+#
+# Import the file for its unit and its functions:
+#   tight_cocone   the window
+#       args: source (points)   the dataset holding the points (data.<source>)
+#             item (geometry)   its output with the points
+#             result (points)   the dataset the surface goes in, as its output `surface`
+#             job (tight_cocone)  the state prefix of the job's keys: busy, status, progress,
+#                               phase, pid, result (cvc/core/job_keys.h), params.*, info.*
+#             title (Tight Cocone), id (tight_cocone)
+#   (tight-cocone-step JOB RESULT)   call from on_tick: seeds JOB.params once, and once a run is
+#                               done puts its surface in the dataset RESULT and its counts under
+#                               JOB.info.{triangles, surface_points, points, duplicates,
+#                               robust_dropped, cells, inside_cells, warnings}
+#   (tight-cocone-run JOB SOURCE ITEM)   the Run button: starts a run on data.SOURCE.ITEM with
+#                               JOB.params; returns the task's pid
+#   (tight-cocone-defaults JOB)  the Defaults button: the table's defaults back in JOB.params
+#
+# Use it:
+#     import: cvc://components/mesh/tight_cocone.ari
+#     data:
+#       points: { uri: scan.off, as: mesh }
+#     on_tick: (tight-cocone-step "tight_cocone" "points")
+#     windows:
+#       - include: tight_cocone
+#     scene:
+#       nodes:
+#         - { node: surface, source: { data: points, item: surface } }
+
+functions: |
+  ; The table's fields, in its order (tight_cocone_params).
+  (defun tight-cocone-fields ()
+    (list "robust" "big_ball_ratio" "theta_if" "theta_ff" "cocone_phi" "sharp_phi" "flat_phi"
+          "flatness_ratio"))
+  ; The table's defaults in JOB.params.*: a bool as 1 or 0, a number as its shortest text.
+  (defun tight-cocone-defaults (job)
+    (set d (params.defaults "cocone.tight"))
+    (for k (tight-cocone-fields)
+      (set v (get-attr d k))
+      (state-set (str-concat job ".params." k)
+                 (if (= k "robust") (if v "1" "0") (str v)))))
+  ; JOB.params.* seeded from the table the first time.
+  (defun tight-cocone-seed (job)
+    (set v (state-get (str-concat job ".params.cocone_phi")))
+    (if (or (is-null v) (= v "")) (tight-cocone-defaults job) #f))
+  ; Start a run on data.SOURCE.ITEM with JOB.params: its keys under JOB, its pid returned.
+  (defun tight-cocone-run (job source item)
+    (tight-cocone-seed job)
+    (set p (dict))
+    (for k (tight-cocone-fields)
+      (set-attr p k (state-get (str-concat job ".params." k))))
+    (cocone.tight-start (str-concat "data." source "." item) p job))
+  ; From on_tick: once the run JOB last started is done, its surface as RESULT's output `surface`
+  ; and its counts under JOB.info.*. JOB.stored names the last run taken in.
+  (defun tight-cocone-step (job result)
+    (tight-cocone-seed job)
+    (set pid (state-get (str-concat job ".pid")))
+    (if (and (not (is-null pid)) (!= pid "")
+             (= (state-get (str-concat job ".busy")) "0")
+             (!= pid (state-get (str-concat job ".stored"))))
+      (begin
+        (state-set (str-concat job ".stored") pid)
+        (set r (state-data-get (str-concat job ".result")))
+        (if r
+          (begin
+            (data-put result "surface" (get-attr r "surface"))
+            (for k (list "triangles" "surface_points" "points" "duplicates" "robust_dropped"
+                         "cells" "inside_cells")
+              (state-set (str-concat job ".info." k) (str (get-attr r k))))
+            (set w "")
+            (for line (get-attr r "warnings")
+              (set w (if (= w "") line (str-concat w "; " line))))
+            (state-set (str-concat job ".info.warnings") w))
+          #f))
+      #f))
+
+units:
+  tight_cocone:
+    args: { source: points, item: geometry, result: points, job: tight_cocone, title: Tight Cocone, id: tight_cocone }
+    window: "{title}"
+    id: "{id}"
+    children:
+      - text: "points"
+        bind: data.{source}.status
+        tooltip: "the dataset the points come from (data.{source}.{item}): ready once the app has it"
+      - text: "status"
+        bind: "{job}.status"
+      - progress: progress
+        bind: "{job}.progress"
+        hi: 100
+        overlay: "{job}.phase"
+      - text: "triangles"
+        bind: "{job}.info.triangles"
+      - text: "surface points"
+        bind: "{job}.info.surface_points"
+        tooltip: "the input points the surface goes through"
+      - text: "input points"
+        bind: "{job}.info.points"
+      - text: "left out"
+        bind: "{job}.info.robust_dropped"
+        tooltip: "the points Robust Cocone left out (0 without it)"
+      - text: "cells inside"
+        bind: "{job}.info.inside_cells"
+        tooltip: "the Delaunay cells inside the surface, of {job}.info.cells"
+      - text: "warnings"
+        bind: "{job}.info.warnings"
+      - separator
+      - text: "Robust Cocone"
+      - checkbox: Robust Cocone first
+        bind: "{job}.params.robust"
+        def: false
+        tooltip: "leave out the points off a smooth surface first (a noisy sample)"
+      - slider_float: Big-ball ratio
+        bind: "{job}.params.big_ball_ratio"
+        def: 0.0625
+        lo: 0.0
+        hi: 1.0
+        fmt: "%.4f"
+        tooltip: "a Delaunay ball is big when its squared radius is over this times a corner's mean squared nearest-neighbour distance"
+      - slider_float: Deep with infinity
+        bind: "{job}.params.theta_if"
+        def: 0.087266462599716474
+        lo: 0.0
+        hi: 1.5708
+        fmt: "%.3f rad"
+        tooltip: "theta_if: a big ball meets the infinite one deeply below this angle"
+      - slider_float: Deep between balls
+        bind: "{job}.params.theta_ff"
+        def: 0.17453292519943295
+        lo: 0.0
+        hi: 3.1416
+        fmt: "%.3f rad"
+        tooltip: "theta_ff: two big balls meet deeply below this angle"
+      - separator
+      - text: "Tight Cocone"
+      - slider_float: Cocone angle
+        bind: "{job}.params.cocone_phi"
+        def: 0.39269908169872414
+        lo: 0.0
+        hi: 1.5708
+        fmt: "%.3f rad"
+        tooltip: "half the cocone's opening angle around the surface"
+      - slider_float: Flat angle
+        bind: "{job}.params.flat_phi"
+        def: 1.0471975511965976
+        lo: 0.0
+        hi: 1.5708
+        fmt: "%.3f rad"
+        tooltip: "the normal deviation allowed between cocone neighbours of a flat point"
+      - slider_float: Flatness ratio
+        bind: "{job}.params.flatness_ratio"
+        def: 1.4399999999999999
+        lo: 1.0
+        hi: 4.0
+        fmt: "%.3f"
+        tooltip: "the squared thinness factor of a flat point"
+      - slider_float: Sharp angle
+        bind: "{job}.params.sharp_phi"
+        def: 2.0943951023931953
+        lo: 0.0
+        hi: 3.1416
+        fmt: "%.3f rad"
+        tooltip: "facets meeting at more than this dihedral angle make a sharp edge"
+      - type: group
+        layout: { kind: horizontal }
+        children:
+          - button: Run
+            on: (tight-cocone-run "{job}" "{source}" "{item}")
+            disabled_when: (= (state-get "{job}.busy") "1")
+            tooltip: "a watertight surface through the points, with these parameters, as a job beside the frame"
+          - button: Stop
+            on: (job.cancel (int (state-get "{job}.pid")))
+            enabled_when: (= (state-get "{job}.stoppable") "1")
+            tooltip: "end the run at its next step; the surface from the last run stays"
+          - button: Defaults
+            on: (tight-cocone-defaults "{job}")
+            disabled_when: (= (state-get "{job}.busy") "1")
+            tooltip: "the parameters' defaults (the legacy library's)"

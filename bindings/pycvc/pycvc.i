@@ -1461,6 +1461,7 @@ struct pycvc_py_conversion {
 %include "pycvc_params.i"
 %include "pycvc_contour_tree.i"
 %include "pycvc_skeleton.i"
+%include "pycvc_tight_cocone.i"
 %include "pycvc_contours.i"
 %include "pycvc_point_classes.i"
 %include "pycvc_segmentation.i"

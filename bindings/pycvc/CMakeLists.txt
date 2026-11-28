@@ -335,6 +335,7 @@ if(CVC_BUILD_PYCVC_CORE)
              pycvc_params:test_pycvc_params.py
              pycvc_jobs:test_pycvc_jobs.py
              pycvc_skeleton:test_pycvc_skeleton.py
+             pycvc_tight_cocone:test_pycvc_tight_cocone.py
              pycvc_contours:test_pycvc_contours.py
              pycvc_point_classes:test_pycvc_point_classes.py
              pycvc_segmentation:test_pycvc_segmentation.py

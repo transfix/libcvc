@@ -11,7 +11,8 @@ if(NOT EXISTS "${VOLROVER_DIR}/src/Segmentation/GenSeg/segment.cpp" AND
    NOT EXISTS "${VOLROVER_DIR}/src/Skeletonization/Skeletonization.cpp" AND
    NOT EXISTS "${VOLROVER_DIR}/src/SecondaryStructures/skel.cpp" AND
    NOT EXISTS "${VOLROVER_DIR}/src/ContourTiler/tiler.cpp" AND
-   NOT EXISTS "${VOLROVER_DIR}/src/PocketTunnel/pocket_tunnel.cpp")
+   NOT EXISTS "${VOLROVER_DIR}/src/PocketTunnel/pocket_tunnel.cpp" AND
+   NOT EXISTS "${VOLROVER_DIR}/src/TightCocone/tight_cocone.cpp")
   message(FATAL_ERROR "VOLROVER_DIR (${VOLROVER_DIR}) is not a volrover checkout with a library "
                       "this directory builds")
 endif()
@@ -392,5 +393,88 @@ if(EXISTS "${VOLROVER_DIR}/src/PocketTunnel/pocket_tunnel.cpp")
     message(STATUS "volrover-goldens: PocketTunnel with CGAL ${CGAL_VERSION}")
   else()
     message(STATUS "volrover-goldens: no CGAL or Boost, so no PocketTunnel")
+  endif()
+endif()
+
+# TightCocone (src/TightCocone), when the checkout has it and CGAL is found, as for Skeletonization:
+# the point-cloud entry, surfaceReconstruction(const cvcgeom_t &, const Parameters &), which
+# VolumeRover2's Tools > Tight Cocone calls. volrover's own CI builds with -DDISABLE_CGAL=ON, so
+# this is the first build of it in years. Compiled from copies in the build tree; each patch must
+# apply, or configuring fails:
+#   - tcocone.cpp is Skeletonization's, with the same two CGAL_assertion()s whose has_vertex()
+#     calls fill the indices the code then uses (a release build compiles them out): plain calls;
+#   - tight_cocone_points.cpp is tight_cocone.cpp's point-cloud entry alone, with the globals it
+#     reads (bounding_box, BB_SCALE). The file's volume entries (GVF, segment.cpp, VolMagick) are
+#     left out: the port's volume path comes later. In the robust branch, the min-max span is reset
+#     before the second triangulation when the driver's reset_box=1 asks (the legacy never resets
+#     it; the port does), so make_goldens.py can record whether that changes the surface.
+# tightcocone_driver.cpp stands in for main.cpp.unused. shim/cvcraw_geometry/cvcgeom.h stands in
+# for the legacy cvcgeom_t, and shim/VolMagick/VolMagick.h declares the Volume the header names.
+if(EXISTS "${VOLROVER_DIR}/src/TightCocone/tight_cocone.cpp")
+  find_package(CGAL CONFIG QUIET)
+  find_package(Boost QUIET)
+  if(CGAL_FOUND AND Boost_FOUND)
+    set(_tc_dir "${VOLROVER_DIR}/src/TightCocone")
+    set(_tc_out "${CMAKE_CURRENT_BINARY_DIR}/tightcocone_src")
+    file(MAKE_DIRECTORY "${_tc_out}")
+    set(_tc_in "${_tc_dir}/tcocone.cpp")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_tc_in}")
+    file(READ "${_tc_in}" _text)
+    foreach(_v v w)
+      set(_old "CGAL_assertion(ch->has_vertex(${_v}, i${_v}) && (i${_v} != -1));")
+      string(FIND "${_text}" "${_old}" _at)
+      if(_at EQUAL -1)
+        message(FATAL_ERROR "volrover-goldens: the patch for TightCocone's tcocone.cpp does not "
+                            "apply: ${_old}")
+      endif()
+      string(REPLACE "${_old}" "ch->has_vertex(${_v}, i${_v});" _text "${_text}")
+    endforeach()
+    file(WRITE "${_tc_out}/tcocone.cpp" "${_text}")
+    set(_tc_in "${_tc_dir}/tight_cocone.cpp")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_tc_in}")
+    file(READ "${_tc_in}" _text)
+    set(_entry "CVCGEOM_NAMESPACE::cvcgeom_t surfaceReconstruction(const CVCGEOM_NAMESPACE::cvcgeom_t& pointCloud")
+    string(FIND "${_text}" "${_entry}" _at)
+    string(FIND "${_text}" "${_entry}" _last REVERSE)
+    if(_at EQUAL -1 OR NOT _at EQUAL _last)
+      message(FATAL_ERROR "volrover-goldens: TightCocone's point-cloud entry is not in "
+                          "tight_cocone.cpp once")
+    endif()
+    string(SUBSTRING "${_text}" ${_at} -1 _fn)
+    set(_clear "triang.clear();")
+    string(FIND "${_fn}" "${_clear}" _at)
+    string(FIND "${_fn}" "${_clear}" _last REVERSE)
+    if(_at EQUAL -1 OR NOT _at EQUAL _last)
+      message(FATAL_ERROR "volrover-goldens: the robust branch's triang.clear() is not in "
+                          "TightCocone's point-cloud entry once")
+    endif()
+    string(REPLACE "${_clear}"
+      "if (tightcocone_driver_reset_box) { x_min = DBL_MAX; x_max = -DBL_MAX; y_min = DBL_MAX; y_max = -DBL_MAX; z_min = DBL_MAX; z_max = -DBL_MAX; } triang.clear();"
+      _fn "${_fn}")
+    file(WRITE "${_tc_out}/tight_cocone_points.cpp"
+      "// tight_cocone.cpp's point-cloud entry alone (tools/volrover-goldens/CMakeLists.txt).\n"
+      "#include <TightCocone/datastruct.h>\n#include <TightCocone/init.h>\n"
+      "#include <TightCocone/rcocone.h>\n#include <TightCocone/tcocone.h>\n"
+      "#include <TightCocone/medax.h>\n#include <TightCocone/util.h>\n"
+      "#include <TightCocone/robust_cc.h>\n#include <TightCocone/op.h>\n"
+      "#include <TightCocone/tight_cocone.h>\n#include <iostream>\n"
+      "namespace TightCocone\n{\n  vector<double> bounding_box;\n  const double BB_SCALE = 1.0;\n"
+      "  int tightcocone_driver_reset_box = 0;\n  ${_fn}")
+    set(_tc_sources "${_tc_out}/tcocone.cpp" "${_tc_out}/tight_cocone_points.cpp")
+    foreach(_f init medax op rcocone robust_cc util)
+      list(APPEND _tc_sources "${_tc_dir}/${_f}.cpp")
+    endforeach()
+    add_executable(tightcocone_legacy tightcocone_driver.cpp ${_tc_sources})
+    volrover_legacy(tightcocone_legacy)
+    target_link_libraries(tightcocone_legacy PRIVATE CGAL::CGAL)
+    target_include_directories(tightcocone_legacy PRIVATE ${Boost_INCLUDE_DIRS})
+    set_target_properties(tightcocone_legacy PROPERTIES CXX_STANDARD 17)
+    target_compile_definitions(tightcocone_legacy PRIVATE _USE_MATH_DEFINES)
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+      target_compile_options(tightcocone_legacy PRIVATE -frounding-math)
+    endif()
+    message(STATUS "volrover-goldens: TightCocone with CGAL ${CGAL_VERSION}")
+  else()
+    message(STATUS "volrover-goldens: no CGAL or Boost, so no TightCocone")
   endif()
 endif()

@@ -26,6 +26,8 @@
 
 #include "skeleton_stages.h"
 
+#include "../cocone/triangulate.h"
+
 #include <algorithm>
 #include <atomic>
 #include <cstdio>
@@ -41,7 +43,6 @@ namespace {
 using cocone::Point;
 
 constexpr double BB_SCALE = 1.0; // the legacy box: the points' box, grown by its span each way
-constexpr std::size_t BUILD_UNITS = 16; // tet_complex_builder units per skeleton unit
 
 // A sheet's colour: a fixed palette by sheet rank (the legacy code drew rand() colours).
 geometry::color_t sheet_colour(int rank) {
@@ -81,7 +82,7 @@ private:
 
 // The per-call context of §1.3: everything the legacy code kept in globals or locals of
 // skeletonize(), and the coroutine that runs it.
-struct skeleton_stepper::impl {
+struct skeleton_stepper::impl : cocone::stage_progress {
   std::vector<std::array<double, 3>> points;
   std::optional<geometry> source; // the geometry to read the points from, until they are read
   skeleton_params params;
@@ -89,11 +90,8 @@ struct skeleton_stepper::impl {
   std::atomic<bool> cancel{false};
   bool finished = false, failed = false;
   std::exception_ptr error;
-  const char *phase_name = "checking";
-  double prog = 0.0;
 
   // the context
-  std::optional<tet_complex_builder> builder;
   cocone::Triangulation triang;
   cocone::diagnostics diag;
   std::vector<double> bounding_box;
@@ -103,61 +101,11 @@ struct skeleton_stepper::impl {
   std::size_t duplicates = 0, robust_dropped = 0;
   skeleton result;
 
-  // progress: the current stage's span of [0, 1] and its units
-  double stage_lo = 0.0, stage_hi = 0.0;
-  std::size_t stage_units = 0, stage_estimate = 1;
-
   cocone::step_task task;
 
-  void stage(const char *name, double lo, double hi, std::size_t estimate) {
-    phase_name = name;
-    stage_lo = lo;
-    stage_hi = hi;
-    stage_units = 0;
-    stage_estimate = std::max<std::size_t>(estimate, 1);
-  }
-  void note_progress(double within) {
-    const double p = stage_lo + (stage_hi - stage_lo) * std::min(1.0, std::max(0.0, within));
-    prog = std::max(prog, std::min(p, 1.0));
-  }
-
   cocone::step_task run();
-  cocone::step_task triangulate(std::vector<std::array<double, 3>> pts, double lo, double hi);
   cocone::step_task output();
 };
-
-// Build a tet_complex of pts into triang, BUILD_UNITS of the builder's units per unit, its
-// phases reported as ours.
-cocone::step_task skeleton_stepper::impl::triangulate(std::vector<std::array<double, 3>> pts,
-                                                      double lo, double hi) {
-  using namespace cvc::cocone;
-  stage(phase_name, lo, lo, 1);
-  builder.emplace(std::move(pts), tet_complex_options{});
-  for (;;) {
-    bool ready = false;
-    try {
-      ready = builder->step(BUILD_UNITS);
-    } catch (const tet_complex_error &e) {
-      std::string what = e.what();
-      const std::string prefix = "tet_complex: ";
-      if (what.rfind(prefix, 0) == 0)
-        what = what.substr(prefix.size());
-      throw skeleton_error("skeletonize: " + what);
-    }
-    phase_name = builder->phase();
-    prog = std::max(prog, lo + (hi - lo) * builder->progress());
-    if (ready)
-      break;
-    SK_UNIT;
-  }
-  tet_complex t = builder->take();
-  builder.reset();
-  duplicates += std::size_t(t.num_points() - t.num_vertices());
-  triang.reset(std::move(t));
-  stage("building", hi, hi + 0.02, triang.fill_total());
-  while (!triang.fill_one())
-    SK_UNIT;
-}
 
 cocone::step_task skeleton_stepper::impl::run() {
   using namespace cvc::cocone;
@@ -192,7 +140,8 @@ cocone::step_task skeleton_stepper::impl::run() {
   // ---- 1. Robust Cocone (optional): the points on a smooth surface ----
   std::vector<std::array<double, 3>> tri_points;
   if (P.robust) {
-    SK_RUN(triangulate(std::move(points), 0.0, tri_span));
+    SK_RUN(triangulate<skeleton_error>(std::move(points), "skeletonize", triang, *this, 0.0,
+                                       tri_span, duplicates));
     at = tri_span + 0.02;
     stage("voronoi", at, at + 0.03, triang.num_cells() + triang.number_of_vertices());
     SK_RUN(initialize(triang));
@@ -234,7 +183,8 @@ cocone::step_task skeleton_stepper::impl::run() {
       bounding_box.push_back(hi3[k] + BB_SCALE * (hi3[k] - lo3[k]));
     }
   }
-  SK_RUN(triangulate(std::move(tri_points), at, at + tri_span));
+  SK_RUN(triangulate<skeleton_error>(std::move(tri_points), "skeletonize", triang, *this, at,
+                                     at + tri_span, duplicates));
   at += tri_span + 0.02;
   const std::size_t C = triang.num_cells(), V = triang.number_of_vertices();
 

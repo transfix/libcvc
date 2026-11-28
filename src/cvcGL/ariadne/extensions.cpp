@@ -35,6 +35,7 @@
 #include <cvc/gl/ariadne/volume_render_nodes.h>
 #include <cvc/gl/ariadne/volume_slice_nodes.h>
 #include <cvc/gl/ariadne/world_nodes.h>
+#include <cvc/geometry/tight_cocone_intrinsics.h> // install_tight_cocone_intrinsics
 #include <cvc/volume/segmentation_intrinsics.h> // install_segmentation_intrinsics
 #include <cvc/volume/volume_filter_intrinsics.h> // install_volume_filter_intrinsics
 #include <cvc/volume/volume_grid_contour_intrinsics.h>
@@ -61,6 +62,7 @@ void register_cvcgl_extensions(cvc::app &app) {
   register_sdf_data_generator(app);     // data: { generate: sdf } (a volume the app holds)
   cvc::install_volume_filter_intrinsics(app); // (volume.filter vol) in its documents' programs
   register_contour_lab_node_type(app);  // "contour_lab"
+  cvc::install_tight_cocone_intrinsics(app); // (cocone.tight g) in its documents' programs
   register_swarm_node_types(app);       // "nav_swarm", "swarm_layer"
   register_entity_node_types(app);      // "entity_layer"
 }

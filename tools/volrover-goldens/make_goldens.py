@@ -39,6 +39,14 @@ SecondaryStructures (src/SecondaryStructures), per case:
                       candidate runs, the helix axes and the sheets' polygons
   <case>.json         the case, the volrover sha, the platform, the counts and the SHA-256
 
+TightCocone (src/TightCocone), per case:
+  <case>.tc.txt       what tightcocone_driver.cpp writes: the legacy bounding box, the returned
+                      surface's counts and its triangles by their corners' coordinates; --check
+                      compares it by content (the triangles as a set), not byte for byte
+  <case>.json         the case, the volrover sha, the platform, the counts, the SHA-256 and, for a
+                      robust case, whether resetting the box between the two triangulations (the
+                      port does; the legacy does not) changed the surface
+
     python3 tools/volrover-goldens/make_goldens.py            # write the goldens
     python3 tools/volrover-goldens/make_goldens.py --check    # CI: they must not change
 
@@ -67,11 +75,12 @@ SPARSE = {
     "secondary": ["src/SecondaryStructures", "inc/SecondaryStructures", "LICENSE", "COPYING"],
     "tiler": ["src/ContourTiler", "inc/ContourTiler", "LICENSE", "COPYING"],
     "pockettunnel": ["src/PocketTunnel", "inc/PocketTunnel", "LICENSE", "COPYING"],
+    "tightcocone": ["src/TightCocone", "inc/TightCocone", "LICENSE", "COPYING"],
 }
 # The executable each library's legacy build makes (CMakeLists.txt).
 TARGETS = {"genseg": "genseg_legacy", "segmed": "segmed_legacy", "skeleton": "skeleton_legacy",
            "secondary": "secondary_legacy", "tiler": "tiler_legacy",
-           "pockettunnel": "pockettunnel_legacy"}
+           "pockettunnel": "pockettunnel_legacy", "tightcocone": "tightcocone_legacy"}
 # The largest difference --check allows between a made and a committed SegMed field: the legacy
 # code's exp() is the platform's expf, which may round a last bit differently.
 FIELD_TOLERANCE = 1e-6
@@ -466,6 +475,78 @@ def ptv_problems(made, kept):
     return out
 
 
+def tightcocone_run(exe, pts, params, tmp):
+    """The legacy TightCocone's output on the points file `pts`, as bytes (LF line ends)."""
+    shutil.copy(pts, os.path.join(tmp, "in.pts"))
+    args = ["%s=%s" % (k, v) for k, v in sorted(params.items())]
+    run([exe, "in.pts", "out.txt"] + args, cwd=tmp, quiet=True)
+    with open(os.path.join(tmp, "out.txt"), "rb") as f:
+        return f.read().replace(b"\r\n", b"\n")
+
+
+def read_tc(text):
+    """A tightcocone_driver.cpp output: its header values, and the triangles as a set of corner
+    triples, each rotated to start at its smallest corner (so the set keeps the orientation)."""
+    head, verts, tris = {}, [], set()
+    for line in text.decode().splitlines():
+        f = line.split()
+        if not f:
+            continue
+        if f[0] == "v":
+            verts.append(tuple(float(v) for v in f[1:4]))
+        elif f[0] == "t":
+            c = [verts[int(v)] for v in f[1:4]]
+            i = c.index(min(c))
+            tris.add(tuple(c[i:] + c[:i]))
+        else:
+            head[f[0]] = f[1:]
+    return head, tris
+
+
+def tightcocone_case(exe, inputs_dir, case, out_dir):
+    """Run the legacy TightCocone on the case's points; write <case>.tc.txt (what
+    tightcocone_driver.cpp writes) and return the case's metadata, its counts and, for a robust
+    case, what a second run with reset_box=1 showed: whether resetting the legacy box between the
+    two triangulations changes the surface."""
+    with open(os.path.join(inputs_dir, case + ".json")) as f:
+        meta = json.load(f)
+    pts = os.path.join(HERE, "inputs", meta["input"])
+    params = meta.get("parameters", {})
+    with tempfile.TemporaryDirectory(prefix="tightcocone-") as tmp:
+        text = tightcocone_run(exe, pts, params, tmp)
+        debug = sorted(n for n in os.listdir(tmp) if n not in ("in.pts", "out.txt"))
+        reset = None
+        if params.get("robust"):
+            again = tightcocone_run(exe, pts, dict(params, reset_box=1), tmp)
+            h0, t0 = read_tc(text)
+            h1, t1 = read_tc(again)
+            reset = {"surface_changes": t0 != t1, "box": [float(v) for v in h0["box"]],
+                     "box_reset": [float(v) for v in h1["box"]]}
+    os.makedirs(out_dir, exist_ok=True)
+    with open(os.path.join(out_dir, case + ".tc.txt"), "wb") as f:
+        f.write(text)
+    head, tris = read_tc(text)
+    counts = {"vertices": int(head["vertices"][0]), "triangles": int(head["triangles"][0]),
+              "distinct_triangles": len(tris), "debug_files": debug}
+    return meta, counts, reset
+
+
+def tc_problems(made, kept):
+    """What differs between two TightCocone goldens, by content."""
+    with open(made, "rb") as f:
+        hm, tm = read_tc(f.read())
+    with open(kept, "rb") as f:
+        hk, tk = read_tc(f.read())
+    out = []
+    for k in ("points", "robust", "vertices", "triangles"):
+        if hm.get(k) != hk.get(k):
+            out.append("%s %s, committed %s" % (k, hm.get(k), hk.get(k)))
+    if tm != tk:
+        out.append("%d triangles not committed, %d committed not made" % (len(tm - tk),
+                                                                          len(tk - tm)))
+    return out
+
+
 def describe_platform():
     return "%s %s, %s, Python %s" % (platform.system(), platform.machine(),
                                     platform.platform(terse=True), platform.python_version())
@@ -480,9 +561,10 @@ def main():
                                                    "volrover-goldens"))
     ap.add_argument("--check", action="store_true",
                     help="make the goldens in a scratch directory and compare them with --out")
-    ap.add_argument("--libs", default="genseg,segmed,skeleton,secondary,tiler,pockettunnel",
+    ap.add_argument("--libs",
+                    default="genseg,segmed,skeleton,secondary,tiler,pockettunnel,tightcocone",
                     help="the libraries, comma-separated (genseg, segmed, skeleton, secondary, "
-                         "tiler, pockettunnel; all but genseg and segmed need CGAL)")
+                         "tiler, pockettunnel, tightcocone; all but genseg and segmed need CGAL)")
     args = ap.parse_args()
 
     sha = pinned_sha()
@@ -673,6 +755,37 @@ def main():
                   (case, counts["pockets"], counts["tunnels"], counts["voids"],
                    counts["triangles"]))
 
+    near_tc = []  # (library dir, file name) pairs --check compares by content (tc_problems)
+    if "tightcocone" in libs:
+        inputs_dir = os.path.join(HERE, "inputs", "tightcocone")
+        out_dir = os.path.join(target, "tightcocone")
+        for case in sorted(f[:-5] for f in os.listdir(inputs_dir) if f.endswith(".json")):
+            meta, counts, reset = tightcocone_case(exes["tightcocone"], inputs_dir, case, out_dir)
+            golden = {
+                "library": "TightCocone",
+                "volrover": sha,
+                "case": case,
+                "input": "tools/volrover-goldens/inputs/" + meta["input"],
+                "input_sha256": sha256(os.path.join(HERE, "inputs", meta["input"])),
+                "points": meta["points"],
+                "parameters": meta.get("parameters", {}),
+                "counts": counts,
+                "tc_sha256": sha256(os.path.join(out_dir, case + ".tc.txt")),
+                "made_by": "tools/volrover-goldens/make_goldens.py",
+                "platform": describe_platform(),
+            }
+            if reset is not None:
+                golden["reset_box"] = reset
+            with open(os.path.join(out_dir, case + ".json"), "w", newline="\n") as f:
+                json.dump(golden, f, indent=2)
+                f.write("\n")
+            near_tc.append(("tightcocone", case + ".tc.txt"))
+            print("TightCocone %s: %d triangles over %d vertices%s" %
+                  (case, counts["triangles"], counts["vertices"],
+                   "" if reset is None else
+                   "; resetting the box %s the surface" %
+                   ("changes" if reset["surface_changes"] else "does not change")))
+
     if args.check:
         bad = []
         for lib_dir, name in compared:
@@ -709,12 +822,20 @@ def main():
                 bad.append("%s/%s: not committed" % (lib_dir, name))
             else:
                 bad += ["%s/%s: %s" % (lib_dir, name, p) for p in ptv_problems(made, kept)]
+        for lib_dir, name in near_tc:
+            made = os.path.join(target, lib_dir, name)
+            kept = os.path.join(args.out, lib_dir, name)
+            if not os.path.exists(kept):
+                bad.append("%s/%s: not committed" % (lib_dir, name))
+            else:
+                bad += ["%s/%s: %s" % (lib_dir, name, p) for p in tc_problems(made, kept)]
         if bad:
             print("\n".join(bad))
             print("The made goldens are in", target)
             return 1
         print("the goldens match (%d files: %s)" % (len(compared) + len(near) + len(near_tiles) +
-                                                    len(near_ptv), ", ".join(libs)))
+                                                    len(near_ptv) + len(near_tc),
+                                                    ", ".join(libs)))
     return 0
 
 if __name__ == "__main__":

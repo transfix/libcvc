@@ -47,6 +47,7 @@
 //   - the legacy read the points as floats; here they stay doubles.
 
 #include "../cocone/cocone.h"
+#include "../cocone/triangulate.h"
 #include "pocket_tunnel_marked.h"
 
 #include <algorithm>
@@ -72,8 +73,6 @@ const char *to_string(pocket_kind k) {
 }
 
 namespace {
-
-constexpr std::size_t BUILD_UNITS = 16; // tet_complex_builder units per stepper unit
 
 std::string fmt_count(const char *what, std::size_t n) {
   char buf[256];
@@ -145,7 +144,7 @@ struct cluster_set {
 
 // The per-call context of §1.3: what the legacy pocket_tunnel_fromsurf() kept in its locals, and
 // the coroutine that runs it.
-struct pocket_tunnel_stepper::impl {
+struct pocket_tunnel_stepper::impl : cocone::stage_progress {
   std::vector<std::array<double, 3>> points;
   std::optional<geometry> source; // the geometry to read the points from, until they are read
   pocket_tunnel_params params;
@@ -154,11 +153,8 @@ struct pocket_tunnel_stepper::impl {
   std::atomic<bool> cancel{false};
   bool finished = false, failed = false;
   std::exception_ptr error;
-  const char *phase_name = "checking";
-  double prog = 0.0;
 
   // the context
-  std::optional<tet_complex_builder> builder;
   cocone::Triangulation triang;
   cocone::diagnostics diag;
   cluster_set cl;
@@ -169,26 +165,9 @@ struct pocket_tunnel_stepper::impl {
   std::size_t duplicates = 0;
   pocket_tunnels result;
 
-  // progress: the current stage's span of [0, 1] and its units
-  double stage_lo = 0.0, stage_hi = 0.0;
-  std::size_t stage_units = 0, stage_estimate = 1;
-
   cocone::step_task task;
 
-  void stage(const char *name, double lo, double hi, std::size_t estimate) {
-    phase_name = name;
-    stage_lo = lo;
-    stage_hi = hi;
-    stage_units = 0;
-    stage_estimate = std::max<std::size_t>(estimate, 1);
-  }
-  void note_progress(double within) {
-    const double p = stage_lo + (stage_hi - stage_lo) * std::min(1.0, std::max(0.0, within));
-    prog = std::max(prog, std::min(p, 1.0));
-  }
-
   cocone::step_task run();
-  cocone::step_task triangulate(double lo, double hi);
   cocone::step_task grow_maximum(cocone::Cell_handle c_max);
   cocone::step_task club_contiguous_segment();
   cocone::step_task cluster_volumes();
@@ -196,38 +175,6 @@ struct pocket_tunnel_stepper::impl {
   cocone::step_task output();
   cocone::step_task apply_marking();
 };
-
-// Build a tet_complex of the points into triang, BUILD_UNITS of the builder's units per unit,
-// its phases reported as ours.
-cocone::step_task pocket_tunnel_stepper::impl::triangulate(double lo, double hi) {
-  using namespace cvc::cocone;
-  builder.emplace(std::move(points), tet_complex_options{});
-  points = {};
-  for (;;) {
-    bool ready = false;
-    try {
-      ready = builder->step(BUILD_UNITS);
-    } catch (const tet_complex_error &e) {
-      std::string what = e.what();
-      const std::string prefix = "tet_complex: ";
-      if (what.rfind(prefix, 0) == 0)
-        what = what.substr(prefix.size());
-      throw pocket_tunnel_error("pocket_tunnel: " + what);
-    }
-    phase_name = builder->phase();
-    prog = std::max(prog, lo + (hi - lo) * builder->progress());
-    if (ready)
-      break;
-    SK_UNIT;
-  }
-  tet_complex t = builder->take();
-  builder.reset();
-  duplicates = std::size_t(t.num_points() - t.num_vertices());
-  triang.reset(std::move(t));
-  stage("building", hi, hi + 0.02, triang.fill_total());
-  while (!triang.fill_one())
-    SK_UNIT;
-}
 
 // ---------------------------------------------------------
 // grow_maximum (smax.cpp)
@@ -448,7 +395,8 @@ cocone::step_task pocket_tunnel_stepper::impl::run() {
   const pocket_tunnel_params &P = params;
 
   // ---- 1. the Delaunay triangulation ----
-  SK_RUN(triangulate(0.0, 0.25));
+  SK_RUN(triangulate<pocket_tunnel_error>(std::exchange(points, {}), "pocket_tunnel", triang,
+                                          *this, 0.0, 0.25, duplicates));
   double at = 0.27;
   const std::size_t C = triang.num_cells(), V = triang.number_of_vertices();
 

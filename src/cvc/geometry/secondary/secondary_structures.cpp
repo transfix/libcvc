@@ -26,6 +26,8 @@
 
 #include "secondary.h"
 
+#include "../cocone/triangulate.h"
+
 #include <algorithm>
 #include <atomic>
 #include <cmath>
@@ -38,7 +40,6 @@ namespace cvc {
 
 namespace {
 
-constexpr std::size_t BUILD_UNITS = 16; // tet_complex_builder units per unit
 
 std::string fmt_count(const char *what, std::size_t n) {
   char buf[256];
@@ -58,7 +59,7 @@ void check_params(const char *who, const secondary_params &params) {
 
 } // namespace
 
-struct secondary_stepper::impl {
+struct secondary_stepper::impl : cocone::stage_progress {
   app *ctx = nullptr;
   std::optional<geometry> source; // the surface, until its points are read
   secondary_params params;
@@ -66,10 +67,7 @@ struct secondary_stepper::impl {
   std::atomic<bool> cancel{false};
   bool finished = false, failed = false;
   std::exception_ptr error;
-  const char *phase_name = "checking";
-  double prog = 0.0;
 
-  std::optional<tet_complex_builder> builder;
   cocone::Triangulation triang;
   cocone::diagnostics diag;
   cocone::Graph graph;
@@ -77,26 +75,10 @@ struct secondary_stepper::impl {
   std::size_t duplicates = 0;
   secondary_structures result;
 
-  double stage_lo = 0.0, stage_hi = 0.0;
-  std::size_t stage_units = 0, stage_estimate = 1;
-
   cocone::step_task task;
-
-  void stage(const char *name, double lo, double hi, std::size_t estimate) {
-    phase_name = name;
-    stage_lo = lo;
-    stage_hi = hi;
-    stage_units = 0;
-    stage_estimate = std::max<std::size_t>(estimate, 1);
-  }
-  void note_progress(double within) {
-    const double p = stage_lo + (stage_hi - stage_lo) * std::min(1.0, std::max(0.0, within));
-    prog = std::max(prog, std::min(p, 1.0));
-  }
 
   cocone::step_task run();
   cocone::step_task read_points(std::vector<std::array<double, 3>> &pts);
-  cocone::step_task triangulate(std::vector<std::array<double, 3>> pts, double lo, double hi);
 };
 
 // The surface's vertices its faces use (all of its points when it has no faces), in lexicographic
@@ -146,38 +128,6 @@ cocone::step_task secondary_stepper::impl::read_points(std::vector<std::array<do
   duplicates = before - pts.size();
 }
 
-// Build a tet_complex of pts into triang, BUILD_UNITS of the builder's units per unit, its phases
-// reported as ours.
-cocone::step_task secondary_stepper::impl::triangulate(std::vector<std::array<double, 3>> pts,
-                                                       double lo, double hi) {
-  using namespace cvc::cocone;
-  stage(phase_name, lo, lo, 1);
-  builder.emplace(std::move(pts), tet_complex_options{});
-  for (;;) {
-    bool ready = false;
-    try {
-      ready = builder->step(BUILD_UNITS);
-    } catch (const tet_complex_error &e) {
-      std::string what = e.what();
-      const std::string prefix = "tet_complex: ";
-      if (what.rfind(prefix, 0) == 0)
-        what = what.substr(prefix.size());
-      throw secondary_error("find_secondary_structures: " + what);
-    }
-    phase_name = builder->phase();
-    prog = std::max(prog, lo + (hi - lo) * builder->progress());
-    if (ready)
-      break;
-    SK_UNIT;
-  }
-  tet_complex t = builder->take();
-  builder.reset();
-  triang.reset(std::move(t));
-  stage("building", hi, hi + 0.02, triang.fill_total());
-  while (!triang.fill_one())
-    SK_UNIT;
-}
-
 cocone::step_task secondary_stepper::impl::run() {
   using namespace cvc::cocone;
   check_params("find_secondary_structures", params);
@@ -189,7 +139,9 @@ cocone::step_task secondary_stepper::impl::run() {
   // ---- 1. the points and their Delaunay triangulation ----
   std::vector<std::array<double, 3>> pts;
   SK_RUN(read_points(pts));
-  SK_RUN(triangulate(std::move(pts), 0.0, 0.25));
+  std::size_t merged = 0; // none: read_points merged the exact duplicates already
+  SK_RUN(triangulate<secondary_error>(std::move(pts), "find_secondary_structures", triang, *this,
+                                      0.0, 0.25, merged));
   double at = 0.27;
   const std::size_t C = triang.num_cells(), V = triang.number_of_vertices();
   stage("voronoi", at, at + 0.04, C + V);

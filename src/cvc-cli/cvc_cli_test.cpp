@@ -2791,6 +2791,61 @@ TEST_F(CvcCliTest, SkeletonOfAPlaneFails) {
 }
 
 // ===========================================================================
+// cvc cocone (the VolumeRover TightCocone port, V1; ports plan T12)
+// ===========================================================================
+
+TEST_F(CvcCliTest, CoconeHelp) {
+  auto r = cvc("cocone --help");
+  EXPECT_EQ(0, r.exit_code);
+  EXPECT_NE(std::string::npos, r.output.find("--robust"));
+  EXPECT_NE(std::string::npos, r.output.find("--cocone-phi"));
+  EXPECT_NE(std::string::npos, r.output.find("-bbr"));
+}
+
+TEST_F(CvcCliTest, CoconeOfACapsule) {
+  const std::string in = path("capsule.off"), out = path("surface.off");
+  write_capsule_off(in);
+  auto r = cvc("cocone \"" + in + "\" -o \"" + out + "\"");
+  SKIP_WITHOUT_SKELETON(r);
+  ASSERT_EQ(0, r.exit_code) << r.output;
+  EXPECT_NE(std::string::npos, r.output.find("Wrote ")) << r.output;
+  EXPECT_NE(std::string::npos, r.output.find(" triangles over ")) << r.output;
+  // The surface reads back: a closed genus-0 surface has 2V - 4 triangles.
+  cvc::app app;
+  cvc::geometry g(app, out);
+  EXPECT_GT(g.num_points(), 100u);
+  EXPECT_EQ(g.num_tris(), 2 * g.num_points() - 4);
+}
+
+TEST_F(CvcCliTest, CoconeTakesTheLegacyFlags) {
+  const std::string in = path("capsule.off");
+  write_capsule_off(in);
+  auto r = cvc("cocone \"" + in + "\" -o \"" + path("s.off") +
+               "\" -r -bbr 0.25 -thif 5 -thff 10 -medr 8 -medth 22.5");
+  SKIP_WITHOUT_SKELETON(r);
+  ASSERT_EQ(0, r.exit_code) << r.output;
+  EXPECT_NE(std::string::npos, r.output.find("-medr is accepted and ignored")) << r.output;
+  EXPECT_TRUE(fs::exists(path("s.off")));
+}
+
+TEST_F(CvcCliTest, CoconeOfAPlaneFails) {
+  const std::string in = path("plane.off");
+  {
+    std::ofstream f(in);
+    f << "OFF\n30 0 0\n";
+    for (int i = 0; i < 30; ++i)
+      f << (i % 6) << " " << (i / 6) << " 1\n";
+  }
+  auto r = cvc("cocone \"" + in + "\" -o \"" + path("p.off") + "\"");
+  SKIP_WITHOUT_SKELETON(r);
+  EXPECT_NE(0, r.exit_code);
+  EXPECT_NE(std::string::npos, r.output.find("one plane")) << r.output;
+  auto bad = cvc("cocone \"" + in + "\" -o \"" + path("p.off") + "\" --cocone-phi 5");
+  EXPECT_NE(0, bad.exit_code);
+  EXPECT_NE(std::string::npos, bad.output.find("cocone_phi")) << bad.output;
+}
+
+// ===========================================================================
 // cvc tile (the VolumeRover ContourTiler port; ports plan T12)
 // ===========================================================================
 

@@ -7,7 +7,9 @@ x fastest) and <case>.json (its dimensions, thresholds and seeds); each SegMed c
 inputs/segmed/<case>.raw and <case>.json (its dimensions and tlow); each Skeletonization case is
 inputs/skeleton/<case>.pts (a point a line) and <case>.json; each PocketTunnel case is
 inputs/pockettunnel/<case>.pts and <case>.json; each SecondaryStructures case is
-inputs/secondary/<case>.pts and <case>.json. Pure Python, no numpy.
+inputs/secondary/<case>.pts and <case>.json; each TightCocone case is
+inputs/tightcocone/<case>.json, with its own <case>.pts where it does not run on another
+library's. Pure Python, no numpy.
 
     python3 tools/volrover-goldens/make_inputs.py                  # every library
     python3 tools/volrover-goldens/make_inputs.py --only skeleton  # one library
@@ -632,12 +634,94 @@ def write_tiler_inputs():
         print("wrote", name, vertices, "vertices")
 
 
+# ---- TightCocone: the other libraries' point clouds, and a noisy sphere for Robust Cocone ----
+# Each case is inputs/tightcocone/<case>.json: the points it runs on ("input", another library's
+# committed .pts, relative to inputs/; or inputs/tightcocone/<case>.pts, which this script writes)
+# and the parameters both sides run with (the legacy names).
+
+def noisy_sphere():
+    """A sphere of radius 10 sampled about 0.8 apart, each point up to 0.1 off the sphere, and 60
+    points scattered through its inside: the noise Robust Cocone is for."""
+    rnd = lcg(31)
+    pts = []
+    for (x, y, z) in sphere_points((0.0, 0.0, 0.0), 10.0, 0.8, rnd):
+        s = 1.0 + 0.01 * (2 * next(rnd) - 1)
+        pts.append((x * s, y * s, z * s))
+    for _ in range(60):
+        while True:
+            p = tuple(16.0 * (next(rnd) - 0.5) for _ in range(3))
+            if p[0] * p[0] + p[1] * p[1] + p[2] * p[2] < 7.5 * 7.5:
+                break
+        pts.append(p)
+    return pts
+
+
+def outlier_sphere():
+    """noisy_sphere's surface with 12 points well outside it (radius 13 to 16): the legacy's box,
+    never reset between Robust Cocone's two triangulations, still spans them after Robust Cocone
+    leaves them out."""
+    rnd = lcg(37)
+    pts = []
+    for (x, y, z) in sphere_points((0.0, 0.0, 0.0), 10.0, 0.8, rnd):
+        s = 1.0 + 0.01 * (2 * next(rnd) - 1)
+        pts.append((x * s, y * s, z * s))
+    for i in range(12):
+        d = _norm(tuple(2 * next(rnd) - 1 for _ in range(3)))
+        r = 13.0 + 3.0 * next(rnd)
+        pts.append((r * d[0], r * d[1], r * d[2]))
+    return pts
+
+
+TIGHTCOCONE_CASES = {
+    "capsule": {"input": "skeleton/capsule.pts"},
+    "torus": {"input": "skeleton/torus.pts"},
+    "dumbbell": {"input": "skeleton/dumbbell.pts"},
+    "box_grid": {"input": "skeleton/box_grid.pts"},
+    "pocket": {"input": "pockettunnel/pocket.pts"},
+    "1grl": {"input": "pockettunnel/1grl.pts"},
+    "helices_and_sheet": {"input": "secondary/helices_and_sheet.pts"},
+    "dumbbell_narrow": {"input": "skeleton/dumbbell.pts",
+                        "parameters": {"cocone_phi": 0.3, "flat_phi": 0.9,
+                                       "flatness_ratio": 2.0}},
+    "capsule_robust": {"input": "skeleton/capsule.pts", "parameters": {"robust": 1}},
+    "noisy_sphere": {"points": noisy_sphere, "parameters": {"robust": 1}},
+    "outlier_sphere": {"points": outlier_sphere, "parameters": {"robust": 1}},
+}
+
+
+def write_tightcocone_inputs():
+    out_dir = os.path.join(HERE, "inputs", "tightcocone")
+    os.makedirs(out_dir, exist_ok=True)
+    for name, c in TIGHTCOCONE_CASES.items():
+        if "points" in c:
+            pts = [tuple(f32(v) for v in p) for p in c["points"]()]
+            with open(os.path.join(out_dir, name + ".pts"), "w", newline="\n") as f:
+                for p in pts:
+                    f.write("%.17g %.17g %.17g\n" % p)
+            source, n = "tightcocone/%s.pts" % name, len(pts)
+        else:
+            source = c["input"]
+            with open(os.path.join(HERE, "inputs", source)) as f:
+                n = sum(1 for line in f if line.strip())
+        meta = {
+            "library": "TightCocone",
+            "input": source,
+            "points": n,
+            "parameters": c.get("parameters", {}),
+            "made_by": "tools/volrover-goldens/make_inputs.py",
+        }
+        with open(os.path.join(out_dir, name + ".json"), "w", newline="\n") as f:
+            json.dump(meta, f, indent=2)
+            f.write("\n")
+        print("wrote", name, n, "points")
+
+
 def main():
     import argparse
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--only",
                     choices=["genseg", "segmed", "skeleton", "secondary", "tiler",
-                             "pockettunnel"],
+                             "pockettunnel", "tightcocone"],
                     help="write only one library's inputs (the others stay as committed)")
     ap.add_argument("--case", action="append",
                     help="write only this GenSeg case (repeatable; the others stay as committed)")
@@ -652,7 +736,9 @@ def main():
         write_pockettunnel_inputs()
     if args.only in (None, "secondary"):
         write_secondary_inputs()
-    if args.only in ("skeleton", "segmed", "secondary", "tiler", "pockettunnel"):
+    if args.only in (None, "tightcocone"):
+        write_tightcocone_inputs()
+    if args.only in ("skeleton", "segmed", "secondary", "tiler", "pockettunnel", "tightcocone"):
         return
     out_dir = os.path.join(HERE, "inputs", "genseg")
     os.makedirs(out_dir, exist_ok=True)
