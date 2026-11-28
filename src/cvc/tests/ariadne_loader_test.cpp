@@ -662,6 +662,137 @@ windows:
   EXPECT_TRUE(is_builtin_widget_type("settings")) << "so requires: and (has? \"settings\") see it";
 }
 
+// type: table: its columns (label, width, sort), cells (one per column, {i} kept for the walk),
+// rows:, bind:, on:, resizable: (default true) and borders:, laid out as one grid with a header
+// row; a cells/columns count that differs is a warning, the extra cells dropped.
+TEST(AriadneLoader, TableWidget) {
+  SKIP_WITHOUT_YAML();
+  const std::string doc = R"(
+meta: { name: T, min_libcvc: 3.4.0 }
+windows:
+  - window: W
+    children:
+      - type: table
+        id: results
+        bind: search.sort
+        on: (state-set "req.search" "1")
+        rows: (state-get "search.count")
+        borders: { show: inner }
+        columns:
+          - { label: "", width: 64 }
+          - { label: name, width: 232, sort: name }
+          - { label: version, width: "40%", sort: version }
+          - { label: size, sort: size }
+        cells:
+          - type: button
+            label: Open
+            on: (state-set "nav.open" (state-get "search.res.packages.{i}.name"))
+          - text: ""
+            bind: search.res.packages.{i}.name
+          - text: ""
+            bind: search.res.packages.{i}.version
+          - text: ""
+            bind: search.res.packages.{i}.size_text
+      - type: table
+        id: fixed
+        resizable: false
+        rows: 2
+        columns: [{ label: a }, { label: b }]
+        cells:
+          - text: a{i}
+          - text: b{i}
+          - text: dropped
+      - table: Short
+        rows: 1
+        columns: [{ label: a }, { label: b }]
+        cells:
+          - text: only
+)";
+  const LoadResult r = fresh_load(doc);
+  ASSERT_TRUE(r.ok) << r.error;
+  const Widget *t = find(r.root, Kind::Table);
+  ASSERT_NE(t, nullptr);
+  EXPECT_EQ(t->id, "results");
+  EXPECT_EQ(t->bind, "search.sort");
+  EXPECT_EQ(t->on, "(state-set \"req.search\" \"1\")");
+  ASSERT_TRUE(t->table);
+  EXPECT_EQ(t->table->rows, "(state-get \"search.count\")");
+  ASSERT_EQ(t->table->columns.size(), 4u);
+  EXPECT_EQ(t->table->columns[0].label, "");
+  EXPECT_EQ(t->table->columns[0].sort, "") << "no sort: key: its header doesn't sort";
+  EXPECT_EQ(t->table->columns[0].width.unit, Unit::Px);
+  EXPECT_EQ(t->table->columns[0].width.value, 64.0f);
+  EXPECT_EQ(t->table->columns[1].label, "name");
+  EXPECT_EQ(t->table->columns[1].sort, "name");
+  EXPECT_EQ(t->table->columns[2].width.unit, Unit::Percent);
+  EXPECT_EQ(t->table->columns[2].width.value, 40.0f);
+  EXPECT_EQ(t->table->columns[3].width.unit, Unit::Auto);
+  // The grid the columns make: one track a column, resizable by default, with its header row.
+  EXPECT_EQ(t->layout.kind, LayoutKind::Grid);
+  ASSERT_EQ(t->layout.col_widths.size(), 4u);
+  EXPECT_EQ(t->layout.col_widths[1].unit, Unit::Px);
+  EXPECT_EQ(t->layout.col_widths[1].value, 232.0f);
+  EXPECT_TRUE(t->layout.resizable);
+  EXPECT_TRUE(t->layout.header_row);
+  EXPECT_EQ(t->layout.borders, BorderShow::Inner);
+  // The cells, one per column, their {i} left for the walk to make the row.
+  ASSERT_EQ(t->children.size(), 4u);
+  EXPECT_EQ(t->children[0].kind, Kind::Button);
+  EXPECT_EQ(t->children[0].label, "Open");
+  EXPECT_NE(t->children[0].on.find("search.res.packages.{i}.name"), std::string::npos);
+  EXPECT_EQ(t->children[1].kind, Kind::Text);
+  EXPECT_EQ(t->children[1].bind, "search.res.packages.{i}.name");
+  EXPECT_FALSE(has_warning(r, "table 'results'")) << ::testing::PrintToString(r.warnings);
+
+  const Widget *win = find(r.root, Kind::Window);
+  ASSERT_NE(win, nullptr);
+  ASSERT_EQ(win->children.size(), 3u);
+  const Widget *fixed = &win->children[1];
+  ASSERT_EQ(fixed->id, "fixed");
+  EXPECT_FALSE(fixed->layout.resizable);
+  EXPECT_EQ(fixed->table->rows, "2");
+  ASSERT_EQ(fixed->children.size(), 2u) << "the extra cell is dropped";
+  EXPECT_EQ(fixed->children[1].label, "b{i}");
+  EXPECT_TRUE(has_warning(r, "table 'fixed' has 3 cells: for 2 columns: — the extra cells are "
+                             "dropped"));
+  EXPECT_TRUE(has_warning(r, "table 'Short' has 1 cells: for 2 columns: — the missing cells are "
+                             "empty"));
+  const Widget *shrt = find(r.root, Kind::Table, "Short");
+  ASSERT_NE(shrt, nullptr) << "table: <label> is its short form";
+  EXPECT_EQ(shrt->children.size(), 1u);
+  EXPECT_TRUE(r.schema_issues.empty()) << ::testing::PrintToString(r.warnings);
+  EXPECT_TRUE(is_builtin_widget_type("table")) << "so requires: and (has? \"table\") see it";
+}
+
+// A table with no columns: or no rows: says so; a cell's own repeat: is dropped (rows: repeats).
+TEST(AriadneLoader, TableWidgetWarnings) {
+  SKIP_WITHOUT_YAML();
+  const LoadResult r = fresh_load(R"(
+meta: { name: T, min_libcvc: 3.4.0 }
+windows:
+  - window: W
+    children:
+      - type: table
+        id: empty
+      - type: table
+        id: rep
+        rows: 3
+        columns: [{ label: a }]
+        cells:
+          - text: x{i}
+            repeat: 2
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_TRUE(has_warning(r, "table 'empty' has no columns:"));
+  EXPECT_TRUE(has_warning(r, "table 'empty' has no rows:"));
+  EXPECT_TRUE(has_warning(r, "table 'rep': a cell's repeat: is ignored"));
+  const Widget *w = find(r.root, Kind::Window);
+  ASSERT_NE(w, nullptr);
+  ASSERT_EQ(w->children.size(), 2u);
+  ASSERT_EQ(w->children[1].children.size(), 1u);
+  EXPECT_TRUE(w->children[1].children[0].repeat.empty());
+}
+
 TEST(AriadneLoader, InputTextAndInputInt) {
   SKIP_WITHOUT_YAML();
   const char *doc = R"(

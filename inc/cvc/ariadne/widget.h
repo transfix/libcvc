@@ -68,6 +68,8 @@ enum class Kind {
                   // an optional text, corner mark and tooltip; hover and click report the cell
   Mounts,         // on-demand mounts (docs/roadmap/ARIADNE_SHELL.md 4.2): one isolated mount per
                   // child of the state key at `bind`, loaded when it appears, freed when it goes
+  Table,          // a header row of columns (a click on a sortable one sorts by it) over rows of
+                  // cells, one per column from its `children` with {i} the row, all in one grid
 };
 
 // How a Kind::Image fills its box (`fit:`) and the box's shape (`shape:`); media.h fits a picture
@@ -195,6 +197,9 @@ struct Layout {
   BorderShow borders = BorderShow::Off;
   bool has_border_color = false;
   float border_color[4] = {0.3f, 0.3f, 0.35f, 1.0f};
+  // The first row of cells is a header (a Kind::Table's column headers): a backend that has a
+  // header row draws it as one (ImGui's), the others as any row.
+  bool header_row = false;
   bool is_set() const {
     return kind != LayoutKind::Vertical || !col_widths.empty() || !row_heights.empty() ||
            resizable || borders != BorderShow::Off;
@@ -265,6 +270,23 @@ struct TextRunSpec {
 };
 
 struct MountsSpec; // Kind::Mounts's slot, below
+
+// Kind::Table: one of its `columns:`: the header's text, the column's track (`width:`, as a
+// col_widths entry takes it) and the key a click on the header sorts by (`sort:`; "": the column
+// does not sort).
+struct TableColumn {
+  std::string label;
+  Track width;
+  std::string sort;
+};
+// Kind::Table's slot (Widget::table): its columns, and `rows`, how many rows of cells it has (a
+// count in repeat:'s grammar, worked out each frame). The cells are the widget's children, one per
+// column, `{i}` the row; `bind` holds the sort ("name", "-name" descending, "" none; default
+// tree.<id>.sort) and `on` runs after the user changes it; `layout` is the grid its columns make.
+struct TableSpec {
+  std::vector<TableColumn> columns;
+  std::string rows;
+};
 
 // §5.3 a `state:` block's seeds, in document order: each a path (relative to the prefix it is
 // written under, or app-root-absolute with a leading '/') and the text written there.
@@ -643,6 +665,10 @@ struct WidgetNode {
   // below). Out of line, so every other widget stays the size it was. Null for every other kind.
   std::shared_ptr<const MountsSpec> mounts;
 
+  // Kind::Table: its columns and its row count (TableSpec, above), out of line as `mounts` is. Null
+  // for every other kind.
+  std::shared_ptr<const TableSpec> table;
+
   // §6.6 functions: set on the document's root and on every mount wrapper, null elsewhere. The
   // programs started inside this subtree (on: actions, the mount's init:) run with these
   // functions defined, and no others: a mount gets an empty scope unless it grants some.
@@ -932,6 +958,31 @@ inline Widget heatmap(std::string label, std::string bind, std::vector<HeatmapSt
   w.label = std::move(label);
   w.bind = std::move(bind);
   w.heatmap.ramp = std::move(ramp);
+  return w;
+}
+
+// A table (Kind::Table) named `id`: a header row of `columns` over `rows` rows (a count, a state
+// key or an expression) of `cells`, one per column, `{i}` in them the row. Its sort is at `bind`
+// ("" : tree.<id>.sort), `on` runs after the user changes it, and the columns' seams drag unless
+// `resizable` is false. Set the layout's borders on the result.
+inline Widget table(std::string id, std::vector<TableColumn> columns, std::string rows,
+                    std::vector<Widget> cells, std::string bind = std::string(),
+                    std::string on = std::string(), bool resizable = true) {
+  Widget w;
+  w.kind = Kind::Table;
+  w.id = std::move(id);
+  w.bind = std::move(bind);
+  w.on = std::move(on);
+  w.layout.kind = LayoutKind::Grid;
+  for (const TableColumn &c : columns)
+    w.layout.col_widths.push_back(c.width);
+  w.layout.resizable = resizable;
+  w.layout.header_row = true;
+  auto spec = std::make_shared<TableSpec>();
+  spec->columns = std::move(columns);
+  spec->rows = std::move(rows);
+  w.table = std::move(spec);
+  w.children = std::move(cells);
   return w;
 }
 

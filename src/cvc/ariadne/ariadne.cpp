@@ -11,6 +11,7 @@
 #include "file_picker.h"    // §10.8 the Runtime's own "Open file" window
 #include "heatmap_emit.h"   // Kind::Heatmap (the subtree read on a write, the cell events)
 #include "settings_emit.h"  // Kind::Settings (the key walk, its write watch, the edits)
+#include "table_emit.h"     // Kind::Table (the sort format, the header row)
 #include "tf_editor_emit.h" // Kind::TfEditor (model / overlay / view state edges)
 
 #include <algorithm>
@@ -309,6 +310,20 @@ void substitute_index_one(Widget &out, const std::string &idx) {
   if (!out.scope.empty())
     out.scope += "." + idx;
   replace_in(out.app_name_bind, kTok, idx); // §5.25 and its name: (slots.{i}.name)
+  // A table's row count and its headers (rows: runs.{i}.count). Its cells keep their {i}: the row.
+  if (out.table) {
+    const auto has_tok = [&](const std::string &s) { return s.find(kTok) != std::string::npos; };
+    bool any = has_tok(out.table->rows);
+    for (const TableColumn &c : out.table->columns)
+      any = any || has_tok(c.label);
+    if (any) {
+      auto t = std::make_shared<TableSpec>(*out.table);
+      replace_in(t->rows, kTok, idx);
+      for (TableColumn &c : t->columns)
+        replace_in(c.label, kTok, idx);
+      out.table = std::move(t);
+    }
+  }
   // §12: and its parent-scope holes are {i}-substituted too, so an instance can grant a
   // per-instance target (link: { slot: fleet.{i} }) — mirroring the bind/on substitution above.
   for (LinkHole &h : out.links) {
@@ -327,7 +342,10 @@ void substitute_index_in(Widget &out, const std::string &idx) {
     // than the outer index clobbering the inner template's bindings). Single-level still: the
     // inner cannot also reference the outer index — the loader warns on a nested repeat.
     // §5.30 a row's right-click menu acts on that row (on: (delete-row {i})).
-    for (std::vector<Widget> *list : {&w->children, &w->context_items})
+    // A table's cells are its rows' template, left as they are: their {i} is the table's row.
+    for (std::vector<Widget> *list : {&w->children, &w->context_items}) {
+      if (list == &w->children && w->kind == Kind::Table)
+        continue;
       for (Widget &c : *list) {
         if (!c.repeat.empty())
           continue;
@@ -336,6 +354,7 @@ void substitute_index_in(Widget &out, const std::string &idx) {
         else
           todo.push_back(&c);
       }
+    }
     if (todo.empty())
       break;
     w = todo.back();
@@ -803,8 +822,9 @@ constexpr const char *kReadLaneBuiltins[] = {
     "math.floor", "math.ceil", "math.round", "math.pow", "math.log", "math.sin", "math.cos",
     "math.tan", "math.min", "math.max", "math.clamp", "math.pi", "math.e", "collections.map",
     "collections.filter", "collections.reduce", "collections.zip", "collections.flatten",
-    "collections.sort", "collections.reverse", "collections.range", "collections.unique",
-    "collections.dict-keys", "collections.dict-values", "collections.dict-merge"};
+    "collections.sort", "collections.sort-by", "collections.reverse", "collections.range",
+    "collections.unique", "collections.dict-keys", "collections.dict-values",
+    "collections.dict-merge"};
 } // namespace
 
 std::span<const char *const> read_lane_builtins() { return kReadLaneBuiltins; }
@@ -2552,6 +2572,7 @@ struct Runtime::Impl {
       Children,    // emit_children: `w`'s children (context_items, when `items`) from `next`
       Cells,       // a grid's children from `next`, each instance a cell (emit_container)
       Instances,   // a repeat's instances from `next` (begin_repeat), as cells when `cell`
+      TableRows,   // a table's cells from `next`, row after row, `count` rows (begin_table)
       Container,   // emit_container after the children: end_grid and its writes, the scope pops
       Node,        // emit_node after a container's children, by w->kind and `stage`
       ContextMenu, // emit_context_menu after its items
@@ -2562,7 +2583,8 @@ struct Runtime::Impl {
     bool items = false;     // Children: the context menu's items
     bool cell = false;      // Instances: as a grid's cells
     bool outermost = false; // Instances: the outermost repeat (emitting_repeat_ is its template)
-    bool open_item = false; // Instances: an instance's id and instance_path entry are pushed
+    bool open_item = false; // Instances, TableRows: an instance's (a row's) id and instance_path
+                            // entry are pushed
     bool scoped = false;    // Container: a mount pushed its scope
     bool fns = false;       // Container: and its functions
     bool grid = false;      // Container: begin_grid opened one
@@ -2570,10 +2592,10 @@ struct Runtime::Impl {
     bool flag = false;      // Node: Window open, Menu merges the Windows menu, Group inner click
     bool backdrop = false;  // Node: a backdrop is open (Window, Group)
     bool item = false;      // Node(Group): an item group is open
-    std::size_t next = 0;   // Children, Cells, Instances: the next index
-    int count = 0;          // Instances: how many; Node(Group): clicks_fired before its children
+    std::size_t next = 0;   // Children, Cells, Instances, TableRows: the next index
+    int count = 0; // Instances, TableRows: how many; Node(Group): clicks_fired before its children
     const Widget *w = nullptr;
-    std::unique_ptr<std::optional<Widget>> inst; // Instances: the instance drawn now
+    std::unique_ptr<std::optional<Widget>> inst; // Instances, TableRows: the instance drawn now
     std::string path, path2;          // Container: tracks, columns; Node(Window): its open path
     const MenuEvent *outer = nullptr; // ContextMenu: the menu event it took the place of
     std::function<void()> then;
@@ -2592,6 +2614,13 @@ struct Runtime::Impl {
   // `{i}` substituted) for a `repeat` template: drawn by begin_emit, or as a grid's cells.
   void begin_repeat(const Widget &w, bool cell);
   void begin_cells(const Widget &c); // a grid's child: its instances, each in a cell
+  // Kind::Table: its grid, its header row, then its rows on the walk (Op::TableRows). False when
+  // nothing of it is drawn (no columns, or the grid did not open).
+  bool begin_table(const Widget &w, bool dis);
+  // A grid's identity (emit_container, begin_table): its id:, else its label, else its place.
+  std::string grid_id(const Widget &w) const;
+  // §11.4 a grid's persisted track sizes at `path` (none on a forget_layout()'s first frame).
+  std::vector<float> persisted_sizes(const std::string &path);
   // Out of emit_node, so its frame (the stack one step of the walk takes) stays small:
   void emit_mounts(const Widget &w);      // ARIADNE_SHELL.md 4.2 a mounts: slot's mounts
   bool menu_item_action(const Widget &w); // a menu item, its label an expression or not
@@ -3248,6 +3277,53 @@ void Runtime::Impl::step_walk() {
     }
     return;
   }
+  case Op::TableRows: {
+    // Row i is under push_id(i), its cells one per column, each a copy of the column's cell with
+    // {i} the row. A hidden cell, or one the table has no cell for, is drawn empty: it keeps its
+    // place, so the columns stay in line.
+    const std::size_t cols = f.w->table->columns.size();
+    const std::size_t total = static_cast<std::size_t>(f.count) * cols;
+    if (f.next > 0)
+      emit_path.pop_back(); // the cell before is done
+    if (f.next < total && frame_instances >= kMaxFrameInstances) {
+      warn_once("ari: too many repeated widget instances this frame (cap " +
+                std::to_string(kMaxFrameInstances) + ") — the table's remaining rows skipped");
+      f.next = total;
+    }
+    if (f.open_item && (f.next % cols == 0 || f.next >= total)) { // the row before is done
+      f.open_item = false;
+      instance_path.pop_back();
+      backend->pop_id();
+    }
+    if (f.next >= total) {
+      walk_.pop_back();
+      return;
+    }
+    const std::size_t k = f.next % cols;
+    const int i = static_cast<int>(f.next / cols);
+    ++f.next;
+    if (k == 0) {
+      backend->push_id(std::to_string(i).c_str());
+      instance_path.push_back(i);
+      f.open_item = true;
+    }
+    emit_path.push_back(k);
+    backend->grid_next_cell();
+    if (k >= f.w->children.size())
+      return; // fewer cells than columns: this one is empty
+    ++frame_instances;
+    if (!f.inst)
+      f.inst = std::make_unique<std::optional<Widget>>();
+    Widget &made = f.inst->emplace(f.w->children[k]);
+    substitute_index_in(made, std::to_string(i));
+    made.repeat.clear();
+    if (!visible(made))
+      return; // hidden: its cell stays, empty
+    autofocus(made, i);
+    next_is_cell = true; // §5.26 a group's fill covers its cell
+    emit_node(made);
+    return;
+  }
   case Op::Container: {
     // Nothing here pushes to walk_, so the frame is popped once it is done with.
     if (f.grid) {
@@ -3385,16 +3461,7 @@ void Runtime::Impl::emit_container(const Widget &w) {
   after.fns = static_cast<bool>(w.functions);
 
   if (w.layout.kind == LayoutKind::Grid || w.layout.kind == LayoutKind::Horizontal) {
-    // The grid's identity: its id:, else its label, else where it sits in the tree. Backends key
-    // their per-grid state by it (ImGui its table, whose column widths it keeps), and so does the
-    // persisted tree.<id>, so two unnamed grids in one window must not share it. The generated id
-    // is one state-path segment ("~0_2_1"), so tree.<id>.tracks stays one key.
-    std::string id = !w.id.empty() ? w.id : w.label;
-    if (id.empty()) {
-      id = "~";
-      for (std::size_t i = 0; i < emit_path.size(); ++i)
-        id += (i ? "_" : "") + std::to_string(emit_path[i]);
-    }
+    const std::string id = grid_id(w);
     // §11.4 two-way track edge: a resizable row-split grid persists its dragged pane sizes to
     // tree.<id>.tracks, and a resizable table its column widths to tree.<id>.columns. Seed the
     // backend from the persisted sizes before opening (apply-once on the backend side), then write
@@ -3403,21 +3470,15 @@ void Runtime::Impl::emit_container(const Widget &w) {
     const bool split = w.layout.is_row_split();
     const bool table = w.layout.resizable && !split;
     std::string tracks_path, columns_path;
-    // After forget_layout(), as for a window: the first frame takes no sizes the last document
-    // persisted.
-    const auto persisted = [&](const std::string &path) {
-      const bool fresh = windows_forgotten && laid_out.insert(path).second;
-      return fresh ? std::vector<float>{} : parse_tracks(read_string(app, path));
-    };
     if (split) {
       tracks_path = resolve("tree." + id + ".tracks");
-      const std::vector<float> seed = persisted(tracks_path);
+      const std::vector<float> seed = persisted_sizes(tracks_path);
       if (!seed.empty())
         b.seed_grid_tracks(seed);
     }
     if (table) {
       columns_path = resolve("tree." + id + ".columns");
-      const std::vector<float> seed = persisted(columns_path);
+      const std::vector<float> seed = persisted_sizes(columns_path);
       if (!seed.empty())
         b.seed_grid_columns(seed);
     }
@@ -3447,6 +3508,72 @@ void Runtime::Impl::emit_container(const Widget &w) {
     scope_stack.pop_back();
   if (after.fns)
     fn_stack.pop_back();
+}
+
+// The grid's identity: its id:, else its label, else where it sits in the tree. Backends key their
+// per-grid state by it (ImGui its table, whose column widths it keeps), and so does the persisted
+// tree.<id>, so two unnamed grids in one window must not share it. The generated id is one
+// state-path segment ("~0_2_1"), so tree.<id>.tracks stays one key.
+std::string Runtime::Impl::grid_id(const Widget &w) const {
+  std::string id = !w.id.empty() ? w.id : w.label;
+  if (id.empty()) {
+    id = "~";
+    for (std::size_t i = 0; i < emit_path.size(); ++i)
+      id += (i ? "_" : "") + std::to_string(emit_path[i]);
+  }
+  return id;
+}
+
+// After forget_layout(), as for a window: the first frame takes no sizes the last document
+// persisted.
+std::vector<float> Runtime::Impl::persisted_sizes(const std::string &path) {
+  const bool fresh = windows_forgotten && laid_out.insert(path).second;
+  return fresh ? std::vector<float>{} : parse_tracks(read_string(app, path));
+}
+
+// Kind::Table: one grid under the table's id, its column widths seeded and persisted as a resizable
+// grid's (tree.<id>.columns), the header row drawn here (emit_table_header), then on the walk the
+// rows (Op::TableRows), the grid's end and the widths written back (Op::Container), and the table's
+// own end (leave_node). The sort is at its bind, else tree.<id>.sort, as tabs keep tree.<id>.tab.
+CVC_ARI_NOINLINE bool Runtime::Impl::begin_table(const Widget &w, bool dis) {
+  if (!w.table || w.table->columns.empty())
+    return false;
+  Backend &b = *backend;
+  const std::string id = grid_id(w);
+  b.push_id(id.c_str());
+  std::string columns_path;
+  if (w.layout.resizable) {
+    columns_path = resolve("tree." + id + ".columns");
+    const std::vector<float> seed = persisted_sizes(columns_path);
+    if (!seed.empty())
+      b.seed_grid_columns(seed);
+  }
+  if (!b.begin_grid(w.layout, id.c_str())) {
+    b.pop_id();
+    return false;
+  }
+  const std::string sort_path = resolve(!w.bind.empty() ? w.bind : "tree." + id + ".sort");
+  TableHeaderContext header{app, b, sort_path, read_string(app, sort_path),
+                            [this](const std::string &event) { enqueue(event); }};
+  if (emit_table_header(header, w)) // a header's click is the table's, not a card's around it
+    ++clicks_fired;
+  WalkFrame leave; // last: pop_id and the table's tail (leave_node)
+  leave.op = WalkFrame::Op::Node;
+  leave.w = &w;
+  leave.dis = dis;
+  walk_.push_back(std::move(leave));
+  WalkFrame after; // then end_grid and the widths written back
+  after.op = WalkFrame::Op::Container;
+  after.w = &w;
+  after.grid = true;
+  after.path2 = std::move(columns_path);
+  walk_.push_back(std::move(after));
+  WalkFrame rows; // first: the rows
+  rows.op = WalkFrame::Op::TableRows;
+  rows.w = &w;
+  rows.count = w.table->rows.empty() ? 0 : eval_count(w.table->rows);
+  walk_.push_back(std::move(rows));
+  return true;
 }
 
 // A `repeat` template: the count and the outermost repeat's bookkeeping, then its instances, one a
@@ -3971,6 +4098,11 @@ void Runtime::Impl::emit_node(const Widget &w) {
     break;
   }
 
+  case Kind::Table: // the header row, then its rows on the walk; its end is leave_node's
+    if (begin_table(w, dis))
+      return;
+    break;
+
   case Kind::Settings: {
     if (!settings_watch) {
       settings_watch = std::make_shared<SettingsWatch>();
@@ -4488,8 +4620,9 @@ void Runtime::Impl::emit_node_tail(const Widget &w, bool dis, bool inner_click) 
   };
   // A group's click is the innermost taker's: a widget inside it with an on_click of its own (an
   // avatar opening a profile in a card opening a post), or a button, keeps it.
-  // A heatmap's on_click, on_hover and tooltip are per cell, its own (emit_heatmap).
-  const bool own_pointer = w.kind == Kind::Heatmap;
+  // A heatmap's on_click, on_hover and tooltip are per cell, its own (emit_heatmap). A table has
+  // none of its own: they go on its cells (the last item drawn is its last cell).
+  const bool own_pointer = w.kind == Kind::Heatmap || w.kind == Kind::Table;
   if (!own_pointer && !w.on_click.empty() && !inner_click && b.item_clicked()) {
     fire_pointer(w.on_click);
     ++clicks_fired;
@@ -4581,6 +4714,7 @@ void Runtime::Impl::leave_node(WalkFrame &f) {
       b.pop_id();
     break;
   case Kind::Tabs:
+  case Kind::Table: // its rows and its grid are done
     b.pop_id();
     break;
   default: // Kind::Custom, after its menu

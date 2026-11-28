@@ -454,15 +454,17 @@
         "col_widths": {"type": "array", "items": {"$ref": "#/$defs/extent"}},
         "row_heights": {"type": "array", "items": {"$ref": "#/$defs/extent"}},
         "resizable": {"$ref": "#/$defs/flag"},
-        "borders": {
-          "type": "object",
-          "properties": {
-            "show": {"enum": ["inner", "outer", "all", "none"]},
-            "color": {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 4}
-          },
-          "patternProperties": {"^x-": true},
-          "additionalProperties": false
-        }
+        "borders": {"$ref": "#/$defs/borders"}
+      },
+      "patternProperties": {"^x-": true},
+      "additionalProperties": false
+    },
+    "borders": {
+      "type": "object",
+      "description": "The seams a grid (or a table) draws between its cells, and their colour.",
+      "properties": {
+        "show": {"enum": ["inner", "outer", "all", "none"]},
+        "color": {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 4}
       },
       "patternProperties": {"^x-": true},
       "additionalProperties": false
@@ -916,6 +918,50 @@
           "$ref": "#/$defs/program",
           "description": "A state_exec program run when the widget commits (the action lane), or a bare name the host handles."
         }
+      },
+      "patternProperties": {
+        "^(id|type|title|label|widget|tab|visible_when|enabled_when|disabled_when|tooltip|autofocus|repeat|on_click|on_hover|on_drag|on_drag_start|on_drag_end|on_hover_end|hover)$": true,
+        "^x-": true
+      },
+      "additionalProperties": false
+    },
+    "w_table": {
+      "type": "object",
+      "description": "A table: a header row of columns (a click on a sortable one sorts by it) over rows of cells, in one grid.",
+      "allOf": [{"$ref": "#/$defs/widget_common"}],
+      "properties": {
+        "table": {"$ref": "#/$defs/label", "description": "The widget's label."},
+        "bind": {
+          "$ref": "#/$defs/string",
+          "description": "The state key the sort is kept at: \"name\", \"-name\" (descending) or \"\" (none); default tree.<id>.sort."
+        },
+        "on": {
+          "$ref": "#/$defs/program",
+          "description": "A state_exec program run after the user changes the sort (the action lane), or a bare name the host handles."
+        },
+        "rows": {"$ref": "#/$defs/repeat", "description": "How many rows: a number, a state key or an expression, as repeat: takes it."},
+        "resizable": {"$ref": "#/$defs/flag"},
+        "borders": {"$ref": "#/$defs/borders"},
+        "columns": {
+          "type": "array",
+          "items": {
+            "anyOf": [
+              {"$ref": "#/$defs/scalar"},
+              {
+                "type": "object",
+                "properties": {
+                  "label": {"$ref": "#/$defs/scalar"},
+                  "width": {"$ref": "#/$defs/extent"},
+                  "sort": {"$ref": "#/$defs/string"}
+                },
+                "patternProperties": {"^x-": true},
+                "additionalProperties": false
+              }
+            ]
+          },
+          "description": "One entry per column: its header (label:), its width (px, \"N%\" or auto) and the key a click on its header sorts by (sort:)."
+        },
+        "cells": {"$ref": "#/$defs/widget_list", "description": "The row template: one widget per column, {i} the row."}
       },
       "patternProperties": {
         "^(id|type|title|label|widget|tab|visible_when|enabled_when|disabled_when|tooltip|autofocus|repeat|on_click|on_hover|on_drag|on_drag_start|on_drag_end|on_hover_end|hover)$": true,
@@ -1714,6 +1760,7 @@
           "if": {"properties": {"type": {"const": "heatmap"}}},
           "then": {"$ref": "#/$defs/w_heatmap"}
         },
+        {"if": {"properties": {"type": {"const": "table"}}}, "then": {"$ref": "#/$defs/w_table"}},
         {"if": {"properties": {"type": {"const": "color"}}}, "then": {"$ref": "#/$defs/w_color"}}
       ]
     },
@@ -1752,9 +1799,10 @@
       "if": {"required": ["tabs"]}, "then": {"$ref": "#/$defs/w_tabs"}, "else": {
       "if": {"required": ["list"]}, "then": {"$ref": "#/$defs/w_list"}, "else": {
       "if": {"required": ["heatmap"]}, "then": {"$ref": "#/$defs/w_heatmap"}, "else": {
+      "if": {"required": ["table"]}, "then": {"$ref": "#/$defs/w_table"}, "else": {
       "if": {"required": ["color"]}, "then": {"$ref": "#/$defs/w_color"}, "else": {
       "if": {"required": ["type"]}, "then": {"$ref": "#/$defs/w_custom"}, "else": {"$ref": "#/$defs/w_group"}
-    }}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}},
+    }}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}},
     "widget_map": {
       "if": {"required": ["include"]},
       "then": {"$ref": "#/$defs/include_site"},
@@ -1804,6 +1852,7 @@
                   "tabs",
                   "list",
                   "heatmap",
+                  "table",
                   "color"
                 ]
               }

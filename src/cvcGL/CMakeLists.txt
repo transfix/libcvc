@@ -1143,6 +1143,11 @@ add_test(NAME cvcgl_imgui_windows_menu COMMAND cvcgl_imgui_windows_menu)
 add_executable(cvcgl_imgui_tabs_list test/cvcgl_imgui_tabs_list.cpp)
 target_link_libraries(cvcgl_imgui_tabs_list PRIVATE cvcGL)
 add_test(NAME cvcgl_imgui_tabs_list COMMAND cvcgl_imgui_tabs_list)
+# ImGuiBackend's table (Kind::Table): its header row of TableHeaders, a click on one sorting (and
+# toggling), every row in the one table, through ImGui's own mouse input on a bare context (no GL).
+add_executable(cvcgl_imgui_table test/cvcgl_imgui_table.cpp)
+target_link_libraries(cvcgl_imgui_table PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_table COMMAND cvcgl_imgui_table)
 add_executable(cvcgl_imgui_radio test/cvcgl_imgui_radio.cpp)
 target_link_libraries(cvcgl_imgui_radio PRIVATE cvcGL)
 add_test(NAME cvcgl_imgui_radio COMMAND cvcgl_imgui_radio)
