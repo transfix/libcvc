@@ -562,6 +562,10 @@ enum ValidateExit { kValid = 0, kSchemaProblem = 1, kLoadProblem = 2, kBadYaml =
 struct Validated {
   std::string path;
   std::string yaml_error, load_error;
+  // Where the load error is, when the loader says (a document nested too deep: its deepest
+  // widget), and then load_error without that place in front of it.
+  std::string load_error_source;
+  int load_error_line = 0, load_error_column = 0;
   std::vector<cvc::ariadne::SchemaIssue> issues;
   std::vector<std::string> warnings; // the loader's own (not the schema's)
   int exit = kValid;
@@ -625,6 +629,21 @@ Validated validate_document(cvc::app &app, const std::string &path, bool structu
       if (w.rfind("ari: schema: ", 0) != 0)
         v.warnings.push_back(w);
     v.load_error = r.error;
+    // A load error with a place (docs/ARIADNE.md §6.7) is reported there, as a compiler does: the
+    // loader's message starts "ari: <place>: ", which the report puts first.
+    if (r.error_line > 0) {
+      const std::string at = (r.error_source.empty() ? "line " : r.error_source + ":") +
+                             std::to_string(r.error_line) + ":" + std::to_string(r.error_column);
+      if (const std::string lead = "ari: " + at + ": "; v.load_error.rfind(lead, 0) == 0)
+        v.load_error = v.load_error.substr(lead.size());
+      v.load_error_source = r.error_source;
+      if (path == "-"
+              ? r.error_source.empty()
+              : (!r.error_source.empty() && std::filesystem::equivalent(r.error_source, path, ec)))
+        v.load_error_source = v.path;
+      v.load_error_line = r.error_line;
+      v.load_error_column = r.error_column;
+    }
   }
   if (!v.load_error.empty() || (strict && !v.warnings.empty()))
     v.exit = kLoadProblem;
@@ -674,6 +693,10 @@ int run_validate(const cvc::ariadne::HostOptions &o) {
         out += ", \"yaml_error\": " + json_text(v.yaml_error);
       if (!v.load_error.empty())
         out += ", \"load_error\": " + json_text(v.load_error);
+      if (v.load_error_line > 0)
+        out += ", \"load_error_source\": " + json_text(v.load_error_source) +
+               ", \"load_error_line\": " + std::to_string(v.load_error_line) +
+               ", \"load_error_column\": " + std::to_string(v.load_error_column);
       out += ", \"schema\": [";
       for (std::size_t i = 0; i < v.issues.size(); ++i) {
         const ari::SchemaIssue &s = v.issues[i];
@@ -694,7 +717,10 @@ int run_validate(const cvc::ariadne::HostOptions &o) {
       std::printf("%s: error: %s\n", v.path.c_str(), v.yaml_error.c_str());
     for (const ari::SchemaIssue &s : v.issues)
       std::printf("%s\n", s.text().c_str());
-    if (!v.load_error.empty())
+    if (!v.load_error.empty() && v.load_error_line > 0)
+      std::printf("%s:%d:%d: error: %s\n", v.load_error_source.c_str(), v.load_error_line,
+                  v.load_error_column, v.load_error.c_str());
+    else if (!v.load_error.empty())
       std::printf("%s: error: %s\n", v.path.c_str(), v.load_error.c_str());
     for (const std::string &w : v.warnings)
       std::printf("%s: warning: %s\n", v.path.c_str(), w.c_str());

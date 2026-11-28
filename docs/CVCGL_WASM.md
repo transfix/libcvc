@@ -285,7 +285,7 @@ bool frameYieldLocked() const;
 
 **The contract.** In `App` mode the loop calls `emscripten_sleep(0)` on **every** path
 that renders a frame. A `continue` that skips the frame-end yield breaks it. That is
-the bug `nav_fog_ghost`'s paused path had. Without the in-render yield it would never
+the bug the paused path of `nav_fog_ghost` (a C++ nav demo, since retired) had. Without the in-render yield it would never
 let the browser paint again.
 
 - **Where App does nothing.** It is a no-op natively, and in a wasm build without
@@ -349,8 +349,7 @@ Any other app must not lock: that turns off the watchdog's rescue and the `?fram
 |---|---|---|
 | lsystem_forest, lsystem_coast, terrain_lab, bunny_shadow | at the loop end | yes |
 | volren_bunny, volslice_bunny | at the loop end (the `break`s are native capture) | yes |
-| nav_city_swarm, nav_city_drive | at the loop end (the `continue`s are inside the trail lambda's `for`) | yes |
-| nav_fog_ghost | at the loop end, and on the paused path (fixed: it used to `continue` past the only yield) | yes |
+| nav_scrub | at the loop end | yes |
 | ariadne_hello | at the loop end on Emscripten (`sleep_for` natively); its `--png` / `--offscreen` capture loop renders back to back, so it keeps `Vtk` | yes, interactive loop only |
 | nav_convoy, nav_compute | `std::this_thread::sleep_for` only: native-only, not wasm apps | n/a |
 | pycvc_gl wasm host | Python-driven, no `-sASYNCIFY` | n/a (VTK's sleep never runs) |
@@ -393,8 +392,8 @@ refuses to combine mimalloc with ASan. An explicit `MIMALLOC ON` under ASan gets
 warning instead.
 
 Because mimalloc uses more memory, check a memory-heavy app at its `MAXIMUM_MEMORY`
-cap for growth failures or OOM. The gallery's Austin nav demos (`nav_city_swarm`,
-`nav_city_drive`) run at 4 GB.
+cap for growth failures or OOM. The gallery's demos link at 4 GB, which the Austin city's
+buildings mesh needs (`nav_scrub` on its bundle).
 
 ## -sASYNCIFY_IGNORE_INDIRECT: a checklist, never a default
 
@@ -439,8 +438,8 @@ read it. Serve a built gallery with it injected:
 
 ```
 python3 src/cvcGL/wasm/devtools/serve.py -d build-wasm-mt/gallery --glsync 8822
-# then  http://localhost:8822/nav_city_drive/?glsync          (shim on)
-#       http://localhost:8822/nav_city_drive/?glsync&glshim=0 (shim off: the A/B)
+# then  http://localhost:8822/nav_scrub/?glsync          (shim on)
+#       http://localhost:8822/nav_scrub/?glsync&glshim=0 (shim off: the A/B)
 ```
 
 `serve.py` takes three flags, all off by default (`libcvc-examples-web` passes none):
@@ -736,7 +735,29 @@ the first of these places:
    build tree.
 
 All three give the files the page used to pin by SRI hash on jsDelivr. The gallery copies them
-with the page: `build-pages.py` copies what `<page>.page-files` lists.
+with the page: `build-pages.py` copies what `<page>.page-files` lists. The image addon
+(`addon-image.js` 0.8.0, the release for xterm.js 5.5) is looked for on its own, the same three
+ways: in `CVC_XTERM_DIR`, in a prefix's `share/xterm.js/` (cvcpkg's `xterm-js-addon-image`), or
+downloaded, so a prefix with only the other three packages still gives them.
+
+**Pictures in pixels.** The page loads xterm.js's image addon, which draws Sixel and iTerm2
+inline images. `ari` can't ask a page what it draws, so it sends a document's pictures as
+half-blocks unless the page config's flags ask for pixels (ARIADNE.md §4, the FTXUI backend's
+image modes):
+
+```json
+{"flags": ["--graphics", "iterm"]}
+```
+
+`iterm` sends each picture as a JPEG that the terminal scales to its cells, so a zoom keeps it
+in place. `sixel` sends exact pixels cut to the cell size, which the page measures once the
+terminal has its size and passes as `--cell-size` (unless the flags give one). `ari` keeps
+cutting at that size, so after a zoom the pictures keep their pixels and no longer fill their
+cells exactly; `iterm` is the one to use in a page. With pixels on, `ari`
+sends each frame as a synchronized update (`CSI ? 2026 h` … `l`) and the pictures after the
+repaint. xterm.js 5.5 has no synchronized updates, so the page writes each update to the terminal
+in one piece; split at the repaint's NUL, the next frame's repaint covered the pictures before
+the terminal showed them.
 
 **The tvision page.** `ari_tvision.html` is the same page on the tvision desktop. It needs
 cvcpkg's tvision with its browser console (`tvision` cvc.4, wasm column, on the catalog since

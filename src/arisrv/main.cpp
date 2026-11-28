@@ -1516,9 +1516,7 @@ int main(int argc, char **argv) {
   int ticks = 0;
   int mediaticks = 0;           // cadence for the media (router) heartbeat
   std::uint64_t lastRouted = 0; // last-logged media_router routed count
-#if CVC_ENABLE_WS
-  int reapticks = 0; // cadence for reaping ghost (navigated-away) connections
-#endif
+  int reapticks = 0; // cadence for reaping ghost (navigated-away) connections, gRPC's and WS's
   // The server-authoritative avatar holon for this room (H1): each room step it reads
   // every participant's proposed intent from the replicated tree and integrates it on
   // its own clock (a stamped intent at the tick the client applied it). The relay loop

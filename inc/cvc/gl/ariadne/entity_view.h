@@ -26,8 +26,15 @@
 //
 // A bodies layer draws the entities it takes as one mesh per archetype and LOD rung: a fitted
 // model's rungs are quadric-decimated copies of it (the finest textured, the others in each
-// entity's colour), a box look has one. Each frame the meshes are posed from the entities' poses
-// and an entity off screen is drawn by no rung. The entities on screen are ranked by their size
+// entity's colour), a box look has one. A boat (a dynamicboat vehicle) is drawn about its hull
+// body's origin as the boat node draws it: its model fitted to its length overall, its keel on its
+// hull's bottom (boat_fit_of), and a box look's template its hull, flat-shaded as add_hull_node
+// draws it (its topsides and stripe in the entity's colours, its wet bottom its own; a box hull
+// open, with its teak sole), with a model's four rungs (each colour decimated on its own). A
+// relay's client knows a boat's length overall and keel but not its hull, so its box look there
+// is the box. Each frame the meshes are posed from the entities' poses and an entity off screen is
+// drawn by no rung; a rung drawing the entities it drew, none of them moved (a still fleet, a
+// paused world), is not packed or sent again. The entities on screen are ranked by their size
 // there, the largest taking the finest rung up to its cap (`near_cap` for the finest; 28 and 72
 // for the next) while their radius on screen is at least that rung's `px`.
 //
@@ -38,10 +45,12 @@
 // fifth nearer, so a camera moving among them does not swap them frame by frame. A layer with at
 // most `threshold` entities promotes them all.
 //
-// An entity goes to the first bodies layer (in the document's order) whose `of:` takes it. One no
-// layer takes, a boat, or one whose look no layer can draw (a mesh file without `fit`) keeps a node
-// of its own. A view with no bodies layer has one over all of its entities (`entities`, the
-// defaults above), so a world of up to 32 entities looks as it did before the entity view.
+// An entity goes to the first bodies layer (in the document's order) whose `of:` takes it, a boat
+// as a car does. One no layer takes, or one whose look no layer can draw (a mesh file without
+// `fit`) keeps a node of its own. A view with no bodies layer has one over all of its entities
+// (`entities`, the defaults above), so a world of up to 32 entities looks as it did before the
+// entity view. The water node keeps its water out of the nearest boats' hulls however they are
+// drawn: it reads where the world's boats are, not their nodes.
 //
 // The same view draws both holons' entities (ARIADNE_WORLDS.md §18): a scene's own world
 // (update_entity_view: the world's vehicles posed from the physics binding, between the last two
@@ -86,6 +95,9 @@ struct entity_draw_info {
   vehicle_shape shape;             // its chassis box and wheels
   double base_z = -1.0;            // a model's base below the chassis's centre (negative)
   double fit_length = 0.0;         // the length a model is fitted to; 0: shape.length
+  // A boat's hull (its preset's, when the view knows it): its box look's template is the hull
+  // (vehicle_look_mesh_of), and its hull while its model loads. Null: the box look's boxes.
+  std::shared_ptr<const cvc::physics::boat_desc> boat;
   // Where it is now, when known: who is nearest until its first pose() says.
   std::array<double, 3> position{0.0, 0.0, 0.0};
   bool has_position = false;
@@ -98,6 +110,7 @@ struct entity_view_stats {
   std::size_t promoted = 0;  // of those, drawn as their own nodes
   std::size_t instanced = 0; // drawn by a rung in the last draw (on screen, not promoted)
   std::size_t meshes = 0;    // the rungs' mesh nodes
+  std::size_t sent = 0;      // rungs packed and sent in the last draw (not one of still copies)
   std::size_t rebuilds = 0;  // times the layers were made (set_entities)
 };
 

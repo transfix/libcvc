@@ -36,9 +36,11 @@
 #include <cvc/ariadne/media_save.h>   // §5.29 saving a picture or a video
 #include <cvc/ariadne/net_host.h>     // net_host_status (the net capability tokens)
 #include <cvc/ariadne/oidc_host.h>    // pump_oidc
+#include <cvc/ariadne/principal.h>    // set_scope_principal: what a mount runs as (SH11)
 #include <cvc/ariadne/requires.h>     // free_heads: the isolation rules' oidc check
 #include <cvc/ariadne/rich_text.h>    // §5.20 parse_text_style
 #include <cvc/ariadne/stream_intrinsics.h> // retarget_document_streams: a move takes its streams
+#include <cvc/ariadne/uri.h>               // parse_uri: a mount's principal (ARIADNE_SHELL.md 4.12)
 #include <cvc/core/app.h>
 #include <cvc/core/exec_pool.h>    // an isolated document's pump; in_pump_all (host-thread calls)
 #include <cvc/core/notify.h>       // §5.24 the feed the tray's bell shows
@@ -112,6 +114,15 @@ void key_range(cvc::app &ctx, const std::string &path, double &lo, double &hi) {
   } catch (const std::exception &) {
   }
 }
+
+// Not inlined into its caller: emit_node recurses with the widget tree, and MSVC gives it one
+// frame for every case's locals, so a case's work that has its own goes in a function of its own
+// (a 40-deep tree's walk stays well inside a thread's stack).
+#if defined(_MSC_VER)
+#define CVC_ARI_NOINLINE __declspec(noinline)
+#else
+#define CVC_ARI_NOINLINE __attribute__((noinline))
+#endif
 
 // §4 read-lane: is this bind an s-EXPRESSION (a computed value) rather than a state path?
 // State paths are dotted identifiers and never begin with '('; an s-expr always does. So the
@@ -1643,9 +1654,10 @@ struct Runtime::Impl {
   // (finish_context, the name probe): host_proxied in an `any` group, as they are elsewhere
   // (null: group 0, the init lane). `host` is the program's async host (ictx.host), which
   // (file-pick) parks it on.
+  // `scope` is the program's (its root_path): what it saves is fetched as its principal.
   void install_host_verbs(const std::shared_ptr<cvc::state_exec::environment> &env,
                           cvc::state_exec::exec_group *group, cvc::state_exec::async_host &host,
-                          const NotifyScope &notify) const;
+                          const NotifyScope &notify, const std::string &scope) const;
   // §10.8 (file-pick): whether a picker is open (one at a time), and the Runtime's own "Open
   // file" window, drawn by render() where the host has no picker. Shared with the verb, as a
   // program may outlive this Runtime. Drawn and opened on the drawing thread; `cancel` is set by a
@@ -1662,7 +1674,8 @@ struct Runtime::Impl {
   // file-pick parks its program on `host` and opens the picker on the host thread: through the
   // host-call queue of the pump_all holding `group` (null: group 0, the init lane, inline).
   void bind_file_verbs(const std::shared_ptr<cvc::state_exec::environment> &env,
-                       cvc::state_exec::exec_group *group, cvc::state_exec::async_host &host) const;
+                       cvc::state_exec::exec_group *group, cvc::state_exec::async_host &host,
+                       const std::string &scope) const;
 
   // §5.29 saving a picture or a video: a context menu's Save image... / Save video..., and
   // (save-url). A save's bytes are fetched as the widget's are (image_cache().fetch), the file is
@@ -1752,6 +1765,7 @@ struct Runtime::Impl {
     MediaSave m;
     m.url = uri;
     m.auth = w.media_auth;
+    m.scope = current_prefix(); // fetched as its principal (ARIADNE_SHELL.md 4.12)
     m.video = video;
     backend->item_save(m);
   }
@@ -2082,6 +2096,8 @@ struct Runtime::Impl {
     std::string script;                            // the program's text, to say which one failed
     std::string scope; // the prefix it runs at: a quit application's are stopped (§5.25)
     std::shared_ptr<const NotifyScope> notify; // its notify verbs', which its children bind too
+    // The frame budget of the mounts: entry its scope is under (ARIADNE_SHELL.md 4.11), or null.
+    std::shared_ptr<cvc::state_exec::frame_account> account;
   };
   std::unordered_map<int, std::shared_ptr<ActionContext>> live_actions_;
   // A program's process carries its context's chroot, as a spawned child's does, and this
@@ -2091,6 +2107,7 @@ struct Runtime::Impl {
   void own_scope(cvc::state_exec::execute_options &opts, const ActionContext &ac) const {
     opts.root_path = ac.ictx.root_path;
     opts.owner_root = prefix;
+    opts.account = ac.account; // a mount's budget (ARIADNE_SHELL.md 4.11), its children keep it
   }
   // Runtime::start_process while the sweep walks live_actions_ (a done that starts the next one):
   // joined to them once the walk is over.
@@ -2332,7 +2349,9 @@ struct Runtime::Impl {
   static constexpr const char *kNotifyEvent = "\x1F"
                                               "notify.";
   static constexpr const char *kNotifyWindowId = "_notifications";
+  static constexpr const char *kBudgetWindowId = "_budgets"; // ARIADNE_SHELL.md 4.11
   Widget notify_window;
+  Widget budget_window; // ARIADNE_SHELL.md 4.11 the Budgets window, made each frame it shows
   std::uint64_t notify_window_rev = ~std::uint64_t(0);
   void emit_notify_window();
   bool builtin_event(const QueuedAction &a);
@@ -2573,6 +2592,9 @@ struct Runtime::Impl {
   // `{i}` substituted) for a `repeat` template: drawn by begin_emit, or as a grid's cells.
   void begin_repeat(const Widget &w, bool cell);
   void begin_cells(const Widget &c); // a grid's child: its instances, each in a cell
+  // Out of emit_node, so its frame (the stack one step of the walk takes) stays small:
+  void emit_mounts(const Widget &w);      // ARIADNE_SHELL.md 4.2 a mounts: slot's mounts
+  bool menu_item_action(const Widget &w); // a menu item, its label an expression or not
   void emit_children(const Widget &w);
   void emit_container(const Widget &w); // lay children out per w.layout (§3.0.3b)
   void render();
@@ -2645,6 +2667,7 @@ struct Runtime::Impl {
   int app_menu_depth = 0; // > 0 while an application's menu is being drawn
   void emit_app_menus();
   void app_menu(std::size_t k); // frame_apps[k]'s menu (the next running one from k), then the rest
+  void app_commands(const WindowsMenuPlan::App &a); // its menu's Restart, Quit (Close), its end
   void quit_app(const std::string &scope);
   void restart_app(const std::string &scope);
   bool app_running(const std::string &scope) const;
@@ -2653,12 +2676,83 @@ struct Runtime::Impl {
   // scope, running}, and ariadne.name, the document's own meta.name, for a Processes view to read.
   // What was last written, so a frame writes only what changed.
   struct MirroredApp {
-    std::string name, scope;
+    std::string name, scope, principal;
     bool running = true;
   };
   std::map<std::string, MirroredApp> mirrored_apps;
   std::string mirrored_name;
   void mirror_apps();
+
+  // ---- on-demand mounts (docs/roadmap/ARIADNE_SHELL.md 4.2, 4.11; docs/ARIADNE.md §6.8) ----
+  // The host's loader (AppRuntime's, which keeps the loader itself free of state): a mounts:
+  // entry's document, parsed as a load: of it would be, its requires: checked against this host.
+  Runtime::MountLoader mount_loader_;
+  // One child of a mounts: slot's key, by its sub-prefix (<the slot's scope>.includes.<as>).
+  struct MountSlot {
+    std::string slot_key;     // the slot's state key, resolved: the entry is <slot_key>.<as>
+    std::string parent_scope; // the scope the slot sits in
+    std::string as;
+    std::string uri; // as the entry gives it
+    std::vector<std::pair<std::string, std::string>> args;
+    bool catalog = false;            // the entry's catalog flag as it opened (4.12)
+    std::string canonical;           // where its bytes came from
+    std::string principal;           // local, file:<dir> or remote:<origin> (4.12)
+    std::string name;                // its application name
+    std::unique_ptr<Widget> wrapper; // the mount, as expand_load builds a load:'s; null: refused
+    std::string refused;             // why it is not mounted ("" when it is)
+    std::vector<std::string> sources;
+    std::map<std::string, std::int64_t> stamps;
+    bool stale = false; // a source changed: parse it again
+    std::shared_ptr<cvc::state_exec::frame_account> account;
+    Runtime::MountBudget budget;
+    double held_since = -1.0; // the frame clock since which it has been held every frame; -1 not
+    bool noticed = false;     // the notice for this stretch at its limit was posted
+    bool by_memory = false;   // its memory, not its time, is what holds it
+  };
+  std::map<std::string, MountSlot> mount_slots_;
+  // The slots in the tree, each with the scope it sits in, as plan_windows_menu last walked it
+  // (into the open mounts too, for theirs).
+  std::vector<std::pair<const Widget *, std::string>> mounts_widgets_;
+  // The document's own first slot's key, which (app-open)/(app-close) write: set with the tree
+  // (set_root) and by each reconcile, read by the verbs when they are called, on any thread.
+  // Shared, so a program that outlives the Runtime still reads valid memory.
+  struct SlotKey {
+    std::mutex m;
+    std::string key;
+    void set(const std::string &k) {
+      std::lock_guard<std::mutex> lock(m);
+      key = k;
+    }
+    std::string get() {
+      std::lock_guard<std::mutex> lock(m);
+      return key;
+    }
+  };
+  std::shared_ptr<SlotKey> doc_slot_ = std::make_shared<SlotKey>();
+  double mounts_measured_at_ = -1.0; // the frame clock their memory and holds were last read at
+  double mounts_mirrored_at_ = -1.0; // ... and their budgets mirrored at
+  static constexpr double kMountHeldNotice = 3.0; // seconds held at the limit before the notice
+  static constexpr int kMaxOpenMounts = 256;      // as a document's load: total (kMaxMounts)
+  static constexpr int kMaxMountDepth = 32;
+  void reconcile_mounts(); // render: open, close, parse again; plans the windows menu after
+  bool reconcile_mounts_once();
+  void open_mount(MountSlot &slot, const Widget &w);
+  void close_mount(const std::string &sub_prefix, bool forget_init);
+  void refuse_mount(MountSlot &slot, const std::string &why);
+  void publish_mount_status(const MountSlot &slot);
+  std::vector<std::string> mount_list(const std::vector<std::string> &literal,
+                                      const std::string &bind, const std::string &scope) const;
+  std::string mount_norm(const std::string &uri, const std::string &base) const;
+  std::string mount_principal(const Widget &w, const std::string &scope, const std::string &uri,
+                              const std::string &canonical, bool catalog) const;
+  Runtime::MountBudget mount_budget(const MountSlot &slot) const;
+  void apply_mount_budget(MountSlot &slot);
+  void measure_mounts(); // their memory, their time held at the limit, the notice, the mirror
+  void emit_budget_window();
+  std::shared_ptr<cvc::state_exec::frame_account> account_for(const std::string &scope) const;
+  void bind_mount_verbs(const cvc::state_exec::environment_ptr &env,
+                        const std::string &scope) const;
+  bool is_mounts_app(const std::string &scope) const { return mount_slots_.count(scope) != 0; }
   static constexpr const char *kAppEvent = "\x1F"
                                            "app.";
   // Draw as if inside the mount at `scope` (its prefix and functions), for an application's menus
@@ -3019,6 +3113,38 @@ template <class Start> void Runtime::Impl::run_walk(Start &&start) {
     emitting_instance_ = instance;
     throw;
   }
+}
+
+// ARIADNE_SHELL.md 4.2 on the walk: each mount open in the slot, in the slot's order, under its
+// own id. (The slots were reconciled at the top of the frame, so they stay as they are while the
+// walk runs.)
+CVC_ARI_NOINLINE void Runtime::Impl::emit_mounts(const Widget &w) {
+  if (w.bind.empty())
+    return;
+  const std::string key = resolve(w.bind);
+  std::vector<std::pair<std::string, const Widget *>> open;
+  for (const auto &[sub, slot] : mount_slots_)
+    if (slot.slot_key == key && slot.parent_scope == current_prefix() && slot.wrapper)
+      open.emplace_back(sub, slot.wrapper.get());
+  for (std::size_t k = open.size(); k-- > 0;) // the last first: the first is on top
+    push_then([this, k, sub = std::move(open[k].first), wrapper = open[k].second] {
+      emit_path.push_back(k);
+      backend->push_id(sub.c_str());
+      push_then([this] { // after the mount
+        backend->pop_id();
+        emit_path.pop_back();
+      });
+      begin_emit(*wrapper);
+    });
+}
+
+// A label that is an expression is worked out each frame on the read lane, as a text's bind is
+// (ARIADNE_SHELL.md 4.9: the shell's Apps menu lists its catalog by name).
+CVC_ARI_NOINLINE bool Runtime::Impl::menu_item_action(const Widget &w) {
+  if (!is_expr(w.label))
+    return backend->menu_item_action(w.label.c_str());
+  const std::string shown = eval_text_or_literal(w.label);
+  return backend->menu_item_action(shown.c_str());
 }
 
 // One step of the walk: the top frame does what the recursive walk did next for it. A step never
@@ -3492,6 +3618,9 @@ void Runtime::Impl::emit_node(const Widget &w) {
   const char *label = w.label.c_str();
   bool inner_click = false; // a group: something inside it took this walk's click
   switch (w.kind) {
+  case Kind::Mounts: // ARIADNE_SHELL.md 4.2: each mount open in this slot, in its own scope
+    emit_mounts(w);
+    break;
   case Kind::Menubar:
     // §5.25 a loaded document's (a repeated one's instance too): one menu of the outer bar
     if (!scope_stack.empty() && is_app_scope(current_prefix()))
@@ -3578,7 +3707,7 @@ void Runtime::Impl::emit_node(const Widget &w) {
   }
 
   case Kind::MenuItemAction:
-    if (tinted([&] { return b.menu_item_action(label); }))
+    if (tinted([&] { return menu_item_action(w); }))
       enqueue(w.on);
     break;
 
@@ -4248,6 +4377,7 @@ void Runtime::Impl::emit_node(const Widget &w) {
         // icon_size: says), so a phone's dense screen gets a sharp one.
         media::ImageRequest rq;
         rq.uri = icon;
+        rq.scope = current_prefix(); // fetched as its principal (ARIADNE_SHELL.md 4.12)
         rq.auth = w.media_auth;
         rq.w = 3 * std::max(16, static_cast<int>(std::lround(w.icon_size)));
         media::ImageView v;
@@ -4560,6 +4690,7 @@ void Runtime::Impl::emit_media_image(const Widget &w, const std::string &uri, co
   const bool fill = w.img_fill > 0.0;
   media::ImageRequest rq;
   rq.uri = uri;
+  rq.scope = current_prefix(); // fetched as its principal (ARIADNE_SHELL.md 4.12)
   rq.auth = w.media_auth;
   rq.w = fill ? fill_box(draw_w) : draw_w;
   // A box keeps its height however the width is rounded: the raster's is scaled with it.
@@ -4641,6 +4772,7 @@ bool Runtime::Impl::expand_emoji(const std::string &value, const std::string &ma
             key += "#" + to;
             media::PlayerSource ps;
             ps.uri = to;
+            ps.scope = current_prefix(); // fetched as its principal (ARIADNE_SHELL.md 4.12)
             ps.video = true;
             ps.frame_w = ps.frame_h = 64;
             ps.loop = ps.muted = true;
@@ -4665,6 +4797,7 @@ bool Runtime::Impl::expand_emoji(const std::string &value, const std::string &ma
             // shape; an animated GIF or WebP moves, as an image:'s does.
             media::ImageRequest rq;
             rq.uri = to;
+            rq.scope = current_prefix(); // fetched as its principal (ARIADNE_SHELL.md 4.12)
             rq.w = 32;
             media::ImageView v;
             pic = media_picture(rq, v);
@@ -4920,6 +5053,7 @@ bool Runtime::Impl::open_backdrop(const Widget &w, bool window, bool cell) {
     key += "#" + ref;
     media::PlayerSource ps;
     ps.uri = ref;
+    ps.scope = current_prefix(); // fetched as its principal (ARIADNE_SHELL.md 4.12)
     ps.auth = bg.auth;
     ps.video = true;
     ps.frame_w = 960;
@@ -4948,6 +5082,7 @@ bool Runtime::Impl::open_backdrop(const Widget &w, bool window, bool cell) {
     // than the cache's cap.
     media::ImageRequest rq;
     rq.uri = ref;
+    rq.scope = current_prefix(); // fetched as its principal (ARIADNE_SHELL.md 4.12)
     rq.auth = bg.auth;
     rq.w = std::max(1, image_cache().limits().max_image_px / 2);
     rq.h = 0;
@@ -5069,6 +5204,7 @@ void Runtime::Impl::emit_player(const Widget &w, const char *label) {
   const bool decorative = !w.controls;
   media::PlayerSource ps;
   ps.uri = uri;
+  ps.scope = current_prefix(); // fetched as its principal (ARIADNE_SHELL.md 4.12)
   ps.auth = w.media_auth;
   ps.video = video;
   ps.frame_w = bw;
@@ -5149,6 +5285,7 @@ void Runtime::Impl::emit_player(const Widget &w, const char *label) {
     } else if (media::is_uri(w.poster)) {
       media::ImageRequest rq;
       rq.uri = w.poster;
+      rq.scope = current_prefix(); // fetched as its principal (ARIADNE_SHELL.md 4.12)
       rq.auth = w.media_auth;
       rq.w = bw;
       rq.h = bh;
@@ -5511,7 +5648,9 @@ void Runtime::Impl::render() {
   windows_menu_drawn = false;
   apps_drawn = false;
   first_bar_drawn = false;
-  plan_frame_apps(); // §5.25 the repeated applications' instances this frame
+  reconcile_mounts(); // ARIADNE_SHELL.md 4.2 the mounts: entries opened, closed or changed
+  plan_frame_apps();  // §5.25 the repeated applications' instances this frame
+  measure_mounts();   // 4.11 their memory, their time at the limit, the notice
   mirror_apps();
   backend->begin_frame();
   clicks_fired = 0;
@@ -5549,6 +5688,7 @@ void Runtime::Impl::render() {
     if (root.context_menu && root.repeat.empty() && visible(root))
       run_walk([&] { emit_context_menu(root, ContextMenuOver::Main, main_view_pick); });
     emit_notify_window(); // §5.24, while Show all... has it open
+    emit_budget_window(); // ARIADNE_SHELL.md 4.11, while a notice's click has it open
     // §10.8 the Runtime's own "Open file" window, over the document, while a (file-pick) waits
     // on it.
     if (file_pick->cancel.exchange(false))
@@ -5585,6 +5725,7 @@ void Runtime::Impl::render() {
 
 void Runtime::Impl::plan_windows_menu() {
   WindowsMenuPlan p;
+  std::vector<std::pair<const Widget *, std::string>> mounts; // the mounts: slots met
   std::set<std::string> toggled;   // open-state paths a menu item of the document already toggles
   std::set<std::string> bar_menus; // the titles of the menus straight in a menubar
   std::vector<WindowsMenuPlan::Item> windows;
@@ -5601,6 +5742,8 @@ void Runtime::Impl::plan_windows_menu() {
     bool in_menubar;
     const Widget *mount;
     std::string mount_scope, mount_parent;
+    // `w` null: the mounts: entry `slot` has been walked (ARIADNE_SHELL.md 4.9).
+    const std::pair<const std::string, MountSlot> *slot = nullptr;
   };
   // A repeated mount's bar: the first menubar in it, in tree order, not in a nested mount.
   const auto first_bar = [](const Widget &m) -> const Widget * {
@@ -5624,6 +5767,22 @@ void Runtime::Impl::plan_windows_menu() {
   while (!todo.empty()) {
     Visit v = std::move(todo.back());
     todo.pop_back();
+    if (!v.w) { // a mounts: entry is an application, with a bar or without
+      const auto &[sub, slot] = *v.slot;
+      bool has_app = false;
+      for (const WindowsMenuPlan::App &a : p.apps)
+        has_app = has_app || a.mount == slot.wrapper.get();
+      if (!has_app) {
+        WindowsMenuPlan::App a;
+        a.mount = slot.wrapper.get();
+        a.name = slot.name;
+        a.scope = sub;
+        a.functions = slot.wrapper->functions.get();
+        a.parent_scope = v.scope;
+        p.apps.push_back(std::move(a));
+      }
+      continue;
+    }
     const Widget &w = *v.w;
     const std::string &scope = v.scope;
     bool in_menubar = v.in_menubar;
@@ -5713,6 +5872,21 @@ void Runtime::Impl::plan_windows_menu() {
         if (!w.label.empty())
           p.title = w.label;
         break;
+      case Kind::Mounts: { // ARIADNE_SHELL.md 4.2: the slot, and each mount open in it
+        mounts.emplace_back(&w, scope);
+        if (w.bind.empty())
+          break;
+        const std::string key = resolve_bind(scope, w.bind);
+        std::vector<const std::pair<const std::string, MountSlot> *> open;
+        for (const auto &e : mount_slots_)
+          if (e.second.slot_key == key && e.second.parent_scope == scope && e.second.wrapper)
+            open.push_back(&e);
+        for (auto e = open.rbegin(); e != open.rend(); ++e) { // the first on top: tree order
+          todo.push_back({nullptr, scope, false, nullptr, {}, {}, *e}); // then its application
+          todo.push_back({(*e)->second.wrapper.get(), scope, false, nullptr, {}, {}});
+        }
+        break;
+      }
       case Kind::Window: {
         const std::string &id = w.id.empty() ? w.label : w.id;
         windows.push_back({w.label.empty() ? id : w.label,
@@ -5743,6 +5917,7 @@ void Runtime::Impl::plan_windows_menu() {
       a.name += " (" + a.mount->scope.substr(a.mount->scope.rfind('.') + 1) + ")";
   p.toggled = std::move(toggled);
   windows_menu = std::move(p);
+  mounts_widgets_ = std::move(mounts);
 }
 
 std::vector<Runtime::Impl::RepeatedWindow> Runtime::Impl::repeated_windows() {
@@ -5860,6 +6035,7 @@ std::string Runtime::Impl::tray_picture(const Widget &w) {
   if (media::is_video_uri(icon)) {
     media::PlayerSource ps;
     ps.uri = icon;
+    ps.scope = current_prefix(); // fetched as its principal (ARIADNE_SHELL.md 4.12)
     ps.auth = w.media_auth;
     ps.video = true;
     ps.frame_w = ps.frame_h = kPx;
@@ -5876,6 +6052,7 @@ std::string Runtime::Impl::tray_picture(const Widget &w) {
   }
   media::ImageRequest rq;
   rq.uri = icon;
+  rq.scope = current_prefix(); // fetched as its principal (ARIADNE_SHELL.md 4.12)
   rq.auth = w.media_auth;
   rq.w = rq.h = kPx;
   rq.fit = media::Fit::Cover;
@@ -6018,11 +6195,21 @@ void Runtime::Impl::mirror_apps() {
     return;
   const std::string base = resolve_bind(prefix, "ariadne.apps");
   std::map<std::string, MirroredApp> now;
+  // ARIADNE_SHELL.md 4.11 a mounts: application's budget and its share of it, for the Processes
+  // view: its last frame's steps and seconds, its memory, each limit, and whether it was held; at
+  // most twice a second, as the view polls.
+  const bool budgets = mounts_mirrored_at_ < 0.0 || frame_t - mounts_mirrored_at_ >= 0.5 ||
+                       frame_t < mounts_mirrored_at_;
+  if (budgets)
+    mounts_mirrored_at_ = frame_t;
   for (const WindowsMenuPlan::App &a : frame_apps) {
     MirroredApp m;
     m.name = a.name;
     m.scope = cvc::state_exec::process_scope(a.scope, prefix);
     m.running = app_running(a.scope);
+    const auto slot = mount_slots_.find(a.scope);
+    if (slot != mount_slots_.end())
+      m.principal = slot->second.principal;
     std::string key = app_key(m.scope);
     if (key.empty())
       key = "app";
@@ -6036,6 +6223,21 @@ void Runtime::Impl::mirror_apps() {
       write<std::string>(app, at + "scope", m.scope);
     if (was == mirrored_apps.end() || was->second.running != m.running)
       write<int>(app, at + "running", m.running ? 1 : 0);
+    if (was == mirrored_apps.end() || was->second.principal != m.principal)
+      write<std::string>(app, at + "principal", m.principal);
+    if (slot != mount_slots_.end() && slot->second.account &&
+        (budgets || was == mirrored_apps.end())) {
+      const cvc::state_exec::frame_account &acc = *slot->second.account;
+      const Runtime::MountBudget &b = slot->second.budget;
+      const std::string bt = at + "budget" + cvc::state::SEPARATOR;
+      write<double>(app, bt + "steps", static_cast<double>(acc.last_steps.load()));
+      write<double>(app, bt + "max_steps", static_cast<double>(b.steps));
+      write<double>(app, bt + "time", acc.last_seconds.load());
+      write<double>(app, bt + "max_time", b.time);
+      write<double>(app, bt + "memory", static_cast<double>(acc.memory.load()));
+      write<double>(app, bt + "max_memory", static_cast<double>(b.memory));
+      write<int>(app, bt + "held", slot->second.held_since >= 0.0 ? 1 : 0);
+    }
     now.emplace(std::move(key), std::move(m));
   }
   for (const auto &[key, m] : mirrored_apps)
@@ -6073,22 +6275,32 @@ void Runtime::Impl::app_menu(std::size_t k) {
     b.pop_id();
     return;
   }
+  if (!a.bar) { // ARIADNE_SHELL.md 4.9 a mounts: application without a bar: its commands alone
+    app_commands(a);
+    return;
+  }
   const PushedScope in = push_scope(a.scope, a.functions);
   ++app_menu_depth;
   push_then([this, k, in] { // after its entries
     --app_menu_depth;
     pop_scope(in);
-    Backend &be = *backend;
-    const WindowsMenuPlan::App &app_k = frame_apps[k];
-    be.separator();
-    if (be.menu_item_action(("Restart " + app_k.name).c_str()))
-      queued_events.push_back({kAppEvent + std::string("restart:") + app_k.scope, prefix});
-    if (be.menu_item_action(("Quit " + app_k.name).c_str()))
-      queued_events.push_back({kAppEvent + std::string("quit:") + app_k.scope, prefix});
-    be.end_menu();
-    be.pop_id();
+    backend->separator();
+    app_commands(frame_apps[k]);
   });
   emit_children(*a.bar);
+}
+
+// The end of an application's menu: Restart and Quit, and Close for a mounts: entry's.
+void Runtime::Impl::app_commands(const WindowsMenuPlan::App &a) {
+  Backend &b = *backend;
+  if (b.menu_item_action(("Restart " + a.name).c_str()))
+    queued_events.push_back({kAppEvent + std::string("restart:") + a.scope, prefix});
+  if (b.menu_item_action(("Quit " + a.name).c_str()))
+    queued_events.push_back({kAppEvent + std::string("quit:") + a.scope, prefix});
+  if (is_mounts_app(a.scope) && b.menu_item_action(("Close " + a.name).c_str()))
+    queued_events.push_back({kAppEvent + std::string("close:") + a.scope, prefix});
+  b.end_menu();
+  b.pop_id();
 }
 
 // §5.25 Quit: the application's windows, menus and tray icons go, its on_tick: and the programs it
@@ -6132,6 +6344,741 @@ void Runtime::Impl::restart_app(const std::string &scope) {
       it = path_under(*it, scope) ? done->erase(it) : std::next(it);
   cvc::notify_clear_under(app, scope);
   quit_apps.erase(scope);
+}
+
+// ---- on-demand mounts (docs/roadmap/ARIADNE_SHELL.md 4.2, 4.11; docs/ARIADNE.md §6.8) ----------
+
+namespace {
+// A mount id as a mounts: entry may give it: one clean state-path segment, [A-Za-z0-9_], not
+// starting with a digit (the loader's sanitize_mount_id would rename anything else).
+bool clean_mount_id(const std::string &as) {
+  if (as.empty() || std::isdigit(static_cast<unsigned char>(as.front())))
+    return false;
+  return std::all_of(as.begin(), as.end(), [](char c) {
+    return std::isalnum(static_cast<unsigned char>(c)) || c == '_';
+  });
+}
+
+// `uri` as an id: its last path segment without its extension, made a clean segment.
+std::string mount_id_from_uri(const std::string &uri) {
+  std::string s = uri;
+  if (const std::size_t q = s.find_first_of("?#"); q != std::string::npos)
+    s = s.substr(0, q);
+  while (!s.empty() && (s.back() == '/' || s.back() == '\\'))
+    s.pop_back();
+  if (const std::size_t slash = s.find_last_of("/\\"); slash != std::string::npos)
+    s = s.substr(slash + 1);
+  if (const std::size_t dot = s.find_last_of('.'); dot != std::string::npos && dot != 0)
+    s = s.substr(0, dot);
+  std::string out;
+  for (const char c : s)
+    out.push_back(std::isalnum(static_cast<unsigned char>(c)) || c == '_' ? c : '_');
+  if (out.empty())
+    out = "app";
+  if (std::isdigit(static_cast<unsigned char>(out.front())))
+    out.insert(out.begin(), '_');
+  return out;
+}
+
+// How many mounts deep `sub` is below `prefix` (its "includes" segments).
+int mount_depth(const std::string &sub, const std::string &prefix) {
+  const std::string rel = cvc::state_exec::process_scope(sub, prefix);
+  int n = 0;
+  std::size_t at = 0;
+  while (at <= rel.size()) {
+    std::size_t dot = rel.find(cvc::state::SEPARATOR[0], at);
+    if (dot == std::string::npos)
+      dot = rel.size();
+    if (rel.compare(at, dot - at, "includes") == 0)
+      ++n;
+    at = dot + 1;
+  }
+  return n;
+}
+
+// A number at `path`, or `def` when there is none (or it is not a number).
+double read_number_or(cvc::app &app, const std::string &path, double def) {
+  const std::string s = read_string(app, path);
+  if (s.empty())
+    return def;
+  try {
+    std::size_t used = 0;
+    const double v = std::stod(s, &used);
+    return used > 0 && std::isfinite(v) ? v : def;
+  } catch (const std::exception &) {
+    return def;
+  }
+}
+} // namespace
+
+Runtime::MountBudget Runtime::default_mount_budget(const std::string &principal) {
+  // Settled against the shipped examples (docs/ARIADNE.md §6.8): measured mounted in the shell, the
+  // busiest one's frame stays far under the local default. A document from a file or the network
+  // gets a fifth of the steps and the time, and a quarter of the memory.
+  MountBudget b;
+  if (principal == "local") {
+    b.steps = 100000;
+    b.time = 0.025;
+    b.memory = std::uint64_t{256} << 20;
+  } else {
+    b.steps = 20000;
+    b.time = 0.005;
+    b.memory = std::uint64_t{64} << 20;
+  }
+  return b;
+}
+
+// The URIs a slot lists (allow:, catalog:): its literal list, else the bound key's children's
+// values (a list as state-set-tree writes one), else the key's own value.
+std::vector<std::string> Runtime::Impl::mount_list(const std::vector<std::string> &literal,
+                                                   const std::string &bind,
+                                                   const std::string &scope) const {
+  if (bind.empty())
+    return literal;
+  std::vector<std::string> out;
+  const std::string key = resolve_bind(scope, bind);
+  try {
+    if (cvc::state *node = cvc::state::instance(app).findDescendant(key)) {
+      for (const std::string &c : node->childNames()) {
+        const std::string v = read_string(app, key + cvc::state::SEPARATOR + c);
+        if (!v.empty())
+          out.push_back(v);
+      }
+      if (out.empty()) {
+        const std::string v = read_string(app, key);
+        if (!v.empty())
+          out.push_back(v);
+      }
+    }
+  } catch (const std::exception &) {
+  }
+  return out;
+}
+
+// A URI as the slot compares it: a local path made absolute against `base` and made canonical the
+// way the resolver makes a document's own path (so `base` and the entry's path are in one form:
+// on Windows a short name such as RUNNER~1 is spelled out, and a link is followed). A path written
+// with a trailing slash keeps it, so an allow: prefix matches only under that directory. Any other
+// scheme's as written.
+std::string Runtime::Impl::mount_norm(const std::string &uri, const std::string &base) const {
+  const Uri u = parse_uri(uri);
+  if (u.scheme != "file")
+    return uri;
+  std::filesystem::path p(u.path);
+  if (p.is_relative() && !base.empty())
+    p = std::filesystem::path(base) / p;
+  std::error_code ec;
+  const std::filesystem::path canon = std::filesystem::weakly_canonical(p, ec);
+  std::string out = (ec ? p.lexically_normal() : canon).generic_string();
+  const bool dir = !u.path.empty() && (u.path.back() == '/' || u.path.back() == '\\');
+  if (dir && (out.empty() || out.back() != '/'))
+    out += '/';
+  return out;
+}
+
+// 4.12 who a mount runs as, from where its bytes came: `local` for a cvc:// or state:// document,
+// and for a local file the slot's catalog: lists or whose entry's catalog flag is set;
+// `remote:<scheme>://<host>` for one fetched from the network, whatever either says;
+// `file:<its directory>` for any other local file. The slot's document writes both: a mounted
+// document cannot write outside its own scope (§7.4), so it cannot name itself a catalog's.
+std::string Runtime::Impl::mount_principal(const Widget &w, const std::string &scope,
+                                           const std::string &uri, const std::string &canonical,
+                                           bool catalog) const {
+  const Uri u = parse_uri(uri);
+  if (u.scheme == "cvc" || u.scheme == "state")
+    return "local";
+  if (u.scheme == "http" || u.scheme == "https")
+    return "remote:" + u.scheme + "://" + u.path.substr(0, u.path.find('/'));
+  if (catalog)
+    return "local";
+  const MountsSpec none{}; // a slot without a spec (a local, so no static state)
+  const MountsSpec &spec = w.mounts ? *w.mounts : none;
+  const std::string mine = mount_norm(uri, spec.base);
+  for (const std::string &c : mount_list(spec.catalog, spec.catalog_bind, scope)) {
+    const std::string entry = mount_norm(c, spec.base);
+    if (entry == mine || (!entry.empty() && entry.back() == '/' && mine.rfind(entry, 0) == 0))
+      return "local";
+  }
+  const std::string path = canonical.empty() ? mine : canonical;
+  // A name with no directory (a loader that gave no canonical path, and no base) is in the current
+  // one: a principal names a directory, and SH11's store refuses an empty one (4.12).
+  const std::string dir = std::filesystem::path(path).parent_path().generic_string();
+  return "file:" + (dir.empty() ? std::string(".") : dir);
+}
+
+// 4.11 a mount's budget: its principal's default, each part the entry's budget.<part> when set.
+Runtime::MountBudget Runtime::Impl::mount_budget(const MountSlot &slot) const {
+  Runtime::MountBudget b = Runtime::default_mount_budget(slot.principal);
+  const std::string at = slot.slot_key + cvc::state::SEPARATOR + slot.as + cvc::state::SEPARATOR +
+                         "budget" + cvc::state::SEPARATOR;
+  const double steps = read_number_or(app, at + "steps", -1.0);
+  if (steps >= 0.0)
+    b.steps = static_cast<std::uint64_t>(steps);
+  const double time = read_number_or(app, at + "time", -1.0);
+  if (time >= 0.0)
+    b.time = time;
+  const double memory = read_number_or(app, at + "memory", -1.0);
+  if (memory >= 0.0)
+    b.memory = static_cast<std::uint64_t>(memory);
+  return b;
+}
+
+void Runtime::Impl::apply_mount_budget(MountSlot &slot) {
+  if (!slot.account)
+    return;
+  slot.budget = mount_budget(slot);
+  slot.account->max_steps.store(slot.budget.steps, std::memory_order_relaxed);
+  slot.account->max_seconds.store(slot.budget.time, std::memory_order_relaxed);
+  slot.account->max_memory.store(slot.budget.memory, std::memory_order_relaxed);
+}
+
+std::shared_ptr<cvc::state_exec::frame_account>
+Runtime::Impl::account_for(const std::string &scope) const {
+  // The deepest mounts: entry the scope is under: a mount's own nested mounts run on its budget.
+  const std::string *best = nullptr;
+  std::shared_ptr<cvc::state_exec::frame_account> account;
+  for (const auto &[sub, slot] : mount_slots_)
+    if (slot.account && path_under(scope, sub) && (!best || sub.size() > best->size())) {
+      best = &sub;
+      account = slot.account;
+    }
+  return account;
+}
+
+// The entry's status for the slot's document to show: <slot_key>.<as>.status (open, refused) and
+// .error (why it was refused), .principal and .name.
+void Runtime::Impl::publish_mount_status(const MountSlot &slot) {
+  const std::string at = slot.slot_key + cvc::state::SEPARATOR + slot.as + cvc::state::SEPARATOR;
+  try {
+    write<std::string>(app, at + "status", slot.wrapper ? "open" : "refused");
+    write<std::string>(app, at + "error", slot.refused);
+    write<std::string>(app, at + "principal", slot.principal);
+    write<std::string>(app, at + "name", slot.name);
+  } catch (const std::exception &) {
+  }
+}
+
+void Runtime::Impl::refuse_mount(MountSlot &slot, const std::string &why) {
+  slot.wrapper.reset();
+  slot.account.reset();
+  slot.refused = why;
+  publish_mount_status(slot);
+  // 4.2 a refusal is posted to the feed, by the document that holds the slot.
+  cvc::notification n;
+  n.text = "Not opened: " + slot.uri + ": " + why;
+  n.level = 1;
+  n.path = slot.parent_scope;
+  n.source = notify_source(slot.parent_scope);
+  cvc::notify(app, std::move(n));
+}
+
+void Runtime::Impl::open_mount(MountSlot &slot, const Widget &w) {
+  slot.name = slot.as;
+  // allow: (4.2) — by default any file or link; a list narrows it to its prefixes.
+  const MountsSpec none{}; // a slot without a spec (a local, so no static state)
+  const MountsSpec &spec = w.mounts ? *w.mounts : none;
+  const std::vector<std::string> allow = mount_list(spec.allow, spec.allow_bind, slot.parent_scope);
+  if (!allow.empty()) {
+    const std::string mine = mount_norm(slot.uri, spec.base);
+    const bool ok = std::any_of(allow.begin(), allow.end(), [&](const std::string &a) {
+      const std::string pre = mount_norm(a, spec.base);
+      return !pre.empty() && mine.rfind(pre, 0) == 0;
+    });
+    if (!ok)
+      return refuse_mount(slot, "it is not in this document's allow: list");
+  }
+  int open = 0;
+  for (const auto &[sub, s] : mount_slots_)
+    open += s.wrapper ? 1 : 0;
+  if (open >= kMaxOpenMounts)
+    return refuse_mount(slot, "too many mounts are open (" + std::to_string(kMaxOpenMounts) + ")");
+  if (mount_depth(resolve_bind(slot.parent_scope, "includes." + slot.as), prefix) > kMaxMountDepth)
+    return refuse_mount(slot, "it is mounted too deep (" + std::to_string(kMaxMountDepth) + ")");
+  if (!mount_loader_)
+    return refuse_mount(slot, "this host does not mount documents (it has no loader)");
+  MountRequest rq;
+  rq.uri = slot.uri;
+  rq.as = slot.as;
+  rq.args = slot.args;
+  rq.base_dir = spec.base;
+  MountResult r;
+  try {
+    r = mount_loader_(rq);
+  } catch (const std::exception &e) {
+    r.ok = false;
+    r.error = e.what();
+  }
+  const std::string sub = resolve_bind(slot.parent_scope, "includes." + slot.as);
+  for (const std::string &warning : r.warnings) { // its own parse's, named as the mount's
+    cvc::notification n;
+    n.text = warning;
+    n.level = 1;
+    n.path = sub;
+    n.source = slot.as;
+    cvc::notify(app, std::move(n));
+  }
+  slot.canonical = r.canonical;
+  slot.sources = std::move(r.sources);
+  slot.stamps = std::move(r.source_stamps);
+  if (!r.ok)
+    return refuse_mount(slot, r.error.empty() ? "it could not be loaded" : r.error);
+  slot.principal = mount_principal(w, slot.parent_scope, slot.uri, slot.canonical, slot.catalog);
+  // 4.12 SH11: what its programs and widgets reach (the network, its credentials, end-to-end keys
+  // and sign-ins) is its principal's, recorded under its scope before any of them is built. The
+  // entry may give a local application a network of its own (shell.apps.<as>.net_policy,
+  // .credential_store, .e2ee_store, as a launcher's flags take them); a host check refuses one
+  // that does not open, and a sandboxed principal one at all.
+  {
+    ScopePrincipal who;
+    who.principal = slot.principal;
+    const std::string entry =
+        slot.slot_key + cvc::state::SEPARATOR + slot.as + cvc::state::SEPARATOR;
+    who.net_policy = read_string(app, entry + "net_policy");
+    who.credential_store = read_string(app, entry + "credential_store");
+    who.e2ee_store = read_string(app, entry + "e2ee_store");
+    if (const std::string why = set_scope_principal(app, sub, who); !why.empty())
+      return refuse_mount(slot, why);
+    slot.principal = scope_principal(app, sub).principal; // as the store keys it
+  }
+  slot.wrapper = std::make_unique<Widget>(std::move(r.wrapper));
+  if (!slot.wrapper->app_name.empty())
+    slot.name = slot.wrapper->app_name;
+  slot.refused.clear();
+  slot.account = std::make_shared<cvc::state_exec::frame_account>();
+  apply_mount_budget(slot);
+  publish_mount_status(slot);
+  // As an application runs whether its windows show or not, its state: is written (§5.3), its
+  // init: runs and its on_tick: starts as it opens, not as it is first drawn, as a load: module's
+  // would. A reopened one resumes: its state: and init: ran already.
+  mount_names[sub] = slot.name;
+  const std::string fns = slot.wrapper->functions ? slot.wrapper->functions->prelude : "";
+  if (!fns.empty())
+    mount_functions[sub] = fns;
+  const Widget &wrapper = *slot.wrapper;
+  if ((!wrapper.state_seeds.empty() || !wrapper.init_script.empty()) &&
+      ran_inits.insert(sub).second) {
+    seed_state(app, sub, wrapper.state_seeds); // just before init:, which may override them
+    if (!wrapper.init_script.empty())
+      run_mount_init(sub, fns + wrapper.init_script);
+  }
+  if (!slot.wrapper->tick_script.empty())
+    ensure_mount_tick(sub, *slot.wrapper);
+}
+
+// 4.2 Closing: the mount is quit, every process under it killed, and the slot freed with its
+// widgets; its state stays under includes.<as>, so the same entry resumes it. `forget_init` runs
+// its init: again when it opens next (another document at the same id).
+void Runtime::Impl::close_mount(const std::string &sub, bool forget_init) {
+  const auto it = mount_slots_.find(sub);
+  if (it == mount_slots_.end())
+    return;
+  quit_app(sub);
+  // What quit_app leaves: the children its programs spawned or forked, which share its scope.
+  if (group_ || used_scheduler_) {
+    try {
+      cvc::state_exec::async_scheduler &sched = current_sched();
+      const std::string rel = cvc::state_exec::process_scope(sub, prefix);
+      for (const cvc::state_exec::process_info &p : sched.list_processes())
+        if (p.owner == owner_ && !cvc::state_exec::is_finished(p.status) &&
+            path_under(p.scope, rel))
+          sched.kill(p.pid);
+    } catch (const std::exception &) {
+    }
+  }
+  // 4.12: its programs and their children are gone (cleared only now, so none is built in between
+  // as the scope's parent); the next open records it again.
+  clear_scope_principal(app, sub);
+  for (auto q = quit_apps.begin(); q != quit_apps.end();)
+    q = path_under(*q, sub) ? quit_apps.erase(q) : std::next(q);
+  for (std::map<std::string, std::string> *m : {&mount_names, &mount_functions})
+    for (auto e = m->begin(); e != m->end();)
+      e = path_under(e->first, sub) ? m->erase(e) : std::next(e);
+  if (forget_init)
+    for (auto e = ran_inits.begin(); e != ran_inits.end();)
+      e = path_under(*e, sub) ? ran_inits.erase(e) : std::next(e);
+  mount_instances_.clear(); // made from templates that may be the mount's
+  // Its nested slots' mounts go with it (their slot was in its tree).
+  for (auto s = mount_slots_.begin(); s != mount_slots_.end();) {
+    if (s->first != sub && path_under(s->first, sub)) {
+      const std::string nested = s->first;
+      ++s;
+      close_mount(nested, forget_init);
+      s = mount_slots_.upper_bound(nested);
+    } else {
+      ++s;
+    }
+  }
+  const auto again = mount_slots_.find(sub);
+  if (again != mount_slots_.end()) {
+    try {
+      if (cvc::state *entry = cvc::state::instance(app).findDescendant(
+              again->second.slot_key + cvc::state::SEPARATOR + again->second.as))
+        if (cvc::state *st = entry->findDescendant("status"))
+          st->value(std::string("closed"));
+    } catch (const std::exception &) {
+    }
+    mount_slots_.erase(again);
+  }
+}
+
+// One pass: read every slot's entries, close what went or changed (and return), else open what is
+// new and parse again what changed on disk. True when anything changed: the caller plans the
+// windows menu again, which finds the slots of the mounts just opened, and calls again.
+bool Runtime::Impl::reconcile_mounts_once() {
+  struct Want {
+    const Widget *w;
+    std::string key, scope, as, uri, sub;
+    std::vector<std::pair<std::string, std::string>> args;
+    bool catalog = false; // 4.12 <entry>.catalog: the slot's document says it is its catalog's
+  };
+  std::vector<Want> want;
+  std::set<std::string> wanted;
+  std::string doc_key;
+  cvc::state &tree = cvc::state::instance(app);
+  for (const auto &[w, scope] : mounts_widgets_) {
+    if (w->bind.empty())
+      continue;
+    const std::string key = resolve_bind(scope, w->bind);
+    if (doc_key.empty() && scope == prefix)
+      doc_key = key;
+    cvc::state *node = nullptr;
+    std::vector<std::string> children;
+    try {
+      node = tree.findDescendant(key);
+      if (node)
+        children = node->childNames();
+    } catch (const std::exception &) {
+      continue;
+    }
+    for (const std::string &as : children) {
+      const std::string entry = key + cvc::state::SEPARATOR + as;
+      const std::string uri = read_string(app, entry + cvc::state::SEPARATOR + "uri");
+      if (uri.empty())
+        continue; // not an entry (yet)
+      if (!clean_mount_id(as)) {
+        warn_once("ari: mounts: entry '" + as + "' under " + key +
+                  " is not an id ([A-Za-z0-9_], not starting with a digit) — not mounted");
+        continue;
+      }
+      Want x{w, key, scope, as, uri, resolve_bind(scope, "includes." + as), {}};
+      x.catalog = to_bool_int(read_string(app, entry + cvc::state::SEPARATOR + "catalog"), 0) != 0;
+      try {
+        if (cvc::state *args = tree.findDescendant(entry + cvc::state::SEPARATOR + "args"))
+          for (const std::string &a : args->childNames())
+            x.args.emplace_back(a, read_string(app, entry + cvc::state::SEPARATOR + "args" +
+                                                        cvc::state::SEPARATOR + a));
+      } catch (const std::exception &) {
+      }
+      if (!wanted.insert(x.sub).second) {
+        warn_once("ari: two mounts: slots mount '" + as + "' in one scope — the first is kept");
+        continue;
+      }
+      want.push_back(std::move(x));
+    }
+  }
+  doc_slot_->set(doc_key);
+  // Close the mounts whose entry went, or whose document or args changed, deepest first. One whose
+  // catalog flag changed closes too, its state kept, when that changes its principal: it opens
+  // again as the new one (4.12). When it does not (catalog: lists it as well), it runs on.
+  std::vector<std::pair<std::string, bool>> closing; // sub-prefix, a different document there
+  for (auto &[sub, slot] : mount_slots_) {
+    const auto x =
+        std::find_if(want.begin(), want.end(), [&](const Want &v) { return v.sub == sub; });
+    if (x == want.end() || x->key != slot.slot_key) {
+      closing.emplace_back(sub, false);
+    } else if (x->uri != slot.uri || x->args != slot.args) {
+      closing.emplace_back(sub, true);
+    } else if (x->catalog != slot.catalog) {
+      if (mount_principal(*x->w, slot.parent_scope, slot.uri, slot.canonical, x->catalog) !=
+          slot.principal)
+        closing.emplace_back(sub, false);
+      else
+        slot.catalog = x->catalog;
+    }
+  }
+  if (!closing.empty()) {
+    std::sort(closing.begin(), closing.end(),
+              [](const auto &a, const auto &b) { return a.first.size() > b.first.size(); });
+    for (const auto &[sub, different] : closing)
+      close_mount(sub, different);
+    return true;
+  }
+  bool changed = false;
+  for (const Want &x : want) {
+    const auto it = mount_slots_.find(x.sub);
+    if (it == mount_slots_.end()) {
+      MountSlot slot;
+      slot.slot_key = x.key;
+      slot.parent_scope = x.scope;
+      slot.as = x.as;
+      slot.uri = x.uri;
+      slot.args = x.args;
+      slot.catalog = x.catalog;
+      MountSlot &s = mount_slots_.emplace(x.sub, std::move(slot)).first->second;
+      open_mount(s, *x.w);
+      changed = true;
+      continue;
+    }
+    MountSlot &s = it->second;
+    if (s.stale && s.wrapper) {
+      // 4.2 Caching: parsed again only now that a file changed. Its nested slots close first
+      // (they live in the old tree) and reopen from the new one.
+      s.stale = false;
+      bool nested = false;
+      for (const auto &[sub, o] : mount_slots_)
+        nested = nested || (sub != x.sub && path_under(sub, x.sub));
+      if (nested) {
+        for (auto n = mount_slots_.begin(); n != mount_slots_.end();) {
+          if (n->first != x.sub && path_under(n->first, x.sub)) {
+            const std::string sub = n->first;
+            close_mount(sub, false);
+            n = mount_slots_.lower_bound(sub);
+          } else {
+            ++n;
+          }
+        }
+        mount_slots_.at(x.sub).stale = true; // parsed at the next pass, with the plan made again
+        return true;
+      }
+      MountRequest rq;
+      rq.uri = s.uri;
+      rq.as = s.as;
+      rq.args = s.args;
+      rq.base_dir = x.w->mounts ? x.w->mounts->base : std::string();
+      MountResult r;
+      try {
+        r = mount_loader_ ? mount_loader_(rq) : MountResult{};
+      } catch (const std::exception &e) {
+        r.error = e.what();
+      }
+      s.stamps = r.source_stamps.empty() ? s.stamps : r.source_stamps;
+      if (!r.ok) { // a file caught mid-edit: the running mount stays as it was
+        warn_once("ari: mount '" + s.as + "' was not reloaded: " + r.error);
+        continue;
+      }
+      s.sources = std::move(r.sources);
+      s.canonical = r.canonical;
+      s.wrapper = std::make_unique<Widget>(std::move(r.wrapper));
+      if (!s.wrapper->app_name.empty())
+        s.name = s.wrapper->app_name;
+      mount_instances_.clear();
+      // Its on_tick: resident stays when its program is the same (drop_mount_ticks compares).
+      drop_mount_ticks();
+      if (!s.wrapper->tick_script.empty())
+        ensure_mount_tick(x.sub, *s.wrapper);
+      const std::string fns = s.wrapper->functions ? s.wrapper->functions->prelude : "";
+      if (!fns.empty())
+        mount_functions[x.sub] = fns;
+      changed = true;
+      continue;
+    }
+    if (s.wrapper)
+      apply_mount_budget(s); // its entry's budget.* may have changed
+  }
+  return changed;
+}
+
+void Runtime::Impl::reconcile_mounts() {
+  if (mounts_widgets_.empty() && mount_slots_.empty())
+    return;
+  // A pass per level of nesting: a mount opened in one pass has its own slots found by the plan
+  // made after it. Bounded; what is left waits for the next frame.
+  for (int pass = 0; pass < 8; ++pass) {
+    if (!reconcile_mounts_once())
+      break;
+    plan_windows_menu();
+  }
+}
+
+// 4.11 Each frame: every mount's memory (once every quarter second: the bytes each of its processes
+// holds, summed into its account), how long it has been held to its budget, and after
+// kMountHeldNotice seconds of it the shell's notice, whose click opens the Budgets window.
+void Runtime::Impl::measure_mounts() {
+  if (mount_slots_.empty())
+    return;
+  if (mounts_measured_at_ < 0.0 || frame_t - mounts_measured_at_ >= 0.25 ||
+      frame_t < mounts_measured_at_) {
+    mounts_measured_at_ = frame_t;
+    std::map<std::string, std::uint64_t> bytes; // by sub-prefix
+    if (group_ || used_scheduler_) {
+      try {
+        for (const cvc::state_exec::process_info &p : current_sched().list_processes()) {
+          if (p.owner != owner_ || cvc::state_exec::is_finished(p.status))
+            continue;
+          const std::string abs = p.scope.empty() ? prefix : resolve_bind(prefix, p.scope);
+          std::string best;
+          for (const auto &[sub, slot] : mount_slots_)
+            if (slot.account && path_under(abs, sub) && sub.size() > best.size())
+              best = sub;
+          if (!best.empty())
+            bytes[best] += p.current_memory + p.heap_memory;
+        }
+      } catch (const std::exception &) {
+      }
+    }
+    for (auto &[sub, slot] : mount_slots_)
+      if (slot.account)
+        slot.account->memory.store(bytes[sub], std::memory_order_relaxed);
+  }
+  for (auto &[sub, slot] : mount_slots_) {
+    if (!slot.account)
+      continue;
+    const cvc::state_exec::frame_account &a = *slot.account;
+    const bool held = a.last_held.load(std::memory_order_relaxed) ||
+                      a.held.load(std::memory_order_relaxed) || a.spent();
+    if (!held || !app_running(sub)) {
+      slot.held_since = -1.0;
+      slot.noticed = false;
+      continue;
+    }
+    slot.by_memory =
+        a.max_memory.load(std::memory_order_relaxed) > 0 &&
+        a.memory.load(std::memory_order_relaxed) > a.max_memory.load(std::memory_order_relaxed);
+    if (slot.held_since < 0.0 || frame_t < slot.held_since)
+      slot.held_since = frame_t;
+    if (!slot.noticed && frame_t - slot.held_since >= kMountHeldNotice) {
+      slot.noticed = true;
+      cvc::notification n;
+      n.text = slot.name + " is using all the " + (slot.by_memory ? "memory" : "time") +
+               " it is allowed. Click for Allow more, Quit or Restart.";
+      n.level = 1;
+      n.path = sub;
+      n.source = notify_source(slot.parent_scope);
+      n.on = kAppEvent + std::string("budget:") + sub;
+      n.scope = prefix;
+      cvc::notify(app, std::move(n));
+    }
+  }
+}
+
+// 4.11 the Budgets window, while tree._budgets.open is 1 (a notice's click sets it): each mount at
+// its limit, with Allow more, Quit and Restart.
+void Runtime::Impl::emit_budget_window() {
+  const std::string open = resolve_bind(prefix, std::string("tree.") + kBudgetWindowId + ".open");
+  if (mount_slots_.empty() || read_bool_or_seed(app, open, 0) == 0)
+    return;
+  std::vector<Widget> kids;
+  for (const auto &[sub, slot] : mount_slots_) {
+    if (!slot.account || slot.held_since < 0.0)
+      continue;
+    const cvc::state_exec::frame_account &a = *slot.account;
+    std::string line = slot.name + " (" + slot.principal + "): ";
+    line += slot.by_memory ? std::to_string(a.memory.load() >> 20) + " of " +
+                                 std::to_string(slot.budget.memory >> 20) + " MB"
+                           : std::to_string(a.last_steps.load()) + " of " +
+                                 std::to_string(slot.budget.steps) + " steps a frame";
+    kids.push_back(text(line));
+    Widget row = group({button("Allow more##" + sub, kAppEvent + std::string("allow:") + sub),
+                        button("Quit##" + sub, kAppEvent + std::string("quit:") + sub),
+                        button("Restart##" + sub, kAppEvent + std::string("restart:") + sub)});
+    row.layout.kind = LayoutKind::Horizontal;
+    kids.push_back(std::move(row));
+    kids.push_back(separator());
+  }
+  if (kids.empty())
+    kids.push_back(text("No application is at its limit."));
+  Widget w = window("Budgets", std::move(kids));
+  w.id = kBudgetWindowId;
+  w.closable = true;
+  budget_window = std::move(w);
+  emit(budget_window);
+}
+
+// ARIADNE_SHELL.md 4.2 the verbs, on the document that calls them (`scope` its programs' prefix):
+//   (app-open URI [AS [ARGS]])  write the entry <slot>.<AS> (uri, and args.<name> from the ARGS
+//                               dict) in the document's own first mounts: slot, and return AS;
+//                               without AS one is made from the URI's name, and an entry already
+//                               open on the same URI is returned as it is
+//   (app-close AS)              remove the entry; #t when there was one
+// A mounted document's programs get an error: opening others needs a grant (4.12 request.open).
+void Runtime::Impl::bind_mount_verbs(const cvc::state_exec::environment_ptr &env,
+                                     const std::string &scope) const {
+  namespace se = cvc::state_exec;
+  const bool own = scope == prefix;
+  cvc::app *const on_app = &app;
+  const auto check = [own, slot_key = doc_slot_](const char *verb) {
+    if (!own)
+      throw se::dsl_error("PermissionError",
+                          std::string(verb) +
+                              ": a mounted document opens and closes no applications without "
+                              "a grant (docs/roadmap/ARIADNE_SHELL.md 4.12, request.open)");
+    std::string key = slot_key->get();
+    if (key.empty())
+      throw se::dsl_error("RuntimeError",
+                          std::string(verb) + ": this document has no mounts: slot");
+    return key;
+  };
+  se::builtins::register_fn(
+      env, "app-open", [on_app, check](std::span<const se::value_t> args) -> se::value_t {
+        const std::string key = check("app-open");
+        if (args.empty() || args.size() > 3)
+          throw se::dsl_error("TypeError", "app-open: expected (app-open URI [AS [ARGS]])");
+        const auto *uri = std::get_if<std::string>(&args[0].v);
+        if (!uri || uri->empty())
+          throw se::dsl_error("TypeError", "app-open: URI is a string");
+        cvc::state &tree = cvc::state::instance(*on_app);
+        const std::string sep = cvc::state::SEPARATOR;
+        std::string as;
+        if (args.size() > 1 && !std::holds_alternative<std::monostate>(args[1].v)) {
+          const auto *s = std::get_if<std::string>(&args[1].v);
+          if (!s)
+            throw se::dsl_error("TypeError", "app-open: AS is a string");
+          as = *s;
+          if (!clean_mount_id(as))
+            throw se::dsl_error("ValueError", "app-open: AS '" + as +
+                                                  "' is not an id ([A-Za-z0-9_], not starting "
+                                                  "with a digit)");
+        } else {
+          // One already open on this URI is the one asked for (4.9: picking a running one).
+          cvc::state *slot = tree.findDescendant(key);
+          if (slot)
+            for (const std::string &c : slot->childNames())
+              if (read_string(*on_app, key + sep + c + sep + "uri") == *uri)
+                return se::value_t(c);
+          // Taken: an entry with a uri. A child without one (its budget set ahead, say) is free.
+          const auto taken = [&](const std::string &id) {
+            return slot && !read_string(*on_app, key + sep + id + sep + "uri").empty();
+          };
+          const std::string base = mount_id_from_uri(*uri);
+          as = base;
+          for (int n = 2; taken(as); ++n)
+            as = base + "_" + std::to_string(n);
+        }
+        const std::string entry = key + sep + as;
+        try {
+          if (cvc::state *old = tree.findDescendant(entry))
+            old->removeChild("args"); // its args are the ones given now
+        } catch (const std::exception &) {
+        }
+        if (args.size() > 2 && !std::holds_alternative<std::monostate>(args[2].v)) {
+          const auto *d = std::get_if<se::dict_ptr>(&args[2].v);
+          if (!d || !*d)
+            throw se::dsl_error("TypeError", "app-open: ARGS is a dict");
+          for (const auto &[name, v] : **d) {
+            const se::value_t &value = v;
+            const auto *s = std::get_if<std::string>(&value.v);
+            write<std::string>(*on_app, entry + sep + "args" + sep + name,
+                               s ? *s : se::to_string(value));
+          }
+        }
+        write<std::string>(*on_app, entry + sep + "uri", *uri); // last: the entry is whole
+        return se::value_t(as);
+      });
+  se::builtins::register_fn(
+      env, "app-close", [on_app, check](std::span<const se::value_t> args) -> se::value_t {
+        const std::string key = check("app-close");
+        if (args.size() != 1)
+          throw se::dsl_error("TypeError", "app-close: expected (app-close AS)");
+        const auto *as = std::get_if<std::string>(&args[0].v);
+        if (!as)
+          throw se::dsl_error("TypeError", "app-close: AS is a string");
+        try {
+          if (cvc::state *slot = cvc::state::instance(*on_app).findDescendant(key))
+            return se::value_t(slot->removeChild(*as));
+        } catch (const std::exception &) {
+        }
+        return se::value_t(false);
+      });
 }
 
 bool Runtime::Impl::bell_on_by_default() const {
@@ -6279,12 +7226,41 @@ bool Runtime::Impl::builtin_event(const QueuedAction &a) {
       known = known || app_.scope == scope;
     if (!known)
       return true;
-    if (verb == "quit")
+    if (verb == "quit") {
       quit_app(scope);
-    else if (verb == "restart")
+    } else if (verb == "restart") {
       restart_app(scope);
-    else if (verb == "open")
+      if (const auto s = mount_slots_.find(scope); s != mount_slots_.end())
+        s->second.held_since = -1.0; // its stretch at the limit starts again
+    } else if (verb == "open") {
       quit_apps.erase(scope);
+    } else if (verb == "close") { // ARIADNE_SHELL.md 4.2: a mounts: application's entry goes
+      if (const auto s = mount_slots_.find(scope); s != mount_slots_.end())
+        try {
+          if (cvc::state *slot = cvc::state::instance(app).findDescendant(s->second.slot_key))
+            slot->removeChild(s->second.as);
+        } catch (const std::exception &) {
+        }
+    } else if (verb == "allow") { // 4.11 Allow more: twice its budget, kept in its entry
+      if (const auto s = mount_slots_.find(scope); s != mount_slots_.end()) {
+        MountSlot &m = s->second;
+        const std::string at = m.slot_key + cvc::state::SEPARATOR + m.as + cvc::state::SEPARATOR +
+                               "budget" + cvc::state::SEPARATOR;
+        if (m.budget.steps > 0)
+          write<double>(app, at + "steps", static_cast<double>(m.budget.steps) * 2.0);
+        if (m.budget.time > 0.0)
+          write<double>(app, at + "time", m.budget.time * 2.0);
+        if (m.budget.memory > 0)
+          write<double>(app, at + "memory", static_cast<double>(m.budget.memory) * 2.0);
+        apply_mount_budget(m);
+        m.held_since = -1.0;
+        m.noticed = false;
+      }
+    } else if (verb == "budget") { // the notice's click: the window with its three choices
+      write<int>(app, resolve_bind(prefix, std::string("tree.") + kBudgetWindowId + ".open"), 1);
+      write<std::string>(
+          app, resolve_bind(prefix, std::string("tree.") + kBudgetWindowId + ".raise"), "1");
+    }
     mirror_apps(); // its running at once, not at the next frame
     return true;
   }
@@ -6546,7 +7522,7 @@ std::vector<Runtime::Impl::TrayEntry> Runtime::Impl::tray_entries(const Widget &
   // each worked out in its mount's scope.
   if (!apps_drawn)
     for (const WindowsMenuPlan::App &a : frame_apps) {
-      if (!app_running(a.scope))
+      if (!app_running(a.scope) || !a.bar)
         continue;
       const ScopedTo in(*this, a.scope, a.functions);
       for (const Widget &c : a.bar->children) {
@@ -6760,6 +7736,14 @@ Runtime::Impl::~Impl() {
   frame_handle_.reset();
   group_.reset();
   retired_groups_.clear();
+  // ARIADNE_SHELL.md 4.12 its mounts' principals, which the app keeps by scope, once none of their
+  // processes is left: another document at this prefix starts with none.
+  try {
+    for (const auto &[sub, slot] : mount_slots_)
+      clear_scope_principal(app, sub);
+  } catch (const std::exception &e) {
+    teardown_note("tearing down", "clearing its mounts' principals", e.what());
+  }
 }
 
 void Runtime::Impl::kill_and_reap(cvc::state_exec::async_scheduler &sched,
@@ -7193,6 +8177,7 @@ Runtime::Impl::make_action_context(const std::string &scope_prefix,
   ac->ictx.lock_default_timeout = lock_default_timeout; // with-lock with no :timeout
   ac->scope = scope_prefix;
   ac->notify = std::make_shared<const NotifyScope>(notify_scope(scope_prefix));
+  ac->account = account_for(scope_prefix); // under a mounts: entry: its frame budget
   finish_context(*ac, group);
   return ac;
 }
@@ -7205,19 +8190,19 @@ void Runtime::Impl::finish_context(ActionContext &ac, cvc::state_exec::exec_grou
   // app's, then this document's own, each by its kind.
   install_providers(app, ac.env, ac.ictx, group);
   bind_own_intrinsics(ac.env, ac.ictx, group);
-  install_host_verbs(ac.env, group, *ac.ictx.host, *ac.notify);
+  install_host_verbs(ac.env, group, *ac.ictx.host, *ac.notify, ac.ictx.root_path);
   bind_has(ac.env, program_has(group));
 }
 
 void Runtime::Impl::install_host_verbs(const cvc::state_exec::environment_ptr &env,
                                        cvc::state_exec::exec_group *group,
-                                       cvc::state_exec::async_host &host,
-                                       const NotifyScope &notify) const {
+                                       cvc::state_exec::async_host &host, const NotifyScope &notify,
+                                       const std::string &scope) const {
   namespace se = cvc::state_exec;
   // The file verbs bind into the env as they are, in every group (bind_file_verbs): (file-info)
   // and (file-forget) are thread-safe, and (file-pick) is async, which a host_proxied wrapper
   // could not park; it opens its picker on the host thread itself.
-  bind_file_verbs(env, group, host);
+  bind_file_verbs(env, group, host, scope);
   // The backend's verbs drive its window and clipboard, which are the host thread's: they are
   // host_proxied (S1-Q7). In an `any` group each native runs on the pump_all caller's thread
   // (exec_group::install), as install_providers binds a host_proxied provider; in group 0, in a
@@ -7227,11 +8212,13 @@ void Runtime::Impl::install_host_verbs(const cvc::state_exec::environment_ptr &e
   if (!group || group->opts().affinity != se::group_affinity::any) {
     bind_backend_verbs(env);
     bind_notify_verbs(env, notify);
+    bind_mount_verbs(env, notify.scope); // ARIADNE_SHELL.md 4.2 (app-open), (app-close)
     return;
   }
   const se::environment_ptr scratch = se::environment::extend(env);
   bind_backend_verbs(scratch);
   bind_notify_verbs(scratch, notify);
+  bind_mount_verbs(scratch, notify.scope);
   for (auto &[name, value] : scratch->bindings) {
     if (auto *fn = std::get_if<se::native_fn>(&value.v))
       group->install(env, name, std::move(*fn), se::provider_affinity::host_proxied);
@@ -7393,7 +8380,8 @@ std::string handle_arg(const char *verb, std::span<const cvc::state_exec::value_
 
 void Runtime::Impl::bind_file_verbs(const std::shared_ptr<cvc::state_exec::environment> &env,
                                     cvc::state_exec::exec_group *group,
-                                    cvc::state_exec::async_host &host) const {
+                                    cvc::state_exec::async_host &host,
+                                    const std::string &scope) const {
   namespace se = cvc::state_exec;
   cvc::app *const app_ptr = &app;
   const std::weak_ptr<FilePickHub> weak_hub = file_pick;
@@ -7523,8 +8511,9 @@ void Runtime::Impl::bind_file_verbs(const std::shared_ptr<cvc::state_exec::envir
   if (backend)
     se::register_async_fn(
         env, host, "save-url",
-        [weak_saves, &host](std::span<const se::value_t> args) -> se::async_work {
-          const MediaSave m = save_url_request(args);
+        [weak_saves, &host, scope](std::span<const se::value_t> args) -> se::async_work {
+          MediaSave m = save_url_request(args);
+          m.scope = scope; // fetched as its program's principal (ARIADNE_SHELL.md 4.12)
           se::async_work work;
           work.start = [weak_saves, m,
                         fin = host.make_finisher()](const std::shared_ptr<se::async_call> &call) {
@@ -7609,7 +8598,7 @@ void Runtime::Impl::prepare_save(const MediaSave &m) {
   prepared_save->key = key;
   const long gen = prepared_save->gen = ++prepared_gen;
   const std::weak_ptr<SaveHub> weak = saves;
-  image_cache().fetch(m.url, m.auth, [this, weak, gen, m](media::FetchResult r) {
+  image_cache().fetch(m.url, m.auth, m.scope, [this, weak, gen, m](media::FetchResult r) {
     const std::shared_ptr<SaveHub> hub = weak.lock();
     if (!hub)
       return;
@@ -7684,7 +8673,8 @@ void Runtime::Impl::start_save(SaveJob job) {
 #endif
   const std::weak_ptr<SaveHub> weak = saves;
   auto held = std::make_shared<SaveJob>(std::move(job));
-  image_cache().fetch(held->save.url, held->save.auth, [this, weak, held](media::FetchResult r) {
+  const MediaSave &s = held->save;
+  image_cache().fetch(s.url, s.auth, s.scope, [this, weak, held](media::FetchResult r) {
     const std::shared_ptr<SaveHub> hub = weak.lock();
     if (!hub) {
       if (held->done) {
@@ -8221,6 +9211,9 @@ void Runtime::Impl::drop_mount_ticks() {
   // composed as emit_container composes them.
   std::map<std::string, std::string> kept;
   std::vector<std::pair<const Widget *, std::string>> todo{{&root, prefix}}; // node, its scope
+  for (const auto &[sub, slot] : mount_slots_) // ARIADNE_SHELL.md 4.2 a mounts: entry's, kept
+    if (slot.wrapper)
+      todo.emplace_back(slot.wrapper.get(), slot.parent_scope);
   while (!todo.empty()) {
     auto [w, inner] = std::move(todo.back());
     todo.pop_back();
@@ -8324,7 +9317,7 @@ void Runtime::Impl::load_names() const {
     // As the document's programs get them: by kind in an `any` group, the host verbs too.
     install_providers(app, env, ictx, group_.get());
     bind_own_intrinsics(env, ictx, group_.get());
-    install_host_verbs(env, group_.get(), *ictx.host, notify);
+    install_host_verbs(env, group_.get(), *ictx.host, notify, ictx.root_path);
     for (const se::environment *e = env.get(); e; e = e->outer.get())
       for (const auto &kv : e->bindings)
         found.insert(kv.first);
@@ -8421,6 +9414,25 @@ void Runtime::set_media_base(std::string dir) {
 void Runtime::set_save_dir(std::string dir) { m_->saves->dir = std::move(dir); }
 
 void Runtime::set_root(Widget root) {
+  // ARIADNE_SHELL.md 4.2 the document's own first mounts: slot (none inside a mount), whose key
+  // (app-open) writes: known before the first frame, so a resident started first finds it.
+  {
+    std::string key;
+    std::vector<const Widget *> todo{&root}; // in tree order, on the heap: any depth
+    while (!todo.empty()) {
+      const Widget &w = *todo.back();
+      todo.pop_back();
+      if (!w.scope.empty() || !w.repeat.empty())
+        continue;
+      if (w.kind == Kind::Mounts && !w.bind.empty()) {
+        key = resolve_bind(m_->prefix, w.bind);
+        break;
+      }
+      for (auto c = w.children.rbegin(); c != w.children.rend(); ++c)
+        todo.push_back(&*c);
+    }
+    m_->doc_slot_->set(key);
+  }
   // Now, not at the swap: a resident submitted in the next drain() runs with these.
   m_->doc_functions = root.functions ? root.functions->prelude : std::string();
   m_->pending = std::move(root);
@@ -8882,6 +9894,55 @@ std::vector<std::string> Runtime::take_reactive_warnings() {
 // The same per-document scope submit_action/ensure_resident install on each lane as
 // ictx.document — exposed so a scene-bound host can publish a routing handle for its verbs.
 cvc::state_exec::document_scope &Runtime::document_scope() { return m_->doc_scope_; }
+
+// ---- on-demand mounts (docs/roadmap/ARIADNE_SHELL.md 4.2) ----
+
+void Runtime::set_mount_loader(MountLoader loader) { m_->mount_loader_ = std::move(loader); }
+
+std::vector<Runtime::MountState> Runtime::mounts() const {
+  std::vector<MountState> out;
+  for (const auto &[sub, slot] : m_->mount_slots_) {
+    MountState m;
+    m.as = slot.as;
+    m.scope = sub;
+    m.uri = slot.uri;
+    m.canonical = slot.canonical;
+    m.principal = slot.principal;
+    m.refused = slot.refused;
+    m.mounted = slot.wrapper != nullptr;
+    m.budget = slot.budget;
+    if (slot.account) {
+      m.steps = slot.account->last_steps.load(std::memory_order_relaxed);
+      m.time = slot.account->last_seconds.load(std::memory_order_relaxed);
+      m.memory = slot.account->memory.load(std::memory_order_relaxed);
+      m.held = slot.account->last_held.load(std::memory_order_relaxed) ||
+               slot.account->held.load(std::memory_order_relaxed);
+      m.holds = slot.account->holds.load(std::memory_order_relaxed);
+    }
+    out.push_back(std::move(m));
+  }
+  return out;
+}
+
+std::vector<std::string> Runtime::mount_sources() const {
+  std::vector<std::string> out;
+  for (const auto &[sub, slot] : m_->mount_slots_)
+    if (slot.wrapper)
+      for (const std::string &f : slot.sources)
+        if (std::find(out.begin(), out.end(), f) == out.end())
+          out.push_back(f);
+  return out;
+}
+
+bool Runtime::reload_mounts_if_changed() {
+  bool any = false;
+  for (auto &[sub, slot] : m_->mount_slots_)
+    if (slot.wrapper && !slot.sources.empty() && sources_changed(slot.sources, slot.stamps)) {
+      slot.stale = true; // parsed again by the next frame's reconcile
+      any = true;
+    }
+  return any;
+}
 
 // A backend with no list draws the rows as stacked radio buttons (the first shown picked while
 // none is) and its buttons under them.

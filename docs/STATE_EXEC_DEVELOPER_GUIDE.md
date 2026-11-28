@@ -1640,6 +1640,20 @@ chroot, so it has its parent's scope. The cluster's process rows (`exec_coordina
 `serialize_process_info`) carry it, and a migrated process keeps its owner root
 (`state_value_codec`).
 
+**A frame budget several processes share: `frame_account`.** `execute_options::account` gives a
+process a `frame_account` (process.h): the steps and seconds of evaluation it and the others given
+the same account may use between two frame boundaries, and the memory they may hold. A spawned or
+forked child keeps its parent's. The async scheduler charges each step's steps and seconds to
+the account and ends a run (Stage S) at its limit. Once the account is spent, each of its
+processes parks at its next pick, or right after the step that spent it, as `(await)` parks it
+(`awaiting_frame`), and it is never killed for it. `wake_awaiting()`, which a driver calls once a
+frame, starts a new frame on every account the scheduler has seen before it readies them.
+`memory` is the host's to write: the scheduler measures the heap share (heap.h) of a process whose
+account has a memory cap, with no limit of its own (`process::measures_heap`), and past the cap
+the account is spent until the host's sum comes back under. The limits can change at any time,
+from any thread. An Ariadne mount's budget is one (docs/roadmap/ARIADNE_SHELL.md 4.11). The sync
+scheduler ignores it, and a snapshot does not carry it.
+
 **What a spawned child sees.** A child always keeps its parent's `owner`, so a host that reaps
 a document's processes with `kill_owner` reaps its children too. Its environment depends on the
 host (docs/STATE_EXEC_THREADED.md 4.15):

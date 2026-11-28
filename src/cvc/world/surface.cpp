@@ -305,7 +305,11 @@ constexpr void surface_registry::finalize() {
     mix(c.id);
     for (const char *p = c.name; *p; ++p)
       mix((unsigned char)*p);
+#if defined(__cpp_lib_bit_cast)
     mix(std::bit_cast<std::uint32_t>(c.rho)); // its bits, as a memcpy into a zeroed u64 had them
+#else // NetBSD's libstdc++ (gcc 10) has no std::bit_cast; its clang has the constexpr builtin
+    mix(__builtin_bit_cast(std::uint32_t, c.rho));
+#endif
     mix(c.hard ? 1u : 0u);
     for (const char *p = c.rf_material; *p; ++p)
       mix((unsigned char)*p);

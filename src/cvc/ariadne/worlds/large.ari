@@ -99,11 +99,13 @@ scene:
 world:
   avatars:
     archetypes:
-      person: { body: { mass: 70, width: 0.5, height: 1.7 }, controllers: [walker@1] }
+      person: { body: { mass: 70, width: 0.5, height: 1.7, density: 985 }, controllers: [walker@2] }
     policy:
       max_speed: 4.0        # twice the walk: room for a run without loosening the veto
       allow_vertical: false # avatars walk; gravity owns z
       energy: { enabled: true, force_max: 840, power_max: 1200, power_rest: 300,
                 reserve_max: 30000, transport_cost: 0.2, empty: rest, recover_fraction: 0.25 }
   controllers:
-    walker@1: { kernel: walker, version: 1, params: { walk_speed: 2.0 } }
+    walker@2: { kernel: walker, version: 2, params: { walk_speed: 2.0, wade_depth: 0.3,
+                swim_depth: 1.2, wade_slow: 0.6, swim_speed: 1.0, swim_sprint: 1.8,
+                swim_force: 300, dive_speed: 0.8, climb_height: 0.6, swim_cost: 0.8 } }

@@ -85,8 +85,16 @@ struct avatar_body {
   double mass = 70.0;  // kg
   double width = 0.5;  // m, the box's x and y edge
   double height = 1.7; // m
+  // kg/m^3, a person's (OW9b, ARIADNE_WORLDS.md section 18.10): in water the box displaces
+  // mass / density, not its own volume, so a person floats head-out (98.5% of the box under)
+  // rather than like a cork. The box stays the shape for contact and prediction.
+  double density = 985.0;
   bool operator==(const avatar_body &) const = default;
 };
+
+// The share of an avatar's box that displaces water (physics::body_desc::displacement): its mass
+// over the body's density, over the box's volume. 0.167 for the default person.
+double avatar_displacement(const avatar_body &body, double mass);
 
 // What an avatar's controller may spend (§5k). The SERVER sets it, the same for every avatar, and
 // publishes it in the room (room_avatar.h) so a client predicts under the same rule.
@@ -125,6 +133,10 @@ struct avatar_ledger {
   double time = 0.0;        // s of drives booked
   double exhausted_time = 0.0;
   double peak_power = 0.0; // W, the most one drive spent
+  // Swimming's share of the lines above (walker@2, OW9c): the work and carrying it paid for while
+  // swimming, in J, and the metres it swam. In `work` and `carried` already, so not in residual().
+  double swam = 0.0;
+  double swam_distance = 0.0;
   // The books' own error: what the lines do not account for (0 up to rounding).
   double residual(double reserve) const {
     return reserve - (start + refilled - work - carried - overflow + unpaid + corrections);
@@ -138,6 +150,38 @@ struct avatar_energy {
   bool exhausted = false; // `stop`: ran out, waiting for recover_fraction
   avatar_ledger ledger;
 };
+
+// How an avatar is in the water (walker@2, ARIADNE_WORLDS.md section 18.10): its controller's
+// state, which the relay publishes beside the pose (room_avatar.h) for drawing.
+enum class avatar_motion : std::uint8_t {
+  walking,  // dry, or the water below wade_depth: walker@1
+  wading,   // feet on the bed, the water from wade_depth to swim_depth: slower by the depth
+  swimming, // the water over swim_depth, or the feet off the bed with the water over half of it
+};
+// "walking", "wading", "swimming".
+const char *avatar_motion_name(avatar_motion m);
+// The motion NAME names; false (OUT untouched) for any other text.
+bool avatar_motion_of(const std::string &name, avatar_motion &out);
+
+// walker@2's knobs (section 18.10.2), from its controller's params; off for walker@1, which
+// ignores the water. Every speed is m/s, every depth metres of water above the feet.
+struct avatar_swim {
+  bool on = false;
+  double walk_speed = 2.0;   // what a walk asks: a swim's pace is the intent's share of it
+  double wade_depth = 0.3;   // wading from here...
+  double swim_depth = 1.2;   // ...swimming from here (chest-high)
+  double wade_slow = 0.6;    // the pace lost wading, at swim_depth
+  double swim_speed = 1.0;   // a swim asked at walk_speed
+  double swim_sprint = 1.8;  // the fastest a run swims
+  double swim_force = 300.0; // N, the most a stroke pushes with, each way (across, up and down)
+  double dive_speed = 0.8;   // diving and surfacing (move.z, -1 to 1, a share of it)
+  double climb_height = 0.6; // the highest edge above the water a stroke up climbs onto
+  double swim_cost = 0.8;    // carrying the body while swimming: swim_cost m g |v|, v the water's
+  bool operator==(const avatar_swim &) const = default;
+};
+// Its knobs from a controller's params (walk_speed, wade_depth, ...: each one left out keeps its
+// default), on.
+avatar_swim avatar_swim_of(const std::map<std::string, double> &params);
 
 // A static object avatars collide with: the room scene's ground, boxes and spheres; or, from the
 // world document itself (world_replica, ARIADNE_WORLDS.md section 18.5, OW5c), a static body as
@@ -235,6 +279,24 @@ public:
   // is no jump.
   void set_jump_speed(double v) { _jump_speed = v; }
   double jump_speed() const { return _jump_speed; }
+  // WALKER@2 (OW9c, ARIADNE_WORLDS.md section 18.10.2): with SWIM on, each drive reads the water
+  // at the avatar's feet (physics::world::water_at, less its own wake) and the ground under them,
+  // and is in one of three motions:
+  //   walking   walker@1, jump and all.
+  //   wading    walker@1 with the intent's move cut by the depth, to 1 - wade_slow at swim_depth;
+  //             no jump above half swim_depth.
+  //   swimming  across, toward the intent's move through the water (its share of walk_speed times
+  //             swim_speed, at most swim_sprint) with at most swim_force, paying swim_cost m g |v|
+  //             for carrying it; no move, no push: the water's drag carries it with the water.
+  //             Up and down, move.z (-1 to 1) dives or surfaces at that share of dive_speed with
+  //             swim_force; jump is a stroke up, surfacing, or onto an edge in front within
+  //             climb_height of the surface, paying m g for the height it climbs.
+  // Off (the default), the walker of walker@1, which ignores the water.
+  void set_swim(const avatar_swim &swim) { _swim = swim; }
+  const avatar_swim &swim() const { return _swim; }
+  // The motion of an avatar's last drive (walking before its first, and always without swim).
+  // Throws std::out_of_range for an unknown pid.
+  avatar_motion motion(const std::string &pid) const;
   // The energy policy every avatar spends under. An avatar added later starts with a full reserve;
   // one already here keeps its reserve, cut to the new reserve_max.
   void set_energy_policy(const avatar_energy_policy &p);
@@ -248,8 +310,8 @@ public:
   void place(const std::string &pid, const cvc::physics::body_state &feet);
   // A kinematic avatar: arrive at this feet pose by the end of the next step.
   void move_kinematic(const std::string &pid, const cvc::physics::pose &feet);
-  // A dynamic avatar's mass (kg, > 0) from the next step on; it survives set_statics. A kinematic
-  // avatar has no mass (a no-op).
+  // A dynamic avatar's mass (kg, > 0) from the next step on, and the water it displaces with it
+  // (avatar_displacement); it survives set_statics. A kinematic avatar has no mass (a no-op).
   void set_mass(const std::string &pid, double kg);
 
   // OBSTACLES (ARIADNE_WORLDS.md section 18.5, OW5): a box the host holds where it shows something
@@ -283,19 +345,35 @@ private:
     double mass = 0.0;     // kg; avatar_body::mass until set_mass
     bool own_mass = false; // set_mass gave it one: a new body keeps it
     avatar_energy energy;
+    avatar_motion motion = avatar_motion::walking; // its last drive's
   };
   std::uint32_t create_avatar(const cvc::physics::body_state &feet, bool dynamic, double mass);
   void add_avatar_material();
   // Remove every avatar's body and create it again (statics untouched, so the order stays
   // statics-then-avatars), each from its feet state.
   void recreate_avatars(const std::map<std::string, cvc::physics::body_state> &feet);
-  // The walker controller: ease the horizontal velocity of S toward the intent's within the
-  // force limit and what A can pay for, and charge A for it.
-  void drive_walker(avatar &a, cvc::physics::body_state &s, const avatar_intent &in) const;
+  // The walker controller: ease the horizontal velocity of S toward (TX, TY) within FORCE (N) and
+  // what A can pay for, carrying the body at COST m g |v|, and charge A for it.
+  void drive_walker(avatar &a, cvc::physics::body_state &s, double tx, double ty, double force,
+                    double cost) const;
+  // walker@2 (set_swim): the motion the water gives it, then that motion's drive.
+  void drive_walker2(avatar &a, cvc::physics::body_state &s, const avatar_intent &in) const;
+  // A swimmer's push up or down toward VZ (m/s) within swim_force, paying its work; false when A
+  // cannot pay.
+  void swim_vertical(avatar &a, cvc::physics::body_state &s, double vz) const;
+  // A stroke up onto an edge in front of S within climb_height of SURFACE (the water's height):
+  // placed on it, paying m g for the height. False when there is none, or A cannot pay.
+  bool climb_out(avatar &a, cvc::physics::body_state &s, const avatar_intent &in,
+                 double surface) const;
+  // Pay JOULES of work from A's reserve as a jump does: false (nothing paid) when it cannot.
+  bool pay_work(avatar &a, double joules) const;
+  // Whether something is under the feet of S (within 8 cm), as a jump needs.
+  bool standing(const cvc::physics::body_state &s) const;
   // The walker's jump: S (its centre's state) leaves the ground if the intent asks, it stands on
   // something and A can pay.
   void jump(avatar &a, cvc::physics::body_state &s, const avatar_intent &in) const;
   double _jump_speed = 4.0;
+  avatar_swim _swim;
   avatar_body _body;
   avatar_energy_policy _energy;
   cvc::physics::vec3 _gravity{0.0, 0.0, -9.80665};

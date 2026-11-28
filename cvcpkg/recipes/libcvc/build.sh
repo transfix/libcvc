@@ -23,6 +23,11 @@ CVC_LINK="${CVC_LINK:-shared}"
 # macOS has no nproc: ask sysctl there, so a Mac build is not held to 4 jobs.
 CVC_JOBS="${CVC_JOBS:-$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)}"
 
+# NetBSD: pkgsrc's clang, which built cvcpkg's NetBSD deps (_common/env-netbsd.sh), not base GCC 10.
+if [[ "$(uname -s)" == NetBSD && -z "${CXX:-}" && -x /usr/pkg/bin/clang++ ]]; then
+  export CC=/usr/pkg/bin/clang CXX=/usr/pkg/bin/clang++
+fi
+
 case "$(echo "$CVC_BUILD_TYPE" | tr '[:upper:]' '[:lower:]')" in
   debug) CMAKE_BUILD_TYPE=Debug ;;
   *) CMAKE_BUILD_TYPE=Release ;;
@@ -33,6 +38,11 @@ if [[ "$CVC_LINK" == "static" ]]; then
 else
   BUILD_SHARED_LIBS=ON
 fi
+
+# Haiku has no gRPC or protobuf bundle yet, and both conference transports need protobuf's wire,
+# so it builds with neither (the recipe declares none of the gRPC chain there).
+CVC_TRANSPORTS=ON
+[[ "$(uname -s)" == Haiku ]] && CVC_TRANSPORTS=OFF
 
 CMAKE_ARGS=(
   -G Ninja
@@ -67,8 +77,8 @@ CMAKE_ARGS=(
   # relay need to join a room. The recipe's runtime deps already carry grpc, protobuf, abseil and
   # re2 for every platform this builds; with these OFF the SDK shipped without them, so an arigl or
   # arisrv built against it compiled the conference out.
-  -DCVC_ENABLE_GRPC=ON
-  -DCVC_ENABLE_WS=ON
+  -DCVC_ENABLE_GRPC="$CVC_TRANSPORTS"
+  -DCVC_ENABLE_WS="$CVC_TRANSPORTS"
   # libcvc is a pure C++ SDK: the Python bindings are a SEPARATE `pycvc`
   # recipe that builds bindings/pycvc against the installed libcvc, so a plain
   # libcvc bundle pulls in no Python/numpy/swig/VTK dependency. (Default is

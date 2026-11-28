@@ -1,6 +1,7 @@
 // The .ari schema (docs/ARIADNE.md §14): the file the library carries, its shape (every built-in
 // widget type and top-level block in it, in the validator's subset), what validate_* and a load
-// find (with where), what they accept, and the shipped documents, which must all be valid.
+// find (with where), what they accept, and the shipped documents, which must all be valid. Also
+// that the spec (docs/ARIADNE_SPEC.md) gives each top-level block of the schema its entry.
 
 #include <algorithm>
 #include <cvc/ariadne/loader.h>
@@ -165,6 +166,31 @@ TEST(AriSchema, EveryBuiltinBlockIsInTheSchema) {
   const njson &doc = s["$defs"]["document"]["properties"];
   for (const std::string &b : builtin_ari_blocks())
     EXPECT_TRUE(doc.contains(b)) << b;
+}
+
+// The schema is the spec's structural half (docs/ARIADNE_SPEC.md §1): the spec's §8 gives each
+// top-level key the schema allows one entry, a "#### `key:`" heading, and no other key one.
+TEST(AriSpec, EveryTopLevelBlockHasItsEntry) {
+  const njson s = schema();
+  std::set<std::string> keys;
+  for (const auto &kv : s["$defs"]["document"]["properties"].items())
+    keys.insert(kv.key());
+  ASSERT_FALSE(keys.empty());
+  const std::string spec = read_file(kSource / "docs" / "ARIADNE_SPEC.md");
+  const auto from = spec.find("\n## 8. ");
+  ASSERT_NE(from, std::string::npos) << "docs/ARIADNE_SPEC.md has no §8";
+  const auto to = spec.find("\n## 9. ", from);
+  std::istringstream in(spec.substr(from, to == std::string::npos ? std::string::npos : to - from));
+  std::multiset<std::string> entries;
+  for (std::string line; std::getline(in, line);)
+    if (line.rfind("#### `", 0) == 0 && line.size() > 8 &&
+        line.compare(line.size() - 2, 2, ":`") == 0)
+      entries.insert(line.substr(6, line.size() - 8));
+  for (const std::string &k : keys)
+    EXPECT_EQ(entries.count(k), 1u) << "ARIADNE_SPEC.md §8 needs one entry for " << k << ":";
+  for (const std::string &e : entries)
+    EXPECT_TRUE(keys.count(e)) << "ARIADNE_SPEC.md §8 has an entry for " << e
+                               << ":, which is not a top-level key of the schema";
 }
 #endif // CVC_SCHEMA_TEST_HAVE_JSON
 
@@ -427,6 +453,54 @@ TEST(AriSchema, SeveralAppsCheckApart) {
   for (int w : wrong)
     failures += w;
   EXPECT_EQ(failures, 0);
+}
+
+// A window's groups written inline, `groups` of them around a text with an unknown key: 6 + 2 *
+// groups levels of YAML (the document, windows:, the window, its children:, each group and its
+// children:, then the text and its values).
+std::string groups_doc(std::size_t groups) {
+  std::string doc = "windows:\n  - window: W\n    children: ";
+  for (std::size_t i = 0; i < groups; ++i)
+    doc += "[{type: group, children: ";
+  doc += "[{text: deepest, bnd: x}]";
+  for (std::size_t i = 0; i < groups; ++i)
+    doc += "}]";
+  return doc + "\n";
+}
+
+// docs/ARIADNE.md §6.7: the check goes kMaxSchemaDepth levels of YAML deep. A document that deep is
+// checked; one deeper is not, and its one issue, at its first value past the limit, says so (a
+// load warns it, as any issue, and goes on).
+TEST(AriSchema, TheCheckGoesAtMostkMaxSchemaDepthLevels) {
+  SKIP_WITHOUT_VALIDATOR();
+  ASSERT_EQ(kMaxSchemaDepth % 2, 0u);
+  const std::size_t groups = (kMaxSchemaDepth - 6) / 2;
+  cvc::app app;
+  const ValidationResult checked = validate_string(app, groups_doc(groups));
+  ASSERT_TRUE(checked.checked) << checked.error;
+  ASSERT_EQ(checked.issues.size(), 1u) << all_issues(checked.issues);
+  EXPECT_EQ(checked.issues[0].message, "unknown key 'bnd'");
+
+  const std::string doc = groups_doc(groups + 1);
+  const ValidationResult v = validate_string(app, doc);
+  ASSERT_TRUE(v.checked) << v.error;
+  EXPECT_FALSE(v.ok());
+  ASSERT_EQ(v.issues.size(), 1u) << all_issues(v.issues);
+  const SchemaIssue &i = v.issues[0];
+  std::string pointer = "/windows/0/children/0";
+  for (std::size_t g = 0; g <= groups; ++g)
+    pointer += "/children/0";
+  EXPECT_EQ(i.pointer, pointer) << "the text, a level past the limit";
+  EXPECT_EQ(i.line, 3);
+  EXPECT_EQ(i.column, 1 + static_cast<int>(doc.substr(doc.find("    children:")).find("{text:")));
+  EXPECT_EQ(i.message, "nested more than " + std::to_string(kMaxSchemaDepth) +
+                           " levels of YAML deep, the most the schema check goes "
+                           "(docs/ARIADNE.md §6.7): this document is not checked");
+  const LoadResult r = load_string(app, doc);
+  ASSERT_TRUE(r.ok) << r.error;
+  ASSERT_EQ(r.schema_issues.size(), 1u) << all_issues(r.schema_issues);
+  EXPECT_TRUE(std::any_of(r.warnings.begin(), r.warnings.end(),
+                          [&](const std::string &w) { return w == "ari: schema: " + i.text(); }));
 }
 
 TEST(AriSchema, WithoutTheValidatorNothingIsChecked) {

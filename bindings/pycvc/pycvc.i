@@ -1174,6 +1174,26 @@ struct pycvc_py_conversion {
     v.owner = std::shared_ptr<void>(container.get(), [container](void*) { /* keep-alive */ });
     return v;
   }
+  // The triangles' vertex indices as a read-only (T,3) uint64 array: a COPY (cvc::geometry keeps
+  // no per-container owner for its triangles to pin), so a later edit of the geometry does not
+  // reach it. What a tool reading a simplify()'d or pyramid rung back out needs with vertices().
+  pycvc::ArrayView triangle_indices() const {
+    const auto &tris = $self->const_tris();
+    auto copy = std::make_shared<std::vector<std::uint64_t>>();
+    copy->reserve(tris.size() * 3);
+    for (const auto &t : tris) {
+      copy->push_back(t[0]);
+      copy->push_back(t[1]);
+      copy->push_back(t[2]);
+    }
+    pycvc::ArrayView v;
+    v.dtype = pycvc::DType::UInt64;
+    v.writable = false;
+    v.shape = {static_cast<long>(tris.size()), 3};
+    v.data = copy->empty() ? nullptr : copy->data();
+    v.owner = copy;
+    return v;
+  }
   // Zero-copy (N,4) float64 view of the tangent basis, pinned via tangents_ptr().
   // %rename'd to tangents().
   pycvc::ArrayView tangents_view() {

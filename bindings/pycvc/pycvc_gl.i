@@ -2103,6 +2103,21 @@ void poke_update(const std::shared_ptr<cvc::gl::GraphicsNode> &node) {
 } // namespace pycvc
 %}
 
+// cvcGL's vehicle fit (cvc::gl::ariadne::fit_vehicle_geometry, vehicle_view.h): a vehicle
+// model's mesh up +z on z = 0, its length along +x to `length`, its nose at +x, centred — the one
+// a world vehicle's model look and the swarm layer draw with. pycvc_gl.vehicle.VehicleModel fits
+// with it, so Python has no fit of its own. Throws (RuntimeError) for a geometry with no points.
+%{
+#include <cvc/gl/ariadne/vehicle_view.h>
+%}
+%inline %{
+namespace pycvc {
+cvc::geometry fit_vehicle_geometry(const cvc::geometry &g, double length) {
+  return cvc::gl::ariadne::fit_vehicle_geometry(g, length);
+}
+} // namespace pycvc
+%}
+
 // ── Dear ImGui overlay + state-bound ui panels (HUDs/UIs from Python) ───────
 // %include'd last: it references CameraController / StageLighting / SceneGraph /
 // SceneRenderer (all wrapped above) and reuses the file-scope callable typemap.

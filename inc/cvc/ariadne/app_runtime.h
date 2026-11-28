@@ -363,6 +363,9 @@ private:
   };
   std::vector<EngineUse> engines_;
   Runtime rt_;
+  // docs/roadmap/ARIADNE_SHELL.md 4.2: the Runtime's mount loader (set_mount_loader): load_mount,
+  // with this runtime's component paths, its document's requires: checked against this host.
+  MountResult load_mount_checked(const MountRequest &rq);
   std::vector<std::string> componentPaths_;
   std::vector<std::string> sources_;
   std::map<std::string, std::int64_t> stamps_;
