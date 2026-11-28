@@ -13,7 +13,10 @@ generator's output exactly; the headings and the "Read by" lines are not generat
 `port_parameters_doc_test` ([`src/cvc/tests/port_parameters_doc_test.cpp`](../src/cvc/tests/port_parameters_doc_test.cpp))
 keeps them current: it checks each `### <struct>` table against `cvc::params_markdown<P>()`, and
 when a param_table changes it fails and prints the table to paste over the old one. A table added
-here goes into the test's list too, and the test fails until both have it.
+here goes into the test's list too, and the test fails until both have it. The numbers are as
+`std::to_chars` prints them, so the tables are compared only where the standard library has
+floating `to_chars`. The wasm-mt build's libc++ has none, and there `format_double` spells some
+ranges longer (`1000000000` for `1e+09`).
 
 pycvc prints the same table for the structs it wraps: `pycvc.skeleton_params.markdown()`.
 

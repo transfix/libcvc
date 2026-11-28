@@ -15,7 +15,13 @@
 // failure prints it). It also checks that the doc and the list below name the same structs, so a
 // table added to the doc, or a struct added here, needs its other half. Runs natively and as a
 // wasm-mt binary under node (ci.yml's ports lane).
+//
+// The tables are compared only where the standard library has floating std::to_chars. Without it
+// (libc++ on Emscripten, older macOS targets) param_detail::format_double prints the shortest of
+// %.15g .. %.17g, which spells some numbers longer (1000000000 for to_chars' 1e+09), so a range
+// cannot match the doc there. The check on the struct list runs everywhere.
 
+#include <charconv>
 #include <cvc/core/param_table.h>
 #include <cvc/geometry/pocket_tunnel_params.h>
 #include <cvc/geometry/secondary_structures_params.h>
@@ -39,6 +45,13 @@
 namespace {
 
 const std::string kDoc = std::string(CVC_REPO_DIR) + "/docs/PORT_PARAMETERS.md";
+
+// Whether format_double prints through std::to_chars, as it did for the doc: its own condition.
+#if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L
+constexpr bool kShortestNumbers = true;
+#else
+constexpr bool kShortestNumbers = false;
+#endif
 
 struct generated_table {
   std::string name; // the doc's "### <name>" heading: the struct's name without cvc::
@@ -108,6 +121,9 @@ TEST(PortParametersDoc, TheDocReads) {
 }
 
 TEST(PortParametersDoc, EachTableIsWhatTheGeneratorPrints) {
+  if (!kShortestNumbers)
+    GTEST_SKIP() << "no floating std::to_chars here, so format_double spells some numbers longer "
+                    "than the doc does";
   std::vector<std::string> headings;
   const std::map<std::string, std::string> doc = doc_tables(headings);
   ASSERT_FALSE(headings.empty()) << kDoc << " has no \"### \" headings";
@@ -142,6 +158,9 @@ TEST(PortParametersDoc, TheDocAndTheTestNameTheSameStructs) {
         << "\" table that this test does not check: add it to generated() in "
            "port_parameters_doc_test.cpp";
   }
+  for (const std::string &name : known)
+    EXPECT_TRUE(seen.count(name)) << "docs/PORT_PARAMETERS.md has no \"### " << name
+                                  << "\" section for cvc::params_markdown<cvc::" << name << ">()";
 }
 
 } // namespace
