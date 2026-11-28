@@ -25,7 +25,7 @@
 //     var: 0                             # the variable and timestep the volume holds
 //     time: 0
 //     view: xy                           # the switch: xy | xz | zy
-//     tool: points                       # navigate | points | probe
+//     tool: points                       # navigate | points | probe | contours
 //     slice: { x: -1, y: -1, z: 40 }     # the planes (-1 the middle)
 //     display: { point_scale: 1, show_points: true, crosshairs: true, grey: false }
 //     classes:                           # the point classes it starts with (no points)

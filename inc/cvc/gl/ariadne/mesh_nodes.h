@@ -50,7 +50,7 @@
 //                        nothing runs
 //       busy, stoppable, status, progress, phase, stats.work_ms, pid (published, job_keys.h)
 //       info.points, info.strands (the polylines), info.sheets, info.clusters, info.lines,
-//       info.triangles, warnings (one per line)                        (published; "-" before)
+//       info.triangles (published; "-" before a skeleton), warnings (one per line; "" before)
 //       view.strands, view.sheets (1: show that part)                  (followed live)
 //     It draws in two children, "<id>_strands" (lines, green polylines and blue stars) and
 //     "<id>_sheets" (a colour per sheet), and puts the parts on the data channel at
