@@ -28,6 +28,15 @@ scheduler in slices with progress for the UI, interactive on one thread (§1 ite
   243 helix C-alphas lie within 3 Å of a strand, 22 of 232 coil ones (`cvcgl_mesh_skeleton`
   checks the ratio stays above 2). At TexMol's default blobbiness the surface is the atoms' own
   and the skeleton finds no strands; sheets follow the beta strands only weakly.
+- **M0 part 2, the molecular scene nodes** (2026-11-28, transfix/libcvc#1622, in review; phase
+  M0b of VOLROVER-TEXMOL-APPS-ROADMAP.md): `cvc::mol` views (`inc/cvc/mol/view.h`: ball-and-stick,
+  spacefill, sticks and a secondary-structure cartoon; colour by element, chain, residue, B-factor
+  or structure; bonds by distance) as a resumable stepper; the `molecule` data decoder; cvcGL's
+  `molecule` node type over `MoleculeNode`, with impostor spheres (tessellated where their shader
+  can't be built), exact atom picks, per-chain visibility, a golden and the arigl-web case. Written
+  for libcvc: nothing from TexMol's renderers, `libmol` or its element table. Still to come in M0
+  part 2: the `mol/molecule_view` component, the group tree, torsions, the writers, CLI, pycvc,
+  intrinsics and the A/B against TexMol's parser.
 **Asked for (Joe, 2026-11-09):** port TexMol's legacy libraries; port the F2Dock server to arisrv
 and Ariadne documents, with TexMol talking to it; consider conference mode for this; make arisrv
 general for TexMol and VolumeRover compute tasks; and load scientific visualizations and digital
