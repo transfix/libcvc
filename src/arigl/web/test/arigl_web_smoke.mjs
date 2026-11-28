@@ -150,6 +150,14 @@ const TILER_CONFIG = JSON.stringify({
 // /apps/mol/: the app again, preloading the PDB file molecule.ari's mesh_lab reads (a node's
 // source file is not a reference the page follows).
 const MOL_CONFIG = JSON.stringify({preload: ['../data/molecules/1grl.pdb']});
+// /apps/pix/ and /apps/pixsixel/: ari.html with a page config asking for pictures in pixels
+// (iTerm2 images; Sixel, whose cell size the page measures), on pixels.ari's picture, the
+// repository's src/ari/tests/media/checker.png preloaded beside the page.
+const PIX_CONFIG = JSON.stringify({src: 'pixels.ari', flags: ['--graphics', 'iterm'],
+                                   preload: ['checker.png']});
+const PIX_SIXEL_CONFIG = JSON.stringify({src: 'pixels.ari', flags: ['--graphics', 'sixel'],
+                                         preload: ['checker.png']});
+const CHECKER = fileURLToPath(new URL('../../../ari/tests/media/checker.png', import.meta.url));
 // /apps/flaky/: the app again, preloading blob.bin, which the server sends whole except the first
 // time: then it promises all of it (Content-Length) and drops the connection half-way, as a cut-off
 // download does. arigl must ask again past the browser's cache (cache: 'reload'), so the page runs.
@@ -204,11 +212,16 @@ function fileFor(urlPath) {
   if (rest === 'mol/ariadne.config.json') return {json: MOL_CONFIG};
   if (rest === 'flaky/ariadne.config.json') return {json: FLAKY_CONFIG};
   if (rest === 'silent/ariadne.config.json') return {json: SILENT_CONFIG};
+  if (rest === 'pix/ariadne.config.json') return {json: PIX_CONFIG};
+  if (rest === 'pixsixel/ariadne.config.json') return {json: PIX_SIXEL_CONFIG};
+  if (rest === 'pix/checker.png' || rest === 'pixsixel/checker.png') return CHECKER;
   if (rest.startsWith('data/')) return path.join(EXAMPLES_DATA, rest.slice('data/'.length));
   if (rest.startsWith('tiler/')) rest = 'app/' + rest.slice('tiler/'.length);
   if (rest.startsWith('mol/')) rest = 'app/' + rest.slice('mol/'.length);
   if (rest.startsWith('flaky/')) rest = 'app/' + rest.slice('flaky/'.length);
   if (rest.startsWith('silent/')) rest = 'app/' + rest.slice('silent/'.length);
+  if (rest.startsWith('pix/')) rest = 'app/' + rest.slice('pix/'.length);
+  if (rest.startsWith('pixsixel/')) rest = 'app/' + rest.slice('pixsixel/'.length);
   if (PYDOCS && rest === 'pyprog/ariadne.config.json') return {json: PY_CONFIG};
   if (PYDOCS && (rest.startsWith('py/') || rest.startsWith('pyprog/'))) {
     const name = rest.slice(rest.indexOf('/') + 1);
@@ -382,6 +395,8 @@ async function settle(page, check, GRACE_MS = 15000) {
         ' warnings: ariadneWeb.warnings || [], out: window.__out || [],' +
         ' needs: ariadneWeb.needs || null,' +
         ' isolated: self.crossOriginIsolated === true, sab: typeof SharedArrayBuffer,' +
+        // ari.html with PIXELS injected: how often xterm.js's image layer had the picture
+        ' pixels: window.__pixels || null,' +
         ' warning: (w => w && !w.hidden ? w.textContent : "")(' +
         '    document.getElementById("warning")),' +
         ' status: document.getElementById("status").textContent} : null)');
@@ -453,6 +468,16 @@ else
 // Mac's). The page must name what it needs and load nothing of the module: neither its .js nor its
 // .wasm (nor ariglx-web's python312.zip).
 const NO_JSPI = 'delete WebAssembly.Suspending;';
+// ari.html's pictures in pixels: every 50 ms, whether xterm.js's image layer has the picture. Once
+// it first has, a sample without it is a draw the picture was missing from.
+const PIXELS = 'window.__pixels = {shown: 0, missing: 0, px: 0}; setInterval(() => {' +
+  ' const c = document.querySelector(".xterm-image-layer"); if (!c || !c.width) return;' +
+  ' const d = c.getContext("2d").getImageData(0, 0, c.width, c.height).data; let n = 0;' +
+  ' for (let i = 3; i < d.length; i += 4) if (d[i]) ++n;' +
+  ' const p = window.__pixels; if (n) { ++p.shown; p.px = n; } else if (p.shown) ++p.missing;' +
+  '}, 50);';
+// Two seconds of the picture with no sample missing it.
+const steady = p => !!p && p.shown >= 40 && p.missing === 0;
 const asAgent = (ua, touch) =>
   `Object.defineProperty(Navigator.prototype, 'userAgent', {get: () => ${JSON.stringify(ua)}});` +
   `Object.defineProperty(Navigator.prototype, 'maxTouchPoints', {get: () => ${touch}});`;
@@ -667,6 +692,23 @@ if (fs.existsSync(path.join(WEB, 'ari.html'))) {
       inject: PICK,
       before: () => { uploaded = Buffer.alloc(0); },
       check: v => v.state === 'running' && sent(v.text) && uploadedAll(),
+    },
+    // A frame with pictures is a synchronized update the page writes in one piece. Written apart,
+    // the next frame's repaint (pixels.ari ticks, so every frame repaints) covered the pictures
+    // before xterm.js drew them: the picture was missing from most draws, or all of them.
+    {
+      name: 'ari: a config asking for iTerm2 pictures gets them in pixels, every draw',
+      url: `${ORIGIN}/apps/pix/ari.html`,
+      inject: PIXELS,
+      check: v => v.state === 'running' && /pixels: a picture/.test(v.text) && steady(v.pixels),
+      report: v => [`image layer: ${JSON.stringify(v.pixels)}`],
+    },
+    {
+      name: 'ari: a config asking for Sixel pictures gets them, cut to the measured cell size',
+      url: `${ORIGIN}/apps/pixsixel/ari.html`,
+      inject: PIXELS,
+      check: v => v.state === 'running' && /pixels: a picture/.test(v.text) && steady(v.pixels),
+      report: v => [`image layer: ${JSON.stringify(v.pixels)}`],
     });
 }
 // ariglx-web's Python, with --pydocs: what the native ariglx ctests check, in the page.

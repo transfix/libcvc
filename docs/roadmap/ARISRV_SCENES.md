@@ -52,7 +52,9 @@ draws with the generated-world renderer. A saved lab world (GB4) loads the same 
 **Vehicle spawns:**
 - `world: spawns:` lists `spawn_point`s (x, y, heading, team, archetype, world) and a policy:
   `fixed`, `random`, `round_robin` or `nearest_free` (world_rules.h).
-- They're part of `world_rules`, so the room carries them.
+- They're part of `world_rules`, which the relay reads from its document. The room does not
+  carry them: its rules sections are physics, controllers, archetypes and policy (room_rules.h).
+  The relay's world runtime uses them for its vehicles, and since SC1 its holon for avatars.
 - `WorldSpawns` checks each point against the grid of the world that's on (free ground, or deep
   enough water for a boat), and its minimap tools add, remove, tag and suggest points (along
   the roads, or over water for a boat).
@@ -108,8 +110,9 @@ These carry over unchanged:
 **Avatars get spawn points.**
 - `world: spawns:` points tagged `archetype: avatar` (or any avatar archetype id) are avatar
   spawns. An untagged point serves avatars too.
-- They ride in `world_rules.spawns` like the vehicles' points, so the room already carries them.
-- holon_sync's newcomer placement then uses them:
+- They ride in `world_rules.spawns` like the vehicles' points. Spawning is the relay's alone,
+  so arisrv hands them to its holon (`holon::set_avatar_spawns`); no client needs them.
+- holon_sync's newcomer placement then uses them (`holon::spawn_for`):
   - It picks a point by the policy and scope (a team or archetype draw, `nearest_free` against the
     other avatars).
   - It sets z to the ground of the world that's on at (x, y), plus the archetype's half height and
@@ -388,7 +391,7 @@ checker, which reads OW5k's index fields, is shared.
 
 | Phase | What | Size |
 |---|---|---|
-| SC1 | **Avatar spawns:** points tagged for avatars in `world: spawns:`. Newcomers and respawns take them by the policy, put on the ground of the world that's on (the ring when there are none, also on the ground). Respawn is relative to the ground. Everyone respawns on a world change. Tests: on a generated world and on Austin, a joining avatar stands on the ground, and a Regenerate under it re-places it. | M |
+| SC1 | **Avatar spawns** (in progress: `holon::set_avatar_spawns`, `spawn_for`, `ground_at`, ground-relative respawn; respawning everyone on a world switch or a Regenerate is not done yet): points tagged for avatars in `world: spawns:`. Newcomers and respawns take them by the policy, put on the ground of the world that's on (the ring when there are none, also on the ground). Respawn is relative to the ground. Everyone respawns on a world change. Tests: on a generated world and on Austin, a joining avatar stands on the ground, and a Regenerate under it re-places it. | M |
 | SC2 | **`server.spawns.set`** (admin): spawns re-published at an activation tick. The minimap's tools send their edits to the server while joined. | S–M |
 | SC3 | **`server.scene.load` from the server's list** (stock worlds, `--scene-root`, cvcpkg): background load, swap at a tick, everything re-published, everyone respawned. Joined hosts follow the room's scene by default (`--follow-room off` to opt out). `server.scene.list`. | L |
 | SC4 | **Bundles as scenes:** `scene_for_bundle` wrapper documents, `world_source` by bundle hash, Austin and saved lab worlds loadable. | M |
