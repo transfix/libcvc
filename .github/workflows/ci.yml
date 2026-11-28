@@ -685,32 +685,15 @@ jobs:
 
       # WAMR, binaryen (its library for the engine, its wasm-opt for the test guests) and the Python
       # arix embeds, in a prefix of their own: the interpreter bundle carries its own zlib and
-      # openssl, which must not shadow the deps bundle's. wamr 2.4.4+cvc.4 and binaryen 129 come
-      # from cy-pca/cvcpkg#648, which isn't on cvcpkg.org yet (the catalog's wamr is cvc.3, with
-      # WAMR's own WASI, and it has no binaryen), so they're built here from that PR's recipes at
-      # the commit pinned below. Once #648 is published this step installs them instead:
-      #   cvcpkg install wamr binaryen python312 --prefix "$prefix" --config release --link shared
-      - name: Check out the wamr and binaryen recipes (cy-pca/cvcpkg#648)
-        if: steps.paths.outputs.run == 'true'
-        uses: actions/checkout@v4
-        with:
-          repository: cy-pca/cvcpkg
-          ref: ccdff8b5d11544f8c916ecb0f4bc1c461e1ff73b
-          path: cvcpkg-recipes
-          sparse-checkout: |
-            recipes/_common
-            recipes/wamr
-            recipes/binaryen
-
-      - name: Build WAMR and binaryen, and install Python (cvcpkg)
+      # openssl, which must not shadow the deps bundle's. wamr is pinned at 2.4.4+cvc.4, the first
+      # build without WAMR's own WASI (cvc.3's takes a guest's WASI imports before the host's).
+      - name: Install WAMR, binaryen and Python (cvcpkg)
         if: steps.paths.outputs.run == 'true'
         run: |
           set -euo pipefail
           prefix="$RUNNER_TEMP/wamr-prefix"
-          cvcpkg install cmake ninja python312 --prefix "$prefix" --config release --link shared
-          cvcpkg build wamr binaryen --local --no-default-recipes \
-            --recipes-dir "$GITHUB_WORKSPACE/cvcpkg-recipes/recipes" \
-            --prefix "$prefix" --platform linux --config release --link shared
+          cvcpkg install wamr==2.4.4+cvc.4 binaryen python312 --prefix "$prefix" \
+            --config release --link shared
           test -f "$prefix/lib/libiwasm.a" && test -f "$prefix/lib/libbinaryen.a"
           "$prefix/bin/wasm-opt" --version
           echo "WAMR_PREFIX=$prefix" >> "$GITHUB_ENV"
