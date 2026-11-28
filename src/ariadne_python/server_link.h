@@ -173,8 +173,8 @@ public:
   struct ClientOp {
     // geo: @host.geolocate's answer for a native connection ("geolocate" event), unanswered.
     enum class Kind { open, name, update, close, geo } kind = Kind::open;
-    std::uint64_t id = 0; // the program's, for its answer
-    std::string key;      // geo: the client id
+    std::uint64_t id = 0;                         // the program's, for its answer
+    std::string key;                              // geo: the client id
     std::uint64_t seq = 0;                        // geo: the connection's in its record's log
     std::string transport, address, local;        // open
     std::string nick;                             // name
