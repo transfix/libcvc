@@ -318,7 +318,7 @@ void decode_molecule(DataDecode &d) {
   const auto &f = only_file(d);
   const std::string ext = extension(f.path);
   cvc::mol::molecule m;
-  if (ext == ".pdb" || ext == ".ent" || ext == ".pqr" || ext == ".xyzr") {
+  if (ext == ".pdb" || ext == ".ent" || ext == ".pdb1" || ext == ".pqr" || ext == ".xyzr") {
     std::istringstream in(*f.bytes);
     if (ext == ".pqr")
       m = cvc::mol::read_pqr(in, {}, f.path);
@@ -516,7 +516,7 @@ std::string default_decoder(bool many, const std::string &name) {
       return "volume";
   if (ext == ".vgr")
     return "point_classes";
-  if (ext == ".pdb" || ext == ".ent" || ext == ".pqr" || ext == ".xyzr")
+  if (ext == ".pdb" || ext == ".ent" || ext == ".pdb1" || ext == ".pqr" || ext == ".xyzr")
     return "molecule";
   if (ext == ".ser" || ext == ".contour" || ext == ".cvcc")
     return "contours";
@@ -598,6 +598,18 @@ std::string encode_contours(const DataEncode &e) {
   return read_whole(p);
 }
 
+// A molecule in the format FILE's extension names (.pdb, .ent, .pqr or .xyzr: the app's molecule
+// writers, cvc/mol/molecule.h).
+std::string encode_molecule(const DataEncode &e) {
+  const std::shared_ptr<const cvc::mol::molecule> m = held<cvc::mol::molecule>(e.payload);
+  if (!m)
+    fail("molecule: the data are not a molecule");
+  temp_dir tmp;
+  const std::string p = tmp.path() + "/" + basename(e.file);
+  cvc::mol::write_molecule(e.app, *m, p);
+  return read_whole(p);
+}
+
 std::string encode_volume_grid_session(const DataEncode &e) {
   const std::shared_ptr<const cvc::volume_grid_session> s =
       held<cvc::volume_grid_session>(e.payload);
@@ -616,6 +628,7 @@ struct encoder_table {
       {"point_classes", encode_point_classes},
       {"volume_grid_session", encode_volume_grid_session},
       {"contours", encode_contours},
+      {"molecule", encode_molecule},
   };
 };
 
@@ -1041,6 +1054,8 @@ std::string default_data_encoder(const boost::any &payload) {
     return "volume_grid_session";
   if (held<cvc::contour_stack>(payload))
     return "contours";
+  if (held<cvc::mol::molecule>(payload))
+    return "molecule";
   if (boost::any_cast<DataBytes>(&payload) || boost::any_cast<std::string>(&payload))
     return "bytes";
   return std::string();

@@ -3517,6 +3517,14 @@ scene:
   `atom`, `serial`, `name`, `element`, `residue`, `residue_seq`, `chain`, `model`, `b_factor`,
   `hetero` and `structure`; a pick on its sticks or cartoon names the atom nearest the point
   (`cvcgl_molecule_pick`).
+- **Programs** ([`molecule_intrinsics.h`](../inc/cvc/mol/molecule_intrinsics.h), installed by
+  `register_cvcgl_extensions`): `(mol.info m)` a dict of what the molecule holds (`id`, `title`,
+  `atoms`, `models`, `chains`, `residues`, `helices`, `sheets`, `turns`, `hetero`, `bounds`);
+  `(mol.torsions m)` a dict a residue (`chain`, `seq`, `insertion`, `residue`, `kind`, and its
+  angles in radians, nil where undefined); `(mol.blur m [params])` its density, a volume to
+  `data-put`; `(mol.view m [params])` the view's meshes (`spheres`, `sticks`, `cartoon`) and its
+  counts. The last three are jobs with the `-async` and `-start` forms. `m` is a data object or the
+  state path of one: `data.grl.molecule`, or a molecule node's `molecule`.
 
 The `molecule` golden draws 1GRL's cartoon in the main view and its ball-and-stick in a viewport,
 from one copy of the molecule.
@@ -4812,7 +4820,7 @@ for an archive or a directory, and otherwise one picked by the file's extension:
 | `point_classes` | `classes`: a `cvc::point_classes` from a `.vgr` (VolumeGridRover's point classes; the default for `.vgr`), its point count as the value |
 | `volume_grid_session` | `session`: a `cvc::volume_grid_session` from a session's JSON (`as:` names it: `.json` alone is `json`) |
 | `contours` | `contours`: a `cvc::contour_stack` from any contour format the app reads (the default for `.ser`, `.contour` and `.cvcc`), its polygon count as the value; a Reconstruct series' section files come from its archive or the page's preload |
-| `molecule` | `molecule`: a `cvc::mol::molecule` ([`molecule.h`](../inc/cvc/mol/molecule.h)) from a `.pdb`, `.ent`, `.pqr` or `.xyzr` file (the default for those), or any format the app's molecule handlers read, with the readers' defaults; its atom count as the value. A file with no atoms fails the load |
+| `molecule` | `molecule`: a `cvc::mol::molecule` ([`molecule.h`](../inc/cvc/mol/molecule.h)) from a `.pdb`, `.ent`, `.pdb1`, `.pqr` or `.xyzr` file (the default for those), or any format the app's molecule handlers read (TexMol's `.pts` too), with the readers' defaults; its atom count as the value. A file with no atoms fails the load |
 
 A host adds its own with `register_data_decoder`.
 
@@ -4834,6 +4842,7 @@ writes its outputs itself and makes no files runs no decoder. A host adds its ow
 | `point_classes` | `cvc::point_classes` as a `.vgr` |
 | `volume_grid_session` | a `cvc::volume_grid_session` as its JSON |
 | `contours` | a `cvc::contour_stack` in a one-file format, by FILE's extension: `.cvcc`, `.contour` or `.pcd` (a `.ser` or `.config` writes files beside it, and is refused) |
+| `molecule` | a `cvc::mol::molecule` by FILE's extension: `.pdb` (or `.ent`, `.pdb1`), `.pqr`, `.xyzr` or TexMol's `.pts` |
 
 A relative FILE is the document's directory's. A document whose directory is a URL (an `https://`
 one) writes no file. In a browser the file downloads under its name instead. A host adds encoders

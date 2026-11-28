@@ -646,6 +646,32 @@ TEST(AriadneData, MoleculesLoadByTheirExtension) {
   EXPECT_NE(root(node + ".error").value().find("holds no atoms"), std::string::npos)
       << root(node + ".error").value();
   EXPECT_TRUE(cvc::ariadne::has_data_decoder(app, "molecule"));
+
+  // Saved through the app (the molecule encoder, by the file's extension) and loaded back.
+  DataSpec two;
+  two.uri = (t.dir / "two.pdb").generic_string();
+  const std::string two_node = store->load(two); // loaded above: the same request's node
+  ASSERT_TRUE(store->wait(two_node, 30));
+  auto loaded = boost::any_cast<std::shared_ptr<const cvc::mol::molecule>>(
+      root(two_node + ".molecule").data());
+  ASSERT_TRUE(loaded);
+  root("work.mol").data(boost::any(loaded));
+  EXPECT_EQ(cvc::ariadne::default_data_encoder(root("work.mol").data()), "molecule");
+  for (const char *name : {"saved.pdb", "saved.pqr", "saved.xyzr"}) {
+    SCOPED_TRACE(name);
+    cvc::ariadne::data_save(app, "work.mol", name, "", t.dir.generic_string());
+    DataSpec back;
+    back.uri = (t.dir / name).generic_string();
+    const std::string node = store->load(back);
+    ASSERT_TRUE(store->wait(node, 30)) << root(node + ".error").value();
+    EXPECT_EQ(root(node + ".molecule").value(), "2");
+  }
+  try {
+    cvc::ariadne::data_save(app, "work.mol", "saved.mol2", "", t.dir.generic_string());
+    ADD_FAILURE() << "a .mol2 saved";
+  } catch (const std::exception &e) {
+    EXPECT_NE(std::string(e.what()).find("no writer"), std::string::npos) << e.what();
+  }
 }
 
 // A generator that makes no files and names no as: has written its outputs: no decoder runs.

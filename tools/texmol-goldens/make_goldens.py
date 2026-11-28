@@ -6,10 +6,13 @@ TexMol original. This script:
 
   1. fetches transfix/TexMol at the sha in texmol.sha (only the directories the parser and GOABlur
      need), or uses --texmol DIR;
-  2. builds blur_legacy with this directory's CMakeLists.txt (never part of libcvc's build);
-  3. runs it on each case below, on examples/data/molecules/1grl.pdb;
-  4. writes the goldens to src/cvc/tests/data/texmol-goldens/blur/ (or --out), or, with --check,
-     makes them in a scratch directory and compares them with what is committed.
+  2. builds blur_legacy and parser_legacy with this directory's CMakeLists.txt (never part of
+     libcvc's build);
+  3. runs blur_legacy on each case below, and parser_legacy once, on
+     examples/data/molecules/1grl.pdb;
+  4. writes the goldens to src/cvc/tests/data/texmol-goldens/blur/ (or --out) and .../parser/ (or
+     --parser-out), or, with --check, makes them in a scratch directory and compares them with
+     what is committed.
 
 The goldens:
   1grl.atoms.txt        the atoms TexMol's parser read, in its order (x y z radius, %.9g); the same
@@ -17,9 +20,11 @@ The goldens:
   <case>.f32            the density (float32 little-endian, x fastest)
   <case>.grid.txt       the grid's dims, then its box's min and max (%.9g)
   <case>.json           the case, the TexMol sha, the platform and the files' SHA-256
+  parser/1grl.tree.txt  the parser's group tree, a line a group, each residue with its phi and psi
+                        (parser_driver.cpp), and 1grl.tree.json beside it
 
---check compares the atoms and grids exactly and each density to within 1e-5 relative, since a
-compiler may round a float sum differently.
+--check compares the atoms, grids and tree exactly, each density to within 1e-5 relative and each
+torsion to within 1e-6, since a compiler may round a float sum or an acos differently.
 
     python3 tools/texmol-goldens/make_goldens.py            # write the goldens
     python3 tools/texmol-goldens/make_goldens.py --check    # they must not change
@@ -52,6 +57,7 @@ CASES = {
     "1grl_coarse": (2.0, -0.5),   # a low-resolution map, the skeleton demo's kind
 }
 TOLERANCE = 1e-5
+TORSION_TOLERANCE = 1e-6  # radians
 
 
 def pinned_sha():
@@ -98,18 +104,41 @@ def fetch(sha, work):
     return dst
 
 
-def build(texmol, work):
+def build(texmol, work, target="blur_legacy"):
     bdir = os.path.join(work, "build")
     cmd = ["cmake", "-S", HERE, "-B", bdir, "-DCMAKE_BUILD_TYPE=Release", "-DTEXMOL_DIR=" + texmol]
     if shutil.which("ninja") and not os.environ.get("CMAKE_GENERATOR"):
         cmd += ["-G", "Ninja"]
     run(cmd, quiet=True)
-    run(["cmake", "--build", bdir, "--config", "Release", "--target", "blur_legacy"], quiet=True)
-    for cand in (os.path.join(bdir, "blur_legacy"), os.path.join(bdir, "blur_legacy.exe"),
-                 os.path.join(bdir, "Release", "blur_legacy.exe")):
+    run(["cmake", "--build", bdir, "--config", "Release", "--target", target], quiet=True)
+    for cand in (os.path.join(bdir, target), os.path.join(bdir, target + ".exe"),
+                 os.path.join(bdir, "Release", target + ".exe")):
         if os.path.exists(cand):
             return cand
-    raise SystemExit("blur_legacy was not built in " + bdir)
+    raise SystemExit(target + " was not built in " + bdir)
+
+
+def trees_differ(made, kept):
+    """Why two parser trees (parser_driver.cpp's) differ, or None: every line the same but a
+    residue's phi and psi, which may differ by TORSION_TOLERANCE (another compiler's acos)."""
+    with open(made) as f, open(kept) as g:
+        a, b = f.read().splitlines(), g.read().splitlines()
+    if len(a) != len(b):
+        return "%d lines, not %d" % (len(a), len(b))
+    for i, (x, y) in enumerate(zip(a, b)):
+        if x == y:
+            continue
+        xs, ys = x.split(), y.split()
+        if (len(xs) != len(ys) or not xs or xs[0] != "residue" or xs[:-2] != ys[:-2] or
+                x[:len(x) - len(x.lstrip())] != y[:len(y) - len(y.lstrip())]):
+            return "line %d: %r, not %r" % (i + 1, x, y)
+        for u, v in zip(xs[-2:], ys[-2:]):
+            if u == "-" or v == "-":
+                if u != v:
+                    return "line %d: %r, not %r" % (i + 1, x, y)
+            elif abs(float(u) - float(v)) > TORSION_TOLERANCE:
+                return "line %d: a torsion %s, not %s" % (i + 1, u, v)
+    return None
 
 
 def sha256(path, text=False):
@@ -154,6 +183,8 @@ def main():
     ap.add_argument("--texmol", help="an existing TexMol checkout (must be at the pinned sha)")
     ap.add_argument("--out", default=os.path.join(REPO, "src", "cvc", "tests", "data",
                                                    "texmol-goldens", "blur"))
+    ap.add_argument("--parser-out", default=os.path.join(REPO, "src", "cvc", "tests", "data",
+                                                          "texmol-goldens", "parser"))
     ap.add_argument("--check", action="store_true",
                     help="make the goldens in a scratch directory and compare them with --out")
     args = ap.parse_args()
@@ -163,11 +194,29 @@ def main():
     os.makedirs(work, exist_ok=True)
     texmol = os.path.abspath(args.texmol) if args.texmol else fetch(sha, work)
     exe = build(texmol, work)
+    parser_exe = build(texmol, work, "parser_legacy")
 
     out = os.path.join(work, "check") if args.check else args.out
-    if args.check and os.path.exists(out):
-        shutil.rmtree(out)
-    os.makedirs(out, exist_ok=True)
+    parser_out = os.path.join(work, "check-parser") if args.check else args.parser_out
+    for d in (out, parser_out):
+        if args.check and os.path.exists(d):
+            shutil.rmtree(d)
+        os.makedirs(d, exist_ok=True)
+
+    # The parser's group tree and torsions (parser_driver.cpp).
+    tree = os.path.join(parser_out, "1grl.tree.txt")
+    run([parser_exe, PDB, tree])
+    with open(os.path.join(parser_out, "1grl.tree.json"), "w", newline="\n") as f:
+        json.dump({
+            "library": "TexMol PDBParser (group tree, protein torsions)",
+            "texmol": sha,
+            "input": "examples/data/molecules/1grl.pdb",
+            "input_sha256": sha256(PDB, text=True),
+            "tree_sha256": sha256(tree, text=True),
+            "made_by": "tools/texmol-goldens/make_goldens.py",
+            "platform": describe_platform(),
+        }, f, indent=2)
+        f.write("\n")
     atoms = None
     for case, (resolution, blobbiness) in sorted(CASES.items()):
         prefix = os.path.join(out, case)
@@ -200,9 +249,12 @@ def main():
             f.write("\n")
 
     if not args.check:
-        print("wrote the goldens to " + out)
+        print("wrote the goldens to " + out + " and " + parser_out)
         return
     problems = []
+    why = trees_differ(tree, os.path.join(args.parser_out, "1grl.tree.txt"))
+    if why:
+        problems.append("1grl.tree.txt: " + why)
     for name in ["1grl.atoms.txt"] + [c + ".grid.txt" for c in sorted(CASES)]:
         with open(os.path.join(out, name), "rb") as f, open(os.path.join(args.out, name), "rb") as g:
             if f.read().replace(b"\r\n", b"\n") != g.read().replace(b"\r\n", b"\n"):

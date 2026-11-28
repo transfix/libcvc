@@ -154,7 +154,8 @@ using DataEncoder = std::function<std::string(const DataEncode &)>;
 // with: bytes (DataBytes or a std::string), volume (a cvc::volume, in any format libcvc writes, by
 // the file's extension; or a std::vector<cvc::volume> as one file's variables, in a format that
 // holds several, such as .rawv), point_classes (cvc::point_classes as .vgr), volume_grid_session
-// (its JSON) and contours (a cvc::contour_stack in a one-file format: .cvcc, .contour or .pcd).
+// (its JSON), contours (a cvc::contour_stack in a one-file format: .cvcc, .contour or .pcd) and
+// molecule (a cvc::mol::molecule as .pdb, .ent, .pqr or .xyzr, by the file's extension).
 // Each takes the payload as a std::shared_ptr<const T>, a std::shared_ptr<T> or a T.
 // Thread-safe and per app, as the decoders are.
 void register_data_encoder(cvc::app &app, const std::string &as, DataEncoder encoder);

@@ -58,3 +58,21 @@ change. When the check fails, it uploads the goldens it made.
   - The densities match to 1e-5 relative. Most voxels match bit for bit; the rest are the same float
     sums taken in TexMol's order. `--check` uses the same tolerance, so another compiler's rounding
     passes.
+
+## The parser's group tree and torsions
+
+- **What is built:** `parser_legacy` (`parser_driver.cpp`), TexMol's PDBParser alone with the same
+  supporting files, run on 1GRL. It prints the group tree `parsePDBModels` builds, depth first,
+  one line a group (collection, model, chain, structure, residue), each residue with the phi and
+  psi `finalizeParsing` stored, in radians.
+- **Golden:** `src/cvc/tests/data/texmol-goldens/parser/1grl.tree.txt`, with `1grl.tree.json`
+  (the TexMol commit, the platform and the files' SHA-256). `--check` compares every line exactly
+  but the angles, which may differ by 1e-6.
+- **What `molecule_groups_test` checks:**
+  - `cvc::mol::build_group_tree` gives TexMol's tree line for line, and its walk TexMol's atom order
+    (blur's `1grl.atoms.txt`);
+  - `cvc::mol::torsions` gives TexMol's phi and psi to 2e-5 wherever TexMol's neighbours are the
+    residue's real ones: 874 angles. TexMol took a residue's neighbours from its tree, which puts
+    a sheet's strands together, so at 34 angles it measured to another strand; the test checks
+    those are the angles to that neighbour. Where an atom is missing (1GRL's C-alpha-only
+    stretch), TexMol wrote 0 and `torsions` gives NaN (126 angles).

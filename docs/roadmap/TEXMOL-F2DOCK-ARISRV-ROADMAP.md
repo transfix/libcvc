@@ -34,9 +34,18 @@ scheduler in slices with progress for the UI, interactive on one thread (§1 ite
   or structure; bonds by distance) as a resumable stepper; the `molecule` data decoder; cvcGL's
   `molecule` node type over `MoleculeNode`, with impostor spheres (tessellated where their shader
   can't be built), exact atom picks, per-chain visibility, a golden and the arigl-web case. Written
-  for libcvc: nothing from TexMol's renderers, `libmol` or its element table. Still to come in M0
-  part 2: the `mol/molecule_view` component, the group tree, torsions, the writers, CLI, pycvc,
-  intrinsics and the A/B against TexMol's parser.
+  for libcvc: nothing from TexMol's renderers, `libmol` or its element table. The
+  `mol/molecule_view` component and its 4HVP demo follow in transfix/libcvc#1624.
+- **M0 part 2, the rest** (2026-11-28, transfix/libcvc#1626, in review, stacked on #1622):
+  PDBParser's group tree (`inc/cvc/mol/groups.h`: TexMol's rules, and `flatten_atoms` in its
+  `FlattenGOA` order) and the torsions (`torsions.h`: an amino acid's phi, psi and omega; a
+  nucleotide's alpha to zeta, chi, nu0 to nu4, eta and theta), both resumable steppers. A residue's
+  neighbours are the ones bonded to it; TexMol took the tree's next residue, wrong across a gap or
+  a strand moved into its sheet. The PDB, PQR, XYZR and `.pts` writers and the `molecule` data
+  encoder; `mol.*` DSL intrinsics; `cvc mol-info`, `mol-convert`, `mol-view` and `mol-blur`;
+  pycvc's molecules and their jobs. The A/B against TexMol's own PDBParser on 1GRL
+  (`tools/texmol-goldens`, `parser_legacy`): the tree line for line, the walk's atom order, and
+  phi and psi to 2e-5 wherever TexMol's neighbour was the real one (874 angles).
 **Asked for (Joe, 2026-11-09):** port TexMol's legacy libraries; port the F2Dock server to arisrv
 and Ariadne documents, with TexMol talking to it; consider conference mode for this; make arisrv
 general for TexMol and VolumeRover compute tasks; and load scientific visualizations and digital

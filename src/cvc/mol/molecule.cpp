@@ -16,14 +16,17 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cvc/core/app.h>
+#include <cvc/core/param_table.h> // format_double
 #include <cvc/mol/molecule.h>
 #include <filesystem>
 #include <fstream>
 #include <istream>
 #include <limits>
 #include <map>
+#include <ostream>
 #include <set>
 #include <sstream>
 #include <utility>
@@ -213,8 +216,53 @@ bool residue_with_insertion(std::string_view s, int &seq, char &insertion) {
   return to_int(s, seq);
 }
 
+// Write `m` to `filename` with `writer`, saying which file when it can't.
+void write_to(const std::string &filename, const molecule &m,
+              void (*writer)(std::ostream &, const molecule &)) {
+  std::ofstream out(fs::path(filename), std::ios::binary);
+  if (!out)
+    throw molecule_file_error("write_molecule: can't open '" + filename + "' to write");
+  writer(out, m);
+  out.flush();
+  if (!out)
+    throw molecule_file_error("write_molecule: can't write '" + filename + "'");
+}
+
+// A residue's name, looked up in the atoms by chain, number and insertion code ("" when none has
+// it): what a HELIX, SHEET or TURN record names its ends by.
+std::string residue_name_at(const molecule &m, char chain, int seq, char insertion) {
+  for (const atom &a : m.atoms)
+    if (a.chain == chain && a.residue_seq == seq && a.insertion == insertion)
+      return a.residue;
+  return std::string();
+}
+
+// An atom's name in PDB columns 13-16: a four-character name fills them; a shorter one starts in
+// column 14 when its element is one letter (" CA " for a C-alpha), else in column 13 ("FE  ").
+std::string pdb_atom_name(const atom &a) {
+  std::string n = a.name.substr(0, 4);
+  if (n.size() < 4 && a.element.size() <= 1)
+    n = " " + n;
+  n.resize(4, ' ');
+  return n;
+}
+
+// Call f(model) for each model the atoms come from, in the order they first come.
+template <class F> void each_model(const molecule &m, F &&f) {
+  std::vector<int> models;
+  for (const atom &a : m.atoms)
+    if (std::find(models.begin(), models.end(), a.model) == models.end())
+      models.push_back(a.model);
+  for (int model : models)
+    f(model);
+}
+
 class pdb_io : public molecule_file_io {
 public:
+  bool can_write() const override { return true; }
+  void write(app &, const molecule &m, const std::string &filename) const override {
+    write_to(filename, m, write_pdb);
+  }
   const std::string &id() const override { return _id; }
   const std::vector<std::string> &extensions() const override { return _ext; }
   bool can_read() const override { return true; }
@@ -227,11 +275,15 @@ public:
 
 private:
   std::string _id = "pdb : v1";
-  std::vector<std::string> _ext{".pdb", ".ent"};
+  std::vector<std::string> _ext{".pdb", ".ent", ".pdb1"};
 };
 
 class pqr_io : public molecule_file_io {
 public:
+  bool can_write() const override { return true; }
+  void write(app &, const molecule &m, const std::string &filename) const override {
+    write_to(filename, m, write_pqr);
+  }
   const std::string &id() const override { return _id; }
   const std::vector<std::string> &extensions() const override { return _ext; }
   bool can_read() const override { return true; }
@@ -249,6 +301,10 @@ private:
 
 class xyzr_io : public molecule_file_io {
 public:
+  bool can_write() const override { return true; }
+  void write(app &, const molecule &m, const std::string &filename) const override {
+    write_to(filename, m, write_xyzr);
+  }
   const std::string &id() const override { return _id; }
   const std::vector<std::string> &extensions() const override { return _ext; }
   bool can_read() const override { return true; }
@@ -264,6 +320,27 @@ private:
   std::vector<std::string> _ext{".xyzr"};
 };
 
+class pts_io : public molecule_file_io {
+public:
+  bool can_write() const override { return true; }
+  void write(app &, const molecule &m, const std::string &filename) const override {
+    write_to(filename, m, write_pts);
+  }
+  const std::string &id() const override { return _id; }
+  const std::vector<std::string> &extensions() const override { return _ext; }
+  bool can_read() const override { return true; }
+  molecule read(app &, const std::string &filename, const molecule_read_params &) const override {
+    std::ifstream in(fs::path(filename), std::ios::binary);
+    if (!in)
+      throw molecule_file_error("read_molecule: can't open '" + filename + "'");
+    return read_pts(in, filename);
+  }
+
+private:
+  std::string _id = "pts : v1";
+  std::vector<std::string> _ext{".pts"};
+};
+
 // The app's molecule handlers: app.slot<T>() makes one per app, with the built-in formats, the
 // first time it is asked (§1.3: no process-wide table).
 struct molecule_io_slot {
@@ -273,6 +350,7 @@ struct molecule_io_slot {
     handlers.insert(boost::shared_ptr<molecule_file_io>(new pdb_io));
     handlers.insert(boost::shared_ptr<molecule_file_io>(new pqr_io));
     handlers.insert(boost::shared_ptr<molecule_file_io>(new xyzr_io));
+    handlers.insert(boost::shared_ptr<molecule_file_io>(new pts_io));
   }
 };
 
@@ -542,6 +620,48 @@ molecule read_xyzr(std::istream &in, const std::string &name) {
 
 // ---- files ----
 
+molecule read_pts(std::istream &in, const std::string &name) {
+  molecule m;
+  std::string raw;
+  std::size_t n = 0;
+  bool counted = false;
+  while (std::getline(in, raw)) {
+    ++n;
+    const std::string_view line = trim(raw);
+    if (line.empty() || line.front() == '#')
+      continue;
+    std::istringstream ss{std::string(line)};
+    std::vector<std::string> t;
+    for (std::string w; ss >> w;)
+      t.push_back(w);
+    if (!counted) {
+      int count = 0;
+      if (t.size() != 1 || !to_int(t[0], count) || count < 0)
+        throw molecule_file_error(where(name, n) + ": '" + std::string(line) +
+                                  "' is not a count of points");
+      counted = true;
+      m.atoms.reserve(static_cast<std::size_t>(count));
+      continue;
+    }
+    if (t.size() != 4)
+      throw molecule_file_error(where(name, n) + ": " + std::to_string(t.size()) +
+                                " fields, not four (x y z radius)");
+    atom a;
+    a.serial = static_cast<int>(m.atoms.size()) + 1;
+    double *const v[4] = {&a.x, &a.y, &a.z, &a.radius};
+    for (int i = 0; i < 4; ++i)
+      if (!to_double(t[static_cast<std::size_t>(i)], *v[i]))
+        throw molecule_file_error(where(name, n) + ": '" + t[static_cast<std::size_t>(i)] +
+                                  "' is not a number");
+    if (a.radius < 0)
+      throw molecule_file_error(where(name, n) + ": the radius is negative");
+    m.atoms.push_back(std::move(a));
+  }
+  if (in.bad())
+    throw molecule_file_error(name + ": can't read it");
+  return m;
+}
+
 molecule molecule_file_io::read(app &, const std::string &filename,
                                 const molecule_read_params &) const {
   throw molecule_file_error("read_molecule: '" + filename + "': the " + id() +
@@ -591,6 +711,142 @@ molecule read_molecule(app &ctx, const std::string &filename, const molecule_rea
                               "' (this app reads " + join(molecule_read_extensions(ctx), ", ") +
                               ")");
   throw molecule_file_error(errors.size() == 1 ? errors.front() : join(errors, "; "));
+}
+
+void molecule_file_io::write(app &, const molecule &, const std::string &filename) const {
+  throw molecule_file_error("write_molecule: '" + filename + "': the " + id() +
+                            " handler can't write");
+}
+
+std::vector<std::string> molecule_write_extensions(app &ctx) {
+  std::set<std::string> out;
+  for (const auto &h : molecule_handlers(ctx).all())
+    if (h->can_write())
+      for (const std::string &e : h->extensions())
+        out.insert(e);
+  return std::vector<std::string>(out.begin(), out.end());
+}
+
+void write_molecule(app &ctx, const molecule &m, const std::string &filename) {
+  const std::string ext = extension_of(filename);
+  for (const auto &h : molecule_handlers(ctx).for_extension(ext))
+    if (h->can_write()) {
+      h->write(ctx, m, filename);
+      return;
+    }
+  throw molecule_file_error("write_molecule: '" + filename + "': no writer for '" + ext +
+                            "' (this app writes " + join(molecule_write_extensions(ctx), ", ") +
+                            ")");
+}
+
+void write_pdb(std::ostream &out, const molecule &m) {
+  char b[128];
+  if (!m.id.empty()) {
+    std::snprintf(b, sizeof b, "HEADER    %-40s%-9s   %-4.4s", "", "", m.id.c_str());
+    out << b << "\n";
+  }
+  // TITLE: 70 characters on the first line, 68 on each continuation line (numbered from 2),
+  // broken at a blank where there is one.
+  for (std::size_t at = 0, line = 1; at < m.title.size(); ++line) {
+    std::size_t take = std::min<std::size_t>(line == 1 ? 70 : 68, m.title.size() - at);
+    if (at + take < m.title.size()) {
+      const std::size_t sp = m.title.rfind(' ', at + take);
+      if (sp != std::string::npos && sp > at)
+        take = sp - at;
+    }
+    const std::string part = m.title.substr(at, take);
+    if (line == 1)
+      out << "TITLE     " << part << "\n";
+    else
+      out << "TITLE   " << (line < 10 ? " " : "") << line << " " << part << "\n";
+    at += take;
+    while (at < m.title.size() && m.title[at] == ' ')
+      ++at;
+  }
+  int helices = 0, turns = 0;
+  for (const secondary_structure &s : m.structures) {
+    const std::string r0 = residue_name_at(m, s.chain, s.start_seq, s.start_insertion);
+    const std::string r1 = residue_name_at(m, s.chain, s.end_seq, s.end_insertion);
+    switch (s.type) {
+    case secondary_structure::kind::helix:
+      std::snprintf(b, sizeof b, "HELIX  %3d %3.3s %3.3s %c %4d%c %3.3s %c %4d%c%2d", ++helices,
+                    s.id.c_str(), r0.c_str(), s.chain, s.start_seq, s.start_insertion, r1.c_str(),
+                    s.chain, s.end_seq, s.end_insertion, s.helix_class);
+      break;
+    case secondary_structure::kind::sheet: {
+      int strands = 0;
+      for (const secondary_structure &t : m.structures)
+        strands += t.type == secondary_structure::kind::sheet && t.id == s.id ? 1 : 0;
+      std::snprintf(b, sizeof b, "SHEET  %3d %3.3s%2d %3.3s %c%4d%c %3.3s %c%4d%c%2d", s.strand,
+                    s.id.c_str(), strands, r0.c_str(), s.chain, s.start_seq, s.start_insertion,
+                    r1.c_str(), s.chain, s.end_seq, s.end_insertion, s.sense);
+      break;
+    }
+    case secondary_structure::kind::turn:
+      std::snprintf(b, sizeof b, "TURN   %3d %3.3s %3.3s %c%4d%c %3.3s %c%4d%c", ++turns,
+                    s.id.c_str(), r0.c_str(), s.chain, s.start_seq, s.start_insertion, r1.c_str(),
+                    s.chain, s.end_seq, s.end_insertion);
+      break;
+    }
+    out << b << "\n";
+  }
+  each_model(m, [&](int model) {
+    if (model > 0) {
+      std::snprintf(b, sizeof b, "MODEL     %4d", model);
+      out << b << "\n";
+    }
+    for (const atom &a : m.atoms) {
+      if (a.model != model)
+        continue;
+      std::snprintf(b, sizeof b,
+                    "%-6s%5d %4s%c%3.3s %c%4d%c   %8.3f%8.3f%8.3f%6.2f%6.2f          %2.2s",
+                    a.hetero ? "HETATM" : "ATOM", a.serial, pdb_atom_name(a).c_str(), a.alt_loc,
+                    a.residue.c_str(), a.chain, a.residue_seq, a.insertion, a.x, a.y, a.z,
+                    a.occupancy, a.b_factor, a.element.c_str());
+      out << b << "\n";
+    }
+    if (model > 0)
+      out << "ENDMDL\n";
+  });
+  out << "END\n";
+}
+
+void write_pqr(std::ostream &out, const molecule &m) {
+  char b[192];
+  each_model(m, [&](int model) {
+    if (model > 0) {
+      std::snprintf(b, sizeof b, "MODEL     %4d", model);
+      out << b << "\n";
+    }
+    for (const atom &a : m.atoms) {
+      if (a.model != model)
+        continue;
+      const std::string name = a.name.empty() ? "X" : a.name;
+      const std::string residue = a.residue.empty() ? "UNK" : a.residue;
+      std::string seq = std::to_string(a.residue_seq);
+      if (a.insertion != ' ')
+        seq += a.insertion;
+      const std::string chain = a.chain == ' ' ? std::string() : std::string(1, a.chain) + " ";
+      std::snprintf(b, sizeof b, "%-6s%5d %-4s %3s %s%5s    %.3f %.3f %.3f %.4f %.4f",
+                    a.hetero ? "HETATM" : "ATOM", a.serial, name.c_str(), residue.c_str(),
+                    chain.c_str(), seq.c_str(), a.x, a.y, a.z, a.charge, a.radius);
+      out << b << "\n";
+    }
+    if (model > 0)
+      out << "ENDMDL\n";
+  });
+  out << "END\n";
+}
+
+void write_pts(std::ostream &out, const molecule &m) {
+  out << m.atoms.size() << "\n";
+  write_xyzr(out, m);
+}
+
+void write_xyzr(std::ostream &out, const molecule &m) {
+  for (const atom &a : m.atoms)
+    out << param_detail::format_double(a.x) << ' ' << param_detail::format_double(a.y) << ' '
+        << param_detail::format_double(a.z) << ' ' << param_detail::format_double(a.radius) << "\n";
 }
 
 } // namespace mol

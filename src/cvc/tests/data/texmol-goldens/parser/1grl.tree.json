@@ -1,0 +1,9 @@
+{
+  "library": "TexMol PDBParser (group tree, protein torsions)",
+  "texmol": "ed20eae784283a6c1f2730d0d249dc801d0c38f8",
+  "input": "examples/data/molecules/1grl.pdb",
+  "input_sha256": "73e5b13d9a7a5875e855254c7e4098e983bf4cf37d4a48222ec7a1ec0a0ffc0e",
+  "tree_sha256": "b06566f7ab8eb057811a332dc478d60e84e29003e6615638dcb748b74a921a53",
+  "made_by": "tools/texmol-goldens/make_goldens.py",
+  "platform": "Windows AMD64, Windows-10, Python 3.11.13"
+}

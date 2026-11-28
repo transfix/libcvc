@@ -54,3 +54,24 @@ if(MSVC)
 else()
   target_compile_options(blur_legacy PRIVATE -w -ffp-contract=off)
 endif()
+
+# parser_legacy: TexMol's PDBParser alone, its group tree and torsions written out
+# (parser_driver.cpp) for cvc::mol's group tree and torsion parity test.
+add_executable(parser_legacy parser_driver.cpp
+  ${_pdbparser}
+  ${_usefulmath}
+  ${TEXMOL_DIR}/src/Utility/utility.cpp
+  ${TEXMOL_DIR}/src/ByteOrder/ByteSwapping.cpp
+  ${TEXMOL_DIR}/src/ColorManager/Color.cpp
+  ${TEXMOL_DIR}/src/ColorManager/ColorGenerator.cpp
+  ${TEXMOL_DIR}/src/ColorManager/PastelColorGenerator.cpp
+  ${TEXMOL_DIR}/src/SimpleVolumeData/SimpleVolumeData.cpp)
+target_include_directories(parser_legacy PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/shim ${TEXMOL_DIR}/inc)
+if(WIN32)
+  target_compile_definitions(parser_legacy PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX)
+endif()
+if(MSVC)
+  target_compile_options(parser_legacy PRIVATE /w /fp:precise)
+else()
+  target_compile_options(parser_legacy PRIVATE -w -ffp-contract=off)
+endif()

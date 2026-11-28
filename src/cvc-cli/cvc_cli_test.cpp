@@ -2791,6 +2791,102 @@ TEST_F(CvcCliTest, SkeletonOfAPlaneFails) {
 }
 
 // ===========================================================================
+// cvc mol-info, mol-convert, mol-view, mol-blur (the TexMol ports' cvc::mol; ports plan T12)
+// ===========================================================================
+
+// Three alanines, a helix over the first two, in PDB v3.3's columns.
+static void write_tripeptide(const std::string &file) {
+  std::ofstream f(file);
+  f << "HEADER    TEST PEPTIDE                            28-NOV-26   9MOL              \n"
+       "HELIX    1   1 ALA A    1  ALA A    2  1                                   2    \n";
+  const double x0[3] = {0.0, 3.8, 7.6};
+  int serial = 1;
+  char b[96];
+  for (int r = 0; r < 3; ++r) {
+    const double x = x0[r];
+    const struct {
+      const char *name, *el;
+      double dx, dy;
+    } atoms[] = {{" N  ", "N", -1.0, 0.8},
+                 {" CA ", "C", 0.0, 0.0},
+                 {" C  ", "C", 1.2, 0.6},
+                 {" O  ", "O", 1.4, 1.8}};
+    for (const auto &a : atoms) {
+      std::snprintf(b, sizeof b,
+                    "ATOM  %5d %s ALA A%4d    %8.3f%8.3f%8.3f  1.00 10.00          %2s", serial++,
+                    a.name, r + 1, x + a.dx, a.dy, 0.0, a.el);
+      f << b << "\n";
+    }
+  }
+  f << "END\n";
+}
+
+TEST_F(CvcCliTest, MolInfo) {
+  const std::string in = path("pep.pdb");
+  write_tripeptide(in);
+  auto r = cvc("mol-info \"" + in + "\" --tree --torsions");
+  ASSERT_EQ(0, r.exit_code) << r.output;
+  EXPECT_NE(std::string::npos, r.output.find("entry:      9MOL")) << r.output;
+  EXPECT_NE(std::string::npos, r.output.find("atoms:      12 (0 hetero)")) << r.output;
+  EXPECT_NE(std::string::npos, r.output.find("1 helices")) << r.output;
+  EXPECT_NE(std::string::npos, r.output.find("collection 1")) << r.output;
+  EXPECT_NE(std::string::npos, r.output.find("helix 2")) << r.output;
+  EXPECT_NE(std::string::npos, r.output.find("A 1 ALA amino_acid - ")) << r.output; // no phi
+  auto help = cvc("mol-info --help");
+  EXPECT_EQ(0, help.exit_code);
+  EXPECT_NE(std::string::npos, help.output.find("--hydrogens")) << help.output;
+  auto missing = cvc("mol-info \"" + path("none.pdb") + "\"");
+  EXPECT_NE(0, missing.exit_code);
+  EXPECT_NE(std::string::npos, missing.output.find("can't open")) << missing.output;
+}
+
+TEST_F(CvcCliTest, MolConvertReadsBack) {
+  const std::string in = path("pep.pdb");
+  write_tripeptide(in);
+  for (const char *ext : {".xyzr", ".pqr", ".pts", ".pdb"}) {
+    const std::string out = path(std::string("back") + ext);
+    auto r = cvc("mol-convert \"" + in + "\" \"" + out + "\"");
+    ASSERT_EQ(0, r.exit_code) << ext << ": " << r.output;
+    EXPECT_NE(std::string::npos, r.output.find("Wrote 12 atoms")) << r.output;
+    auto info = cvc("mol-info \"" + out + "\"");
+    ASSERT_EQ(0, info.exit_code) << info.output;
+    EXPECT_NE(std::string::npos, info.output.find("atoms:      12")) << ext << ": " << info.output;
+  }
+  auto bad = cvc("mol-convert \"" + in + "\" \"" + path("x.mol2") + "\"");
+  EXPECT_NE(0, bad.exit_code);
+  EXPECT_NE(std::string::npos, bad.output.find("no writer")) << bad.output;
+}
+
+TEST_F(CvcCliTest, MolViewWritesAMesh) {
+  const std::string in = path("pep.pdb");
+  write_tripeptide(in);
+  for (const char *style : {"cartoon", "ball_and_stick", "spacefill"}) {
+    const std::string out = path(std::string("v_") + style + ".rawc");
+    auto r = cvc("mol-view \"" + in + "\" \"" + out + "\" --style " + style + " --sphere-detail 0");
+    ASSERT_EQ(0, r.exit_code) << style << ": " << r.output;
+    EXPECT_NE(std::string::npos, r.output.find("triangles")) << r.output;
+    EXPECT_TRUE(fs::exists(out));
+    EXPECT_GT(fs::file_size(out), 0u);
+  }
+  auto bad = cvc("mol-view \"" + in + "\" \"" + path("v.rawc") + "\" --style ribbons");
+  EXPECT_NE(0, bad.exit_code);
+  EXPECT_NE(std::string::npos, bad.output.find("style")) << bad.output;
+}
+
+TEST_F(CvcCliTest, MolBlurWritesADensity) {
+  const std::string in = path("pep.pdb"), out = path("pep.rawiv");
+  write_tripeptide(in);
+  auto r = cvc("mol-blur \"" + in + "\" \"" + out + "\" --resolution 1 --blobbiness -0.5");
+  ASSERT_EQ(0, r.exit_code) << r.output;
+  EXPECT_NE(std::string::npos, r.output.find("density of 12 atoms")) << r.output;
+  auto info = cvc("info \"" + out + "\"");
+  EXPECT_EQ(0, info.exit_code) << info.output;
+  auto bad = cvc("mol-blur \"" + in + "\" \"" + out + "\" --blobbiness 1");
+  EXPECT_NE(0, bad.exit_code);
+  EXPECT_NE(std::string::npos, bad.output.find("blobbiness")) << bad.output;
+}
+
+// ===========================================================================
 // cvc tile (the VolumeRover ContourTiler port; ports plan T12)
 // ===========================================================================
 

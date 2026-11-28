@@ -31,8 +31,11 @@
 // so two apps never see each other's (VOLROVER plan §1.3). The built-in formats:
 //   .pdb, .ent   Protein Data Bank, by its fixed columns (v3.3, and the older files whose columns
 //                73-80 hold the entry and a line number);
+//   .pdb1        a biological assembly the same way, its copies as MODELs (model 0 reads them all);
 //   .pqr         PDB2PQR's: an ATOM line's fields by whitespace, charge and radius last;
-//   .xyzr        one atom a line: x y z radius.
+//   .xyzr        one atom a line: x y z radius;
+//   .pts         TexMol's points: their count, then x y z radius a line.
+// Each writes the format back too (write_molecule; write_pdb, write_pqr, write_xyzr).
 //
 // Everything here holds no state of its own: no statics, no globals.
 
@@ -180,14 +183,17 @@ struct param_table<mol::molecule_read_params> : param_fields<mol::molecule_read_
 namespace mol {
 #endif // SWIG
 
-// One format's reader, as point_class_file_io is (cvc/volume/point_classes.h).
+// One format's reader and writer, as point_class_file_io is (cvc/volume/point_classes.h).
 struct molecule_file_io {
   virtual ~molecule_file_io() = default;
   virtual const std::string &id() const = 0;
   virtual const std::vector<std::string> &extensions() const = 0;
   virtual bool can_read() const = 0;
+  virtual bool can_write() const { return false; }
   // The molecule in `filename`. Throws molecule_file_error. The default throws "can't read".
   virtual molecule read(app &ctx, const std::string &filename, const molecule_read_params &p) const;
+  // Write `m` to `filename`. Throws molecule_file_error. The default throws "can't write".
+  virtual void write(app &ctx, const molecule &m, const std::string &filename) const;
 };
 
 // The app's molecule formats, the built-in ones registered the first time an app asks. Safe from
@@ -195,6 +201,7 @@ struct molecule_file_io {
 file_handler_registry<molecule_file_io> &molecule_handlers(app &ctx);
 
 std::vector<std::string> molecule_read_extensions(app &ctx);
+std::vector<std::string> molecule_write_extensions(app &ctx);
 
 // Read the molecule in `filename` with the first of the app's handlers for its extension that
 // succeeds. Throws std::invalid_argument when `p` isn't valid, and molecule_file_error when no
@@ -208,6 +215,29 @@ molecule read_pdb(std::istream &in, const molecule_read_params &p = {},
 molecule read_pqr(std::istream &in, const molecule_read_params &p = {},
                   const std::string &name = "<pqr>");
 molecule read_xyzr(std::istream &in, const std::string &name = "<xyzr>");
+// TexMol's .pts: a count, then x y z radius a line. A count that doesn't match the lines is not an
+// error (TexMol only warned); a malformed line is.
+molecule read_pts(std::istream &in, const std::string &name = "<pts>");
+
+// Write `m` to `filename` with the first of the app's handlers for its extension that can write.
+// Throws molecule_file_error when none can, or the file can't be written.
+void write_molecule(app &ctx, const molecule &m, const std::string &filename);
+
+// The writers themselves, on a stream. Each writes what its reader reads back:
+//   write_pdb   HEADER (the id), TITLE, HELIX / SHEET / TURN (their residues' names looked up in
+//               the atoms), then the atoms as ATOM / HETATM in v3.3's columns (coordinates to
+//               0.001 Å, occupancy and B-factor to 0.01, the element in columns 77-78), inside
+//               MODEL / ENDMDL when they come from models, and END. A serial past 99,999 overflows
+//               its columns, as other writers' do;
+//   write_pqr   ATOM / HETATM lines PDB2PQR's way, fields by whitespace: serial, name, residue,
+//               chain (left out for none), residue number (with its insertion code), x y z (to
+//               0.001 Å), charge and radius (to 0.0001), inside MODEL / ENDMDL as above;
+//   write_xyzr  x y z radius a line, each number in its shortest form that reads back exactly;
+//   write_pts   the atoms' count, then the same lines.
+void write_pdb(std::ostream &out, const molecule &m);
+void write_pqr(std::ostream &out, const molecule &m);
+void write_xyzr(std::ostream &out, const molecule &m);
+void write_pts(std::ostream &out, const molecule &m);
 
 } // namespace mol
 } // namespace cvc

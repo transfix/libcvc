@@ -26,6 +26,7 @@
 // processing commands into a single tool with subcommands.
 
 #include <algorithm>
+#include <array>
 #include <boost/filesystem.hpp>
 #include <boost/format.hpp>
 #include <boost/lexical_cast.hpp>
@@ -48,6 +49,11 @@
 #include <cvc/geometry/skeleton_params.h>
 #include <cvc/geometry/tiler.h>
 #include <cvc/geometry/tiler_params.h>
+#include <cvc/mol/blur.h>
+#include <cvc/mol/groups.h>
+#include <cvc/mol/molecule.h>
+#include <cvc/mol/torsions.h>
+#include <cvc/mol/view.h>
 #include <cvc/nav/coef_mlp.h>
 #include <cvc/nav/nav_panels.h>
 #include <cvc/nav/nav_scrub.h>
@@ -929,6 +935,208 @@ static std::vector<std::string> tile_legacy_flags(int argc, char **argv,
   if (!exclude.empty())
     out.push_back("--exclude=" + list(exclude));
   return out;
+}
+
+// ── Molecules (cvc::mol; the TexMol ports) ──────────────────────────────────────────────────────
+
+// A molecule's file, read with the read flags (cvc::molecule_read_params' table).
+static cvc::mol::molecule read_molecule_arg(cvc::app &app, const po::variables_map &vm,
+                                            const char *cmd) {
+  const cvc::param_result<cvc::mol::molecule_read_params> pr =
+      cvc::params_from_options<cvc::mol::molecule_read_params>(vm);
+  if (!pr.ok())
+    throw std::runtime_error(std::string("cvc ") + cmd + ": " + pr.message());
+  return cvc::mol::read_molecule(app, vm["input"].as<std::string>(), pr.value);
+}
+
+static std::string degrees(double radians) {
+  if (std::isnan(radians))
+    return "-";
+  std::ostringstream s;
+  s << std::fixed << std::setprecision(1) << radians * 180.0 / 3.14159265358979323846;
+  return s.str();
+}
+
+static int cmd_mol_info(cvc::app &app, int argc, char **argv) {
+  po::options_description desc(
+      "cvc mol-info - what a molecule file holds (PDB, PQR, XYZR, PTS)\n\n"
+      "Prints the entry, its atoms, models, chains, residues and secondary structures, and its "
+      "bounds. --tree prints TexMol's PDBParser group tree (cvc::mol::build_group_tree); "
+      "--torsions each residue's torsion angles in degrees (cvc::mol::torsions).\n\n"
+      "Example:\n"
+      "  cvc mol-info 1grl.pdb --torsions\n");
+  desc.add_options()("help,h", "show help")("input,i", po::value<std::string>()->required(),
+                                            "input molecule")(
+      "tree", po::bool_switch(), "print the group tree")("torsions", po::bool_switch(),
+                                                         "print each residue's torsion angles");
+  cvc::add_param_options<cvc::mol::molecule_read_params>(desc);
+  po::positional_options_description pos;
+  pos.add("input", 1);
+  po::variables_map vm;
+  po::store(po::command_line_parser(argc, argv).options(desc).positional(pos).run(), vm);
+  if (vm.count("help")) {
+    std::cout << desc << "\n";
+    return 0;
+  }
+  po::notify(vm);
+  const cvc::mol::molecule m = read_molecule_arg(app, vm, "mol-info");
+  std::size_t residues = 0, hetero = 0, helices = 0, sheets = 0, turns = 0;
+  const cvc::mol::atom *last = nullptr;
+  for (const cvc::mol::atom &a : m.atoms) {
+    if (!last || last->model != a.model || last->chain != a.chain ||
+        last->residue_seq != a.residue_seq || last->insertion != a.insertion)
+      ++residues;
+    last = &a;
+    hetero += a.hetero ? 1 : 0;
+  }
+  for (const cvc::mol::secondary_structure &s : m.structures) {
+    helices += s.type == cvc::mol::secondary_structure::kind::helix ? 1 : 0;
+    sheets += s.type == cvc::mol::secondary_structure::kind::sheet ? 1 : 0;
+    turns += s.type == cvc::mol::secondary_structure::kind::turn ? 1 : 0;
+  }
+  std::string chains;
+  for (char c : cvc::mol::chain_ids(m))
+    chains += chains.empty() ? std::string(1, c == ' ' ? '_' : c)
+                             : std::string(" ") + (c == ' ' ? '_' : c);
+  const std::array<double, 6> b = m.bounds();
+  std::cout << "entry:      " << (m.id.empty() ? "-" : m.id) << "\n";
+  if (!m.title.empty())
+    std::cout << "title:      " << m.title << "\n";
+  std::cout << "atoms:      " << m.atoms.size() << " (" << hetero << " hetero)\n"
+            << "models:     " << m.models << "\n"
+            << "chains:     " << chains << "\n"
+            << "residues:   " << residues << "\n"
+            << "structures: " << helices << " helices, " << sheets << " sheet strands, " << turns
+            << " turns\n"
+            << "bounds:     " << b[0] << " " << b[1] << " " << b[2] << " - " << b[3] << " " << b[4]
+            << " " << b[5] << "\n";
+  if (vm["tree"].as<bool>())
+    std::cout << cvc::mol::describe(cvc::mol::build_group_tree(m));
+  if (vm["torsions"].as<bool>()) {
+    std::cout << "chain seq residue kind phi psi omega\n";
+    for (const cvc::mol::residue_torsions &r : cvc::mol::torsions(m)) {
+      const char *kind = r.type == cvc::mol::residue_torsions::kind::amino_acid   ? "amino_acid"
+                         : r.type == cvc::mol::residue_torsions::kind::nucleotide ? "nucleotide"
+                                                                                  : "other";
+      std::cout << (r.chain == ' ' ? '_' : r.chain) << " " << r.residue_seq
+                << (r.insertion == ' ' ? std::string() : std::string(1, r.insertion)) << " "
+                << (r.residue.empty() ? "-" : r.residue) << " " << kind << " ";
+      if (r.type == cvc::mol::residue_torsions::kind::nucleotide)
+        std::cout << "alpha " << degrees(r.alpha) << " beta " << degrees(r.beta) << " gamma "
+                  << degrees(r.gamma) << " delta " << degrees(r.delta) << " epsilon "
+                  << degrees(r.epsilon) << " zeta " << degrees(r.zeta) << " chi " << degrees(r.chi)
+                  << "\n";
+      else
+        std::cout << degrees(r.phi) << " " << degrees(r.psi) << " " << degrees(r.omega) << "\n";
+    }
+  }
+  return 0;
+}
+
+static int cmd_mol_convert(cvc::app &app, int argc, char **argv) {
+  po::options_description desc(
+      "cvc mol-convert - write a molecule in another format (PDB, PQR, XYZR, PTS), by the "
+      "output's extension\n\n"
+      "The read flags choose what is read (a model, hetero atoms, water, hydrogens) and the "
+      "radii a PDB file lacks (from TexMol's residue-atom table).\n\n"
+      "Example:\n"
+      "  cvc mol-convert 1grl.pdb 1grl.xyzr --hydrogens 0\n");
+  desc.add_options()("help,h", "show help")("input,i", po::value<std::string>()->required(),
+                                            "input molecule")(
+      "output,o", po::value<std::string>()->required(), "output molecule");
+  cvc::add_param_options<cvc::mol::molecule_read_params>(desc);
+  po::positional_options_description pos;
+  pos.add("input", 1).add("output", 1);
+  po::variables_map vm;
+  po::store(po::command_line_parser(argc, argv).options(desc).positional(pos).run(), vm);
+  if (vm.count("help")) {
+    std::cout << desc << "\n";
+    return 0;
+  }
+  po::notify(vm);
+  const cvc::mol::molecule m = read_molecule_arg(app, vm, "mol-convert");
+  const std::string out = vm["output"].as<std::string>();
+  cvc::mol::write_molecule(app, m, out);
+  std::cout << "Wrote " << m.atoms.size() << " atoms to " << out << "\n";
+  return 0;
+}
+
+static int cmd_mol_view(cvc::app &app, int argc, char **argv) {
+  po::options_description desc(
+      "cvc mol-view - a molecule's view as a mesh (cvc::mol::build_view): its spheres "
+      "(tessellated), bond cylinders and cartoon, merged into one geometry with per-vertex "
+      "colours\n\n"
+      "The view flags are the molecule node's parameters (cvc::mol::view_params): --style "
+      "ball_and_stick | spacefill | sticks | cartoon, --color-by element | chain | residue | "
+      "b_factor | structure, and the sizes.\n\n"
+      "Example:\n"
+      "  cvc mol-view 1grl.pdb 1grl_cartoon.rawc --style cartoon --color-by structure\n");
+  desc.add_options()("help,h", "show help")("input,i", po::value<std::string>()->required(),
+                                            "input molecule (read whole)")(
+      "output,o", po::value<std::string>()->required(), "output geometry");
+  cvc::add_param_options<cvc::mol::view_params>(desc);
+  po::positional_options_description pos;
+  pos.add("input", 1).add("output", 1);
+  po::variables_map vm;
+  po::store(po::command_line_parser(argc, argv).options(desc).positional(pos).run(), vm);
+  if (vm.count("help")) {
+    std::cout << desc << "\n";
+    return 0;
+  }
+  po::notify(vm);
+  cvc::param_result<cvc::mol::view_params> pr = cvc::params_from_options<cvc::mol::view_params>(vm);
+  if (!pr.ok())
+    throw std::runtime_error("cvc mol-view: " + pr.message());
+  pr.value.sphere_mesh = true; // a file has no impostors
+  const cvc::mol::molecule m = cvc::mol::read_molecule(app, vm["input"].as<std::string>());
+  const cvc::mol::molecule_view v = cvc::mol::build_view(app, m, pr.value);
+  cvc::geometry g(app);
+  for (const cvc::geometry *part : {&v.spheres, &v.sticks, &v.cartoon})
+    if (part->num_points() > 0)
+      g.merge(*part);
+  if (g.num_tris() == 0)
+    throw std::runtime_error("cvc mol-view: the view draws nothing (" +
+                             std::to_string(v.atoms_drawn) + " atoms drawn)");
+  const std::string out = vm["output"].as<std::string>();
+  cvc::write_geometry(app, g, out);
+  std::cout << "Wrote " << g.num_tris() << " triangles (" << v.atoms_drawn << " atoms, "
+            << v.bonds.size() << " bonds, " << v.residues << " residues) to " << out << "\n";
+  return 0;
+}
+
+static int cmd_mol_blur(cvc::app &app, int argc, char **argv) {
+  po::options_description desc(
+      "cvc mol-blur - a molecule's electron density as a volume (cvc::mol::blur, TexMol's "
+      "GOABlur)\n\n"
+      "Each atom adds exp(B (r^2/R^2 - 1)); --blobbiness is B (negative; nearer 0 blurs more), "
+      "--resolution the grid's spacing in Å.\n\n"
+      "Example:\n"
+      "  cvc mol-blur 1grl.pdb 1grl.rawiv --resolution 2 --blobbiness -0.5\n");
+  desc.add_options()("help,h", "show help")("input,i", po::value<std::string>()->required(),
+                                            "input molecule")(
+      "output,o", po::value<std::string>()->required(), "output volume");
+  cvc::add_param_options<cvc::mol::molecule_read_params>(desc);
+  cvc::add_param_options<cvc::mol::blur_params>(desc);
+  po::positional_options_description pos;
+  pos.add("input", 1).add("output", 1);
+  po::variables_map vm;
+  po::store(po::command_line_parser(argc, argv).options(desc).positional(pos).run(), vm);
+  if (vm.count("help")) {
+    std::cout << desc << "\n";
+    return 0;
+  }
+  po::notify(vm);
+  const cvc::param_result<cvc::mol::blur_params> pb =
+      cvc::params_from_options<cvc::mol::blur_params>(vm);
+  if (!pb.ok())
+    throw std::runtime_error("cvc mol-blur: " + pb.message());
+  const cvc::mol::molecule m = read_molecule_arg(app, vm, "mol-blur");
+  cvc::volume v = cvc::mol::blur(app, m, pb.value);
+  const std::string out = vm["output"].as<std::string>();
+  v.write(out);
+  std::cout << "Wrote a " << v.XDim() << "x" << v.YDim() << "x" << v.ZDim() << " density of "
+            << m.atoms.size() << " atoms to " << out << "\n";
+  return 0;
 }
 
 static int cmd_tile(cvc::app &app, int argc, char **argv) {
@@ -3551,6 +3759,12 @@ static const command_entry commands[] = {
   {"layer-mesh",     "Geometry",        "mesh layer between two isosurfaces",             cmd_layer_mesh},
 #endif
   {"tile",           "Geometry",        "surfaces between a contour stack's slices",      cmd_tile},
+
+  // ── Molecules ──
+  {"mol-info",       "Molecules",       "what a molecule file holds (tree, torsions)",    cmd_mol_info},
+  {"mol-convert",    "Molecules",       "write a molecule as PDB, PQR, XYZR or PTS",      cmd_mol_convert},
+  {"mol-view",       "Molecules",       "a molecule as a mesh: spheres, sticks, cartoon", cmd_mol_view},
+  {"mol-blur",       "Molecules",       "a molecule's electron density as a volume",       cmd_mol_blur},
 
   // ── Volume arithmetic ──
   {"add",            "Vol Arithmetic",  "add two volumes element-wise",                   cmd_add},

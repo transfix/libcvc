@@ -309,3 +309,85 @@ def tile_grid_contours_job(contours, params=None, **keywords):
     return _tile_grid_contours_job(contours,
                                    _tile_params(params, keywords, "tile_grid_contours_job"))
 %}
+// The molecule jobs (cvc/mol/; pycvc_mol.i wraps the results and their parameters):
+// pycvc.build_view_job(app, m, style="cartoon"), blur_job(app, m, resolution=2.0),
+// torsions_job(m) and group_tree_job(m). Each copies the molecule; build_view_job and blur_job keep
+// the app alive for as long as the job lives.
+%{
+namespace pycvc {
+// A stepper that holds an app & beside the app it holds: declared first, the app outlives it.
+template <class S> struct app_stepper {
+  std::shared_ptr<cvc::app> app;
+  S s;
+  template <class... A>
+  explicit app_stepper(std::shared_ptr<cvc::app> a, A &&...args)
+      : app(std::move(a)), s(*app, std::forward<A>(args)...) {}
+  bool step(std::size_t budget) { return s.step(budget); }
+  bool done() const { return s.done(); }
+  const char *phase() const { return s.phase(); }
+  double progress() const { return s.progress(); }
+  std::string status() const { return s.status(); }
+  void cancel() { s.cancel(); }
+  auto take() { return s.take(); }
+};
+} // namespace pycvc
+%}
+PYCVC_RESULT_JOB(result_job_molecule_view, cvc::mol::molecule_view)
+PYCVC_RESULT_JOB(result_job_residue_torsions, std::vector<cvc::mol::residue_torsions>)
+PYCVC_RESULT_JOB(result_job_group_tree, cvc::mol::group_tree)
+%exception _build_view_job {
+  try {
+    $action
+  } catch (const std::invalid_argument &e) {
+    SWIG_exception(SWIG_ValueError, e.what());
+  } catch (const std::exception &e) {
+    SWIG_exception(SWIG_RuntimeError, e.what());
+  }
+}
+%exception _blur_job {
+  try {
+    $action
+  } catch (const std::invalid_argument &e) {
+    SWIG_exception(SWIG_ValueError, e.what());
+  } catch (const std::exception &e) {
+    SWIG_exception(SWIG_RuntimeError, e.what());
+  }
+}
+%inline %{
+std::unique_ptr<cvc::result_job<cvc::mol::molecule_view>>
+_build_view_job(std::shared_ptr<cvc::app> app, const cvc::mol::molecule &m,
+                const cvc::mol::view_params &p) {
+  if (!app)
+    throw std::invalid_argument("build_view_job: app is None");
+  return cvc::make_result_job(std::make_unique<pycvc::app_stepper<cvc::mol::build_view_stepper>>(
+      std::move(app), std::make_shared<const cvc::mol::molecule>(m), p));
+}
+std::unique_ptr<cvc::result_job<cvc::volume>> _blur_job(std::shared_ptr<cvc::app> app,
+                                                        const cvc::mol::molecule &m,
+                                                        const cvc::mol::blur_params &p) {
+  if (!app)
+    throw std::invalid_argument("blur_job: app is None");
+  return cvc::make_result_job(
+      std::make_unique<pycvc::app_stepper<cvc::mol::blur_stepper>>(std::move(app), m, p));
+}
+// pycvc.torsions_job(m): cvc::mol::torsions as a resumable job.
+std::unique_ptr<cvc::result_job<std::vector<cvc::mol::residue_torsions>>>
+torsions_job(const cvc::mol::molecule &m) {
+  return cvc::mol::torsions_job(std::make_shared<const cvc::mol::molecule>(m));
+}
+// pycvc.group_tree_job(m): cvc::mol::build_group_tree as a resumable job.
+std::unique_ptr<cvc::result_job<cvc::mol::group_tree>> group_tree_job(const cvc::mol::molecule &m) {
+  return cvc::mol::group_tree_job(std::make_shared<const cvc::mol::molecule>(m));
+}
+%}
+%pythoncode %{
+def build_view_job(app, molecule, params=None, **keywords):
+    """build_view as a resumable job: step(budget), progress(), phase(), cancel(), result()."""
+    return _build_view_job(app, molecule, _params_from(molecule_view_params, params, keywords,
+                                                       "build_view_job"))
+
+
+def blur_job(app, molecule, params=None, **keywords):
+    """blur as a resumable job: step(budget), progress(), phase(), cancel(), result()."""
+    return _blur_job(app, molecule, _params_from(blur_params, params, keywords, "blur_job"))
+%}

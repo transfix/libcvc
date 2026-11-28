@@ -309,10 +309,10 @@ int main() {
   {
     cvc::app other;
     cvc::gl::ariadne::register_cvcgl_extensions(other);
-    cvc::mol::molecule small;
-    small.atoms.push_back(atom_at("C", 0.0, 0.0, 0.0, 1.7, 'Z'));
+    cvc::mol::molecule one;
+    one.atoms.push_back(atom_at("C", 0.0, 0.0, 0.0, 1.7, 'Z'));
     cvc::state::instance(other)("mol.grl").data(
-        boost::any(std::make_shared<const cvc::mol::molecule>(small)));
+        boost::any(std::make_shared<const cvc::mol::molecule>(one)));
     Lab a(app, "m3", "{ source: { state: /mol.grl }, style: cartoon }");
     Lab b(other, "m3", "{ source: { state: /mol.grl }, style: spacefill }");
     for (int i = 0; i < 2000 && (a.settling() || b.settling()); ++i) {

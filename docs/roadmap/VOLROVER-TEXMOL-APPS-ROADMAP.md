@@ -351,7 +351,7 @@ The TexMol plan's §8 stands; this table is its status on 2026-11-27.
 | Phase | Status | What is left |
 |---|---|---|
 | T0 decisions | Open | The library list, TexMol#7's relicensing, UT's rulings on `libmol` and `ElementInformation.h` (cyconv's D13) |
-| M0 molecules | Part 1 built (#1427). Part 2 (M0b) started: the molecular scene nodes in review (#1622) | **Part 2:** the group tree, torsions, the writers, CLI, pycvc, intrinsics, the A/B against TexMol's parser, and **the molecular scene nodes** (ball-and-stick, impostor spheres, secondary-structure ribbons; cyconv's SDK-15), then the `mol/molecule_view` component. Molecular surfaces are T1 part 2's geometry, drawn as any mesh. arimol's view needs these first (§6) |
+| M0 molecules | Part 1 built (#1427). Part 2 (M0b) in review: the molecular scene nodes (#1622), the `mol/molecule_view` component (#1624), and the group tree, torsions, writers, CLI, pycvc, intrinsics and the A/B against TexMol's parser (#1626) | **Part 2:** merging #1622, #1624 and #1626. Molecular surfaces are T1 part 2's geometry, drawn as any mesh. arimol's view needs part 2 first (§6) |
 | T1 surfaces | Part 1 built (#1428, the blur density) | **Part 2:** the hydrophobicity and electrostatic densities, colour, the multilevel blur, the molecular surfaces, SAS, skin regions, F2D generation |
 | T2 SES and pockets | Not started | HLevelSet is V4 here, ported once; Pocket on `cvc::sdf` and `cvc::iso` |
 | T3 docking analysis | Not started | InterfaceStats, MolecularCharacteristics, the shared `cvc::mol` filters (needs T0's rulings) |
