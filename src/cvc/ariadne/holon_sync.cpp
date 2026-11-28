@@ -589,9 +589,13 @@ void server_pump(holon &h, cvc::app &app, const std::string &room, double wall_d
     for (const conference::room_participant &p : roster)
       write_pose(app, room, p.pid, h.state(p.pid), h.tick(), pose_heartbeat);
   // And each one's reserve, every step: no snapshot carries it, and write_reserve thins it by its
-  // own rule, not the poses'.
-  for (const conference::room_participant &p : roster)
+  // own rule, not the poses'. And its motion (walker@2), when it changes.
+  for (const conference::room_participant &p : roster) {
     write_reserve(h, app, room, p.pid, 5 * heartbeat);
+    avatar_motion m;
+    if (h.motion(p.pid, m))
+      conference::write_avatar_motion(app, room, p.pid, m);
+  }
 }
 
 namespace {
