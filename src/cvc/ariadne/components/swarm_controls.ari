@@ -1,5 +1,5 @@
 # swarm_controls.ari — a REUSABLE Ariadne component: the controls of a `type: nav_swarm` scene node
-# (docs/ARIADNE.md §5.4, "Swarms"), the window nav_city_swarm.cpp and nav_city_drive.cpp drew by hand
+# (docs/ARIADNE.md §5.4, "Swarms"), the window the C++ nav_city_swarm and nav_city_drive drew by hand
 # (their "Swarm controls" / "Convoy controls"). Every widget binds the swarm's keys (`{swarm}`, the
 # node's keys: root) or the scene clock's, so it drives the swarm with no host code:
 #   - what the next build makes: the agent count, the belief planes, fog (sensing) and the plant.

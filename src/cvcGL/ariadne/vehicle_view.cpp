@@ -123,9 +123,8 @@ void rgb(const std::string &s, float out[3]) {
     out[i] = static_cast<float>(std::clamp(num(part, out[i]), 0.0, 1.0));
 }
 
-// A vehicle model made ready to draw on a chassis (fit_vehicle_geometry), as the nav demos'
-// load_vehicle_template and pycvc_gl's VehicleModel have it, and its first base-colour texture.
-// Read once per file and length.
+// A vehicle model made ready to draw on a chassis (fit_vehicle_geometry, which pycvc_gl's
+// VehicleModel calls too), and its first base-colour texture. Read once per file and length.
 struct fitted_model {
   cvc::geometry geometry;
   cvc::image texture;

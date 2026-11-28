@@ -364,7 +364,7 @@ depends:
     # and CVC_ENABLE_ASSIMP flips OFF, so libcvc still builds (without the model
     # loader). Windows added now that an assimp windows bundle is published
     # (assimp 6.0.5+cvc.2) — this is what lets read_model parse buildings.glb, i.e.
-    # nav_finale / nav_city_swarm --bundle load a real Austin city on Windows.
+    # a city document's or nav_scrub's --bundle load a real Austin city on Windows.
     - name: assimp
       platforms: [linux, macos, freebsd, netbsd, windows, wasm-mt]
     # Jolt Physics, the cvc::physics backend (src/cvc/physics/jolt). Without it
