@@ -609,7 +609,7 @@ DSL from it. **PP1** adds one more generator: a parameter table's widget list as
 generated panel, with its run and stop buttons and its result picker added by hand. That makes the
 windows in §5 and §6 small. The jobs window is `jobs.ari`, planned by the TexMol plan's J1.
 
-**Built** (PP1, transfix/libcvc#PP1PR):
+**Built** (PP1, transfix/libcvc#1620):
 - **The generator.** `cvc::param_panel_ari<P>(spec)` (`inc/cvc/core/param_panel.h`) sits beside
   `params_markdown<P>()`. A table becomes a file with these units:
   - `<stem>_params`: the widgets alone, a group;
@@ -677,7 +677,7 @@ Sizes as in the VolumeRover plan: S is a PR or two, M a few, L a short series.
 | Phase | Size | What lands | Needs |
 |---|---|---|---|
 | CC1 Collections | S–M | §4.2: `volume/`, `mesh/` and `dev/` with forwarders at the old paths, per-collection `INDEX.ari`, the recursive test and globs, the resolver's containment check | — |
-| PP1 Parameter panels | S–M | §7.5's generator, with a test that every port's table yields a panel that loads clean. *Built:* transfix/libcvc#PP1PR, 24 panels in `cvc://components/params/` | — |
+| PP1 Parameter panels | S–M | §7.5's generator, with a test that every port's table yields a panel that loads clean. *Built:* transfix/libcvc#1620, 24 panels in `cvc://components/params/` | — |
 | SDK-7 | L | `tree`, `table`, selection bound to state, in ImGui, FTXUI and tvision | — |
 | SDK-4 + open | M | `file_dialog`, `message_box`, modal windows, §7.4's open verb | — |
 | SDK-3, SDK-5 | M | Toolbar, status bar, shortcuts, icons; `input_float`, editable `combo` | — |
