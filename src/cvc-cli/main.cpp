@@ -76,6 +76,7 @@
 #include <cvc/volume/volume.h>
 #include <cvc/volume/volume_file_info.h>
 #include <cvc/volume/volume_file_io.h>
+#include <cvc/volume/volume_filter.h>
 #include <cvc/volume/volume_ops.h>
 #include <fstream>
 #include <iomanip>
@@ -2219,6 +2220,65 @@ static int cmd_gdtv(cvc::app &app, int argc, char **argv) {
   return 0;
 }
 
+// ── The filter jobs (cvc/volume/volume_filter.h; VOLROVER-TEXMOL-APPS-ROADMAP.md V0) ──
+//
+// The four filters above through cvc::volume_filter_stepper, the resumable form the DSL's
+// volume.filter, pycvc and Ariadne's volume_filters component run: flags and defaults from the
+// parameter table (VolumeRover2's dialogs' defaults), every value in the volume's own voxel type.
+// The legacy commands keep VolUtils' flags and defaults.
+
+static int cmd_filter(cvc::app &app, int argc, char **argv) {
+  po::options_description desc(
+      "cvc filter - VolumeRover2's volume filters (bilateral, contrast, anisotropic, gdtv) as a "
+      "resumable job\n\n"
+      "--filter picks one; each reads only its own flags. The defaults are VolumeRover2's "
+      "dialogs'. "
+      "Each value is written in the input's voxel type, and the result equals the legacy commands' "
+      "(bilateral, contrast, anisotropic, gdtv) voxel for voxel, but bilateral's on a type other "
+      "than float and double, which the legacy writes as bytes.\n\n"
+      "Examples:\n"
+      "  cvc filter ct.rawiv smooth.rawiv --filter anisotropic --anisotropic-iterations 10\n"
+      "  cvc filter ct.rawiv tv.rawiv --filter gdtv --gdtv-exponent 1 --gdtv-iterations 3\n");
+  desc.add_options()("help,h", "show help")("input,i", po::value<std::string>()->required(),
+                                            "input volume file")(
+      "output,o", po::value<std::string>()->required(),
+      "output volume file")("seconds", po::value<double>()->default_value(0.0),
+                            "report progress every this many seconds (0: never)");
+  cvc::add_param_options<cvc::volume_filter_params>(desc);
+  po::positional_options_description pos;
+  pos.add("input", 1).add("output", 1);
+  po::variables_map vm;
+  po::store(po::command_line_parser(argc, argv).options(desc).positional(pos).run(), vm);
+  if (vm.count("help")) {
+    std::cout << desc << "\n";
+    return 0;
+  }
+  po::notify(vm);
+  const cvc::param_result<cvc::volume_filter_params> pr =
+      cvc::params_from_options<cvc::volume_filter_params>(vm);
+  if (!pr.ok())
+    throw std::runtime_error("cvc filter: " + pr.message());
+
+  const std::string output = vm["output"].as<std::string>();
+  auto in = std::make_shared<cvc::volume>(app);
+  in->read(vm["input"].as<std::string>());
+  cvc::volume_filter_stepper stepper(in, pr.value);
+  const double every = vm["seconds"].as<double>();
+  auto last = std::chrono::steady_clock::now();
+  while (!stepper.step(65536)) {
+    if (every > 0 &&
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - last).count() >= every) {
+      std::cerr << "cvc filter: " << stepper.status() << "\n";
+      last = std::chrono::steady_clock::now();
+    }
+  }
+  const std::shared_ptr<const cvc::volume> out = stepper.take();
+  cvc::volume result(*out);
+  result.write(output);
+  std::cout << "Wrote " << output << ": " << stepper.status() << "\n";
+  return 0;
+}
+
 // ── Arbitrary resample-to-dims (volume::resize) ──
 
 static int cmd_resize(cvc::app &app, int argc, char **argv) {
@@ -3574,6 +3634,7 @@ static const command_entry commands[] = {
   {"contrast",       "Filters",         "Zeyun's contrast enhancement",                  cmd_contrast},
   {"anisotropic",    "Filters",         "anisotropic diffusion (edge-preserving)",       cmd_anisotropic},
   {"gdtv",           "Filters",         "Dr. Zhang's GDTV filter",                       cmd_gdtv},
+  {"filter",         "Filters",         "the four filters as a resumable job (VolumeRover2's defaults)", cmd_filter},
 
   // ── Analysis ──
   {"ssim",           "Analysis",        "compute SSIM between two volumes",              cmd_ssim},

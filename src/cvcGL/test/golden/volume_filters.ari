@@ -1,0 +1,81 @@
+# volume_filters.ari — golden: the volume filters demo (examples/ariadne/documents/volume_filters.ari)
+# at a fixed size. The Visible Human CT (examples/data/fem/vh4.rawiv) on three volume_slice planes
+# and in a slice view, and the volume_filters component on it: once the CT is loaded, on_tick runs
+# anisotropic diffusion (8 iterations) as a DSL job (volume.filter-start) and puts its result back
+# as the CT's volume (volume-filters-step), so the planes and the view show the diffused CT. The
+# document keeps golden.wait at 1 until then, so the harness steps on until it is shown.
+
+meta:
+  name: golden volume filters
+  min_libcvc: 4.0.0
+
+import:
+  - cvc://components/volume/volume_filters.ari
+
+data:
+  ct: ../../../../examples/data/fem/vh4.rawiv
+
+init: |
+  (state-set "golden.wait" "1")
+  (state-set "volume_filters.filter" "anisotropic")
+  (state-set "volume_filters.anisotropic.iterations" "8")
+  (state-set "volume_filters.apply" "1")
+
+# The camera once; the job once the CT is loaded; its result put back once it is done; and
+# golden.wait cleared once a result has been put back.
+on_tick: |
+  (if (!= (state-get "vf_golden.opened") "1")
+      (begin (state-set "viewers.main.camera.frame" "-40 -40 -40 168 168 168")
+             (state-set "vf_golden.opened" "1")))
+  (if (and (!= (state-get "vf_golden.started") "1") (= (state-get "data.ct.status") "ready"))
+      (begin (volume-filters-run "volume_filters" "ct")
+             (state-set "vf_golden.started" "1")))
+  (volume-filters-step "volume_filters" "ct")
+  (if (and (= (state-get "vf_golden.started") "1")
+           (!= (or (state-get "volume_filters.job.applied") "") ""))
+      (state-set "golden.wait" "0"))
+
+windows:
+  - include: volume_filters
+    args: { data: ct, title: Filters }
+    pos: [16, 16]
+  - window: Slice
+    id: slice
+    pos: [16, 330]
+    children:
+      - type: viewport
+        view: slice
+        mode: slice
+        axis: z
+        chrome: false
+        clear_color: [0.04, 0.045, 0.06]
+        width: 300
+        height: 300
+
+scene:
+  chrome: false
+  background: { top: [0.10, 0.12, 0.16], bottom: [0.02, 0.02, 0.03] }
+  nodes:
+    - node: slice_z
+      type: volume_slice
+      source: { data: ct }
+      axis: z
+      index: 70
+      transfer_function: &ct_tf
+        domain: [0, 160]
+        color: [[0, 0, 0, 0], [0.4, 0.45, 0.42, 0.4], [1, 1, 0.98, 0.94]]
+    - node: slice_y
+      type: volume_slice
+      source: { data: ct }
+      axis: y
+      index: 64
+      transfer_function: *ct_tf
+    - node: slice_x
+      type: volume_slice
+      source: { data: ct }
+      axis: x
+      index: 64
+      transfer_function: *ct_tf
+  lights:
+    - rig: three_point
+      key: { intensity: 1.6, azimuth: -38, elevation: 52 }

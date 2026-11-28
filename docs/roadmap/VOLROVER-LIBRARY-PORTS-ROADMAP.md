@@ -594,7 +594,7 @@ from a document carries the document's owner tag, so closing the document stops 
 | `(tiler.tile stack [params])` | Tiles a `contour_stack`. Returns a dict of `surfaces` (component name to geometry) and `warnings` |
 | `(segment.seeded vol classes [params])` | §5's segmentation. Returns a dict of `labels`, `classes` and `border` |
 | `(segment.critical-points vol [params])` | The paper's seeds as a two-class `point_classes` |
-| `(volume.filter vol [params])` | VolumeRover's bilateral filter on a volume, a new volume (cvc/volume/volume_filter_intrinsics.h; docs/roadmap/DATA_FROM_STATE_TREE.md). `(data-put NAME "volume" result)` puts it back where the scene's nodes follow it |
+| `(volume.filter vol [params])` | VolumeRover2's filters on a volume (bilateral, contrast enhancement, anisotropic diffusion, GDTV: the `filter` parameter), a new volume (cvc/volume/volume_filter_intrinsics.h; docs/roadmap/DATA_FROM_STATE_TREE.md; VOLROVER-TEXMOL-APPS-ROADMAP.md V0). `(data-put NAME "volume" result)` puts it back where the scene's nodes follow it |
 | `(contours.info stack)` | A `contour_stack`'s slices, counts and components. No intrinsic reads or writes files: the DSL deals with data on the state tree, and files are the rest of libcvc's (Joe, 2026-11-12) |
 | `(point-classes.add pc class i j k)`, `(point-classes.points pc class)`, `(point-classes.info pc)` | Point-class edits and queries on the state tree (no file reads or writes, as for contours). These are small, so they are plain synchronous natives |
 | `(params.defaults name)`, `(params.check name dict)` | Defaults and validation from a parameter table, synchronous |

@@ -51,8 +51,8 @@ as ariadne applications and component collections".
   Everything else in that plan's §8 is not started.
 
 **What is left of VolumeRover** (§2). Every menu item of VolumeRover2 was checked against libcvc.
-- The four volume filters and LBIE's meshing and quality improvement are already in libcvc. Three
-  of the filters still lack the job form that an Ariadne window drives (V0).
+- The four volume filters and LBIE's meshing and quality improvement are already in libcvc. V0
+  gave the three that lacked it the job form an Ariadne window drives, and the window.
 - Not in libcvc, with a port planned (V1–V9): Tight Cocone as a feature, surface curation,
   super-secondary structures, the HLS surface, MMHLS, the level-set segmentations, the virus-map
   segmentations, SecStruct's density-based secondary structure, and SweetMesh's hex meshes. SDF2D
@@ -168,8 +168,8 @@ SecondaryStructures.
 **Already in libcvc,** so not in the table:
 - the four filters: anisotropic diffusion, bilateral, contrast enhancement and GDTV
   (`cvc/volume/voxels.h`, `src/cvc/processing/`, the CLI's `bilateral`, `contrast`, `anisotropic`
-  and `gdtv`). Only bilateral has the job form (`volume_filter_kind`, `volume_filter.h:52`), and
-  its header says the other three "come later";
+  and `gdtv`). Only bilateral had the job form (`volume_filter_kind`, `volume_filter.h:52`), and
+  its header said the other three "come later". V0 gave them theirs;
 - LBIE's quality improvement (`cvc::geometry::quality_improve`, the stepper in `Octree`), which the
   legacy dialog calls with `GEO_FLOW` only;
 - VolMagick, LBIE, FastContouring, libcontour, the contour tree, SDF, libiso, volren, the
@@ -199,11 +199,29 @@ SecondaryStructures.
 Each one follows the VolumeRover plan's §1 and ends with its component (§1 rule 1). The numbering
 continues from that plan's P11.
 
-- **V0 Filter jobs (S).** Contrast enhancement, anisotropic diffusion and GDTV become
-  `volume_filter_kind` values with their steppers and parameter tables, as bilateral did. A
+- **V0 Filter jobs (S). Built.** Contrast enhancement, anisotropic diffusion and GDTV are
+  `volume_filter_kind` values with their steppers and parameter tables, as bilateral is. A
   `volume/volume_filters.ari` component drives all four. VolumeRover2's defaults (anisotropic 20
-  iterations; bilateral 200, 1.5, 2; contrast 0.95; GDTV exponent 2, λ 1e-4, one iteration) are the
-  parameter tables' defaults.
+  iterations; bilateral 200, 1.5, 2; contrast 0.95; GDTV exponent 1, λ 1e-4, one iteration, six
+  neighbours) are the parameter tables' defaults. What landed:
+  - the three filters are fields of the one `volume_filter_params` table (`contrast.resistor`,
+    `anisotropic.iterations`, `gdtv.exponent`, `gdtv.lambda`, `gdtv.iterations`,
+    `gdtv.neighbours`), so `volume.filter`, `cvc filter`, `pycvc.filter_volume` and
+    `pycvc.volume_filter_job` take them as they take bilateral's;
+  - each stepper is VolMagick's one-shot cut into rows. `volume_filter_test` checks each against
+    the one-shot byte for byte, on float, byte, unsigned short and double volumes and on volumes
+    one voxel thin, at step budgets 1, 64, random and 0. Both sides are built without FMA
+    contraction;
+  - the GDTV exponent is the dialog's: it calls `gdtvFilter(2 - exponent, λ, iterations,
+    neighbourhood - 1)`, and its field defaults to 1.0 (`GDTVFilterDialog.cpp:52`). This plan's
+    first draft said 2, which is q = 0;
+  - `volume_filters.ari` views `data.<data>.volume`, runs `volume.filter-start`, and puts the result
+    back with `data-put` (its Apply, or `volume-filters-step` from `on_tick`). Its demo is
+    `examples/ariadne/documents/volume_filters.ari` on the Visible Human CT, with a golden
+    (`src/cvcGL/test/golden/volume_filters.ari`) and an arigl-web case. The golden harness waits on
+    a document's `golden.wait` key, for DSL jobs no node knows of;
+  - the panel is written by hand; it moves to PP1's generated `volume_filter_*_params` units
+    once PP1 lands.
 - **V1 Tight Cocone (S–M).** The core is in libcvc; what is missing:
   - a public `cvc::tight_cocone` with a parameter table (robust, big-ball ratio, the two angles,
     cocone φ, flat φ, flatness). The skeleton's defaults already match (`cvc/geometry/skeleton.h:69-79`);
@@ -395,7 +413,7 @@ serves them later; moving them is not part of this plan.
 | View › Select Current Volume | The data browser's current volume | Needs SDK-7 |
 | View › Show Volume Grid Rover | `volume/volume_grid` with its Probe, Segmentation and Contours tabs | Built (P8–P10) |
 | View › background colours, geometry view options, wire cube, clip to bounding box | `viewer_settings` (grid, axis, scene bounds), `mesh_tools` | Grid, axis and bounds built; the background colour, wire cube and clipping to the box are small additions |
-| Tools › the four filters | `volume/volume_filters` | V0 |
+| Tools › the four filters | `volume/volume_filters` | Built (V0) |
 | Tools › Segment Virus Map | `volume/virus_segmentation` | V7 |
 | Tools › Secondary Structure Elucidation | `mesh/secondary_structures`, both methods | T5's component, then V8 |
 | Tools › Show Histogram | `tf_editor`'s histogram layer | Built |
@@ -568,7 +586,7 @@ Sizes as in the VolumeRover plan: S is a PR or two, M a few, L a short series.
 | SDK-4 + open | M | `file_dialog`, `message_box`, modal windows, §7.4's open verb | — |
 | SDK-3, SDK-5 | M | Toolbar, status bar, shortcuts, icons; `input_float`, editable `combo` | — |
 | DT1 Dev tools | M | §7.3's state inspector and exec console in `dev/` | SDK-7, SDK-8, SDK-9 |
-| V0 Filter jobs | S | §2.4 | — |
+| V0 Filter jobs | S | §2.4. Built | — |
 | V1 Tight Cocone | S–M | §2.4 | — |
 | V2 Curation | S | §2.4 | V1 |
 | V3 Super-secondary structures | S | §2.4 | V1, §9 item 3 |

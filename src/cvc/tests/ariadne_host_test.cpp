@@ -6,7 +6,9 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <cvc/ariadne/app_runtime.h>
+#include <cvc/ariadne/ariadne.h> // clear_action_intrinsics
 #include <cvc/ariadne/data.h>
 #include <cvc/ariadne/doc_args.h>
 #include <cvc/ariadne/ftxui_backend.h>
@@ -19,12 +21,14 @@
 #include <cvc/state/state.h>
 #include <cvc/state/state_exec/async_call.h>      // async_kernel, async_call
 #include <cvc/state/state_exec/async_scheduler.h> // policy (--exec-policy)
-#include <cvc/state/state_exec/exceptions.h> // dsl_error
-#include <cvc/state/state_exec/intrinsics.h> // resolve_channel_key (S2b.6)
+#include <cvc/state/state_exec/exceptions.h>      // dsl_error
+#include <cvc/state/state_exec/intrinsics.h>      // resolve_channel_key (S2b.6)
 #include <cvc/state/state_exec/types.h>
 #include <cvc/volume/point_classes.h> // data-save's point_classes
 #include <cvc/volume/volume.h>        // data-put's volume
 #include <cvc/volume/volume_file_io.h>
+#include <cvc/volume/volume_filter.h>            // the volume_filters component's job
+#include <cvc/volume/volume_filter_intrinsics.h> // volume.filter for the document's lanes
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
@@ -1033,6 +1037,118 @@ TEST(AriadneHostVerbs, DataPutPutsADataObjectAsADatasetsOutput) {
     EXPECT_NE(how, "") << bad;
   }
   EXPECT_EQ(val(app, node + ".rev"), std::to_string(rev + 1));
+}
+
+// The volume_filters component (components/volume/volume_filters.ari,
+// VOLROVER-TEXMOL-APPS-ROADMAP.md V0) on a document's dataset, with no GL: its Run starts
+// volume.filter-start on the dataset's volume with the window's keys, the job's result lands at
+// <keys>.job.result while the dataset is untouched, and its step puts the result back as the
+// dataset's volume (data-put), once; a key no widget has seeded is left to the table's default; a
+// stopped job puts nothing back.
+TEST(AriadneHostVerbs, VolumeFiltersComponentRunsAJobAndPutsTheResultBack) {
+  REQUIRE_YAML();
+  const fs::path components = fs::path(__FILE__).parent_path().parent_path() / "ariadne";
+  if (!fs::exists(components / "components" / "volume" / "volume_filters.ari"))
+    GTEST_SKIP() << "component sources not found";
+  const fs::path dir = test_dir("volume_filters");
+  cvc::app app;
+  cvc::volume ct(app, cvc::dimension(12, 10, 8), cvc::UChar);
+  for (int k = 0; k < 8; ++k)
+    for (int j = 0; j < 10; ++j)
+      for (int i = 0; i < 12; ++i)
+        ct(i, j, k, (i < 6 ? 40.0 : 160.0) + ((i * 7 + j * 13 + k * 5) % 17));
+  cvc::writeVolumeFile(app, ct, (dir / "ct.rawiv").string());
+  const fs::path doc =
+      write(dir, "f.ari",
+            "meta: {min_libcvc: 4.0.0}\n"
+            "import: cvc://components/volume/volume_filters.ari\n"
+            "data:\n  ct: ct.rawiv\n"
+            "windows:\n  - include: volume_filters\n    args: { data: ct, keys: vf }\n");
+  cvc::install_volume_filter_intrinsics(app);
+  struct guard {
+    cvc::app &app;
+    ~guard() { cvc::ariadne::clear_action_intrinsics(app); }
+  } g{app};
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.vf");
+  art.set_backend(be);
+  art.add_component_path(components.string());
+  const std::vector<std::string> warnings = art.load(doc.string());
+  for (const std::string &w : warnings)
+    ADD_FAILURE() << w;
+  const std::shared_ptr<cvc::ariadne::DataStore> store = cvc::ariadne::DataStore::of(app);
+  ASSERT_TRUE(store->wait("ui.docs.vf.data.ct", 30.0))
+      << cvc::ariadne::data_status(app, "ui.docs.vf.data.ct");
+  const std::string node = store->resolve("ui.docs.vf.data.ct");
+  ASSERT_FALSE(node.empty());
+  const int rev = std::stoi(val(app, node + ".rev"));
+  const boost::any before = cvc::state::instance(app)(node + ".volume").data();
+  const auto *loaded = boost::any_cast<std::shared_ptr<const cvc::volume>>(&before);
+  ASSERT_NE(loaded, nullptr);
+  const std::shared_ptr<const cvc::volume> original = *loaded;
+
+  // GDTV over 26 neighbours, 2 passes; gdtv.exponent and gdtv.lambda are left unseeded.
+  cvc::state &keys = cvc::state::instance(app)("ui.docs.vf.vf");
+  keys("filter").value(std::string("gdtv"));
+  keys("gdtv.iterations").value(std::string("2"));
+  keys("gdtv.neighbours").value(std::string("twenty_six"));
+  keys("apply").value(std::string("1"));
+  cvc::volume_filter_params p;
+  p.filter = cvc::volume_filter_kind::gdtv;
+  p.gdtv_iterations = 2;
+  p.gdtv_neighbours = cvc::volume_gdtv_neighbours::twenty_six;
+  const cvc::volume want = cvc::filter_volume(*original, p);
+
+  std::string how = "running";
+  art.run_program(R"((state-set "ran" (volume-filters-run "vf" "ct")))",
+                  [&](const std::string &h) { how = h; });
+  ASSERT_TRUE(drain_until(art, [&] { return how != "running"; }));
+  ASSERT_EQ(how, "");
+  EXPECT_FALSE(val(app, "ui.docs.vf.ran").empty()) << "Run returns the job's pid";
+  ASSERT_TRUE(drain_until(art, [&] {
+    return val(app, "ui.docs.vf.vf.job.busy") == "0" &&
+           !cvc::state::instance(app)("ui.docs.vf.vf.job.result").data().empty();
+  })) << val(app, "ui.docs.vf.vf.job.status");
+  EXPECT_EQ(val(app, node + ".rev"), std::to_string(rev)) << "the dataset is untouched until Apply";
+
+  how = "running";
+  art.run_program(R"((state-set "stepped" (if (volume-filters-step "vf" "ct") "1" "0")))",
+                  [&](const std::string &h) { how = h; });
+  ASSERT_TRUE(drain_until(art, [&] { return how != "running"; }));
+  ASSERT_EQ(how, "");
+  EXPECT_EQ(val(app, "ui.docs.vf.stepped"), "1");
+  EXPECT_EQ(val(app, node + ".rev"), std::to_string(rev + 1));
+  const boost::any after = cvc::state::instance(app)(node + ".volume").data();
+  const auto *put = boost::any_cast<std::shared_ptr<const cvc::volume>>(&after);
+  ASSERT_NE(put, nullptr);
+  ASSERT_NE(put->get(), original.get());
+  EXPECT_EQ((*put)->voxelType(), want.voxelType());
+  EXPECT_EQ(0, std::memcmp((*put)->data_ptr(), want.data_ptr(),
+                           want.XDim() * want.YDim() * want.ZDim() * want.voxelSize()))
+      << "the dataset now holds the GDTV-filtered volume";
+  // Once: a second step puts nothing more.
+  how = "running";
+  art.run_program(R"((state-set "again" (if (volume-filters-step "vf" "ct") "1" "0")))",
+                  [&](const std::string &h) { how = h; });
+  ASSERT_TRUE(drain_until(art, [&] { return how != "running"; }));
+  EXPECT_EQ(val(app, "ui.docs.vf.again"), "0");
+  EXPECT_EQ(val(app, node + ".rev"), std::to_string(rev + 1));
+
+  // A long diffusion stopped part-way: no result, and the step puts nothing back.
+  keys("filter").value(std::string("anisotropic"));
+  keys("anisotropic.iterations").value(std::string("1000"));
+  how = "running";
+  art.run_program(R"((begin (volume-filters-run "vf" "ct")
+                            (job.cancel (int (state-get "vf.job.pid")))))",
+                  [&](const std::string &h) { how = h; });
+  ASSERT_TRUE(drain_until(art, [&] { return how != "running"; }));
+  ASSERT_EQ(how, "");
+  ASSERT_TRUE(drain_until(art, [&] { return val(app, "ui.docs.vf.vf.job.busy") == "0"; }));
+  EXPECT_EQ(val(app, "ui.docs.vf.vf.job.status"), "cancelled");
+  how = "running";
+  art.run_program(R"((volume-filters-step "vf" "ct"))", [&](const std::string &h) { how = h; });
+  ASSERT_TRUE(drain_until(art, [&] { return how != "running"; }));
+  EXPECT_EQ(val(app, node + ".rev"), std::to_string(rev + 1)) << "a stopped job puts nothing";
 }
 
 // ── (quit [code]), run_program and tests: (ari test) ───────────────────────────────────────────

@@ -137,6 +137,33 @@ std::unique_ptr<cvc::result_job<cvc::volume>> resize_job(const cvc::volume &src,
   return cvc::resize_job(src, cvc::dimension(nx, ny, nz));
 }
 %}
+// The volume filters as a job (cvc/volume/volume_filter.h; pycvc_volume_filter.i wraps the
+// parameters): pycvc.volume_filter_job(vol, filter="gdtv", gdtv_iterations=3) or
+// (vol, pycvc.volume_filter_params(...)). Its result is a cvc::volume Python owns (the C++ job's is
+// a shared pointer to a const volume, which nodes share).
+%exception _volume_filter_job {
+  try {
+    $action
+  } catch (const std::invalid_argument &e) {
+    SWIG_exception(SWIG_ValueError, e.what());
+  } catch (const std::exception &e) {
+    SWIG_exception(SWIG_RuntimeError, e.what());
+  }
+}
+%inline %{
+std::unique_ptr<cvc::result_job<cvc::volume>> _volume_filter_job(const cvc::volume &vol,
+                                                                 const cvc::volume_filter_params &p) {
+  return cvc::make_result_job<cvc::volume>(
+      std::make_unique<cvc::volume_filter_stepper>(std::make_shared<const cvc::volume>(vol), p),
+      [](cvc::volume_filter_stepper &s) { return cvc::volume(*s.take()); });
+}
+%}
+%pythoncode %{
+def volume_filter_job(vol, params=None, **keywords):
+    """filter_volume as a resumable job: step(budget), progress(), phase(), cancel(), result()."""
+    return _volume_filter_job(vol, _params_from(volume_filter_params, params, keywords,
+                                                "volume_filter_job"))
+%}
 // The seeded segmentation job (cvc/volume/segmentation.h; pycvc_segmentation.i wraps the result
 // and its parameters): pycvc.segment_seeded_job(vol, seeds, t_low=0.1, ...) or
 // (vol, seeds, pycvc.seeded_segmentation_params(...)).

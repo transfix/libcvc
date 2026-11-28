@@ -340,6 +340,7 @@ if(CVC_BUILD_PYCVC_CORE)
              pycvc_segmentation:test_pycvc_segmentation.py
              pycvc_tiler:test_pycvc_tiler.py
              pycvc_volume_slice:test_pycvc_volume_slice.py
+             pycvc_volume_filter:test_pycvc_volume_filter.py
              pycvc_volume_grid:test_pycvc_volume_grid.py
              pycvc_volume_grid_segment:test_pycvc_volume_grid_segment.py
              pycvc_volume_grid_contours:test_pycvc_volume_grid_contours.py

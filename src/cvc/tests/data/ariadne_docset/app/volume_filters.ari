@@ -1,0 +1,49 @@
+# The browser smoke test's volume filters (src/arigl/web/test/arigl_web_smoke.mjs): the
+# volume_filters component on the bunny's 32^3 signed distance field. Once the dataset is made it
+# runs contrast enhancement, anisotropic diffusion (2 iterations) and GDTV (26 neighbours) in turn,
+# each a sliced task on the page's scheduler (volume.filter-start), each result put back as the
+# dataset's volume by the component's step (data-put) before the next starts. Once the last is
+# back it prints one line the test waits for: the component, the three filters' jobs and data-put
+# in wasm. Its `vf:` lines (step | job status) say where a failing run stopped.
+meta: {min_libcvc: 4.0.0}
+data:
+  bunny:
+    generate: sdf
+    params: { mesh: stanford.bunny, dim: 32, fit: { height: 100, up: y } }
+import:
+  - cvc://components/volume/volume_filters.ari
+init: |
+  (state-set "vf.step" "start")
+  (state-set "volume_filters.apply" "1")
+  (state-set "volume_filters.anisotropic.iterations" "2")
+  (state-set "volume_filters.gdtv.neighbours" "twenty_six")
+on_tick: |
+  (volume-filters-step "volume_filters" "bunny")
+  (set applied (and (= (state-get "volume_filters.job.busy") "0")
+                    (= (state-get "volume_filters.job.pid") (state-get "volume_filters.job.applied"))))
+  (set step (state-get "vf.step"))
+  (if (and (= step "start") (= (state-get "data.bunny.status") "ready"))
+      (begin (state-set "volume_filters.filter" "contrast")
+             (volume-filters-run "volume_filters" "bunny")
+             (state-set "vf.step" "contrast"))
+      (if (and (= step "contrast") applied)
+          (begin (state-set "volume_filters.filter" "anisotropic")
+                 (volume-filters-run "volume_filters" "bunny")
+                 (state-set "vf.step" "anisotropic"))
+          (if (and (= step "anisotropic") applied)
+              (begin (state-set "volume_filters.filter" "gdtv")
+                     (volume-filters-run "volume_filters" "bunny")
+                     (state-set "vf.step" "gdtv"))
+              (if (and (= step "gdtv") applied)
+                  (begin
+                    (print (str-concat "volume_filters: contrast, anisotropic and gdtv applied, rev "
+                                       (state-get "data.bunny.rev") "; "
+                                       (state-get "volume_filters.job.status")))
+                    (state-set "vf.step" "done"))))))
+  (set seen (str-concat (state-get "vf.step") " | " (or (state-get "volume_filters.job.status") "")))
+  (if (!= seen (or (state-get "vf.seen") ""))
+      (begin (print (str-concat "vf: " seen)) (state-set "vf.seen" seen)))
+windows:
+  - include: volume_filters
+    args: { data: bunny, title: Filters }
+    pos: [8, 8]

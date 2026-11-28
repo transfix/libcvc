@@ -7899,6 +7899,84 @@ TEST(AriadneComponents, VolumeSharedDemoLoadsClean) {
   EXPECT_NE(find(r.root, Kind::Window, "Volume grid"), nullptr);
 }
 
+// The volume_filters component (components/volume/volume_filters.ari,
+// VOLROVER-TEXMOL-APPS-ROADMAP.md V0) resolves from its collection's path and loads clean: one
+// window, its args substituted into every key, the four filters' widgets bound under its keys, and
+// its functions with it.
+TEST(AriadneComponents, VolumeFiltersComponentLoadsClean) {
+  SKIP_WITHOUT_YAML();
+  namespace fs = std::filesystem;
+  const fs::path ariadne_dir = fs::path(__FILE__).parent_path().parent_path() / "ariadne";
+  const fs::path file = ariadne_dir / "components" / "volume" / "volume_filters.ari";
+  if (!fs::exists(file))
+    GTEST_SKIP() << "component sources not found at " << file.string();
+  cvc::app app;
+  {
+    ScopedEnv hermetic("CVC_ARIADNE_PATH", nullptr); // the source tree only
+    register_cvc_uri_handler(app, {ariadne_dir.string()});
+  }
+  const UriResult src = resolve(app, "cvc://components/volume/volume_filters.ari");
+  std::error_code ec;
+  ASSERT_TRUE(src.ok) << src.error;
+  EXPECT_TRUE(fs::equivalent(fs::path(src.canonical), file, ec)) << src.canonical;
+  LoadResult r = load_string(app, "meta: { min_libcvc: \"4.0.0\" }\n"
+                                  "import: cvc://components/volume/volume_filters.ari\n"
+                                  "windows:\n  - include: volume_filters\n"
+                                  "    args: { data: ct, keys: work.vf, title: CT filters }\n");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_TRUE(r.schema_issues.empty()) << r.schema_issues.front().text();
+  for (const std::string &w : r.warnings)
+    ADD_FAILURE() << w;
+  const Widget *win = find(r.root, Kind::Window, "CT filters");
+  ASSERT_NE(win, nullptr);
+  std::vector<std::string> binds;
+  const std::function<void(const Widget &)> walk = [&](const Widget &w) {
+    if (!w.bind.empty())
+      binds.push_back(w.bind);
+    for (const Widget &c : w.children)
+      walk(c);
+  };
+  walk(*win);
+  for (const char *key :
+       {"work.vf.filter", "work.vf.radiometric_sigma", "work.vf.spatial_sigma", "work.vf.radius",
+        "work.vf.contrast.resistor", "work.vf.anisotropic.iterations", "work.vf.gdtv.exponent",
+        "work.vf.gdtv.lambda", "work.vf.gdtv.iterations", "work.vf.gdtv.neighbours",
+        "work.vf.apply", "work.vf.job.progress", "work.vf.job.status", "data.ct.status"})
+    EXPECT_NE(std::find(binds.begin(), binds.end(), key), binds.end()) << key;
+  for (const std::string &b : binds)
+    EXPECT_EQ(b.find('{'), std::string::npos) << "an arg left unsubstituted: " << b;
+  for (const char *fn : {"volume-filters-run", "volume-filters-apply", "volume-filters-step",
+                         "volume-filters-params"})
+    EXPECT_TRUE(std::any_of(r.functions.begin(), r.functions.end(),
+                            [&](const FunctionDef &f) { return f.name == fn; }))
+        << fn << " comes with the import";
+}
+
+// The volume filters demo: the CT as a data: entry on three volume_slice planes, the Filters
+// window over it, and a slice view.
+TEST(AriadneComponents, VolumeFiltersDemoLoadsClean) {
+  SKIP_WITHOUT_YAML();
+  namespace fs = std::filesystem;
+  const fs::path doc = fs::path(__FILE__).parent_path().parent_path().parent_path().parent_path() /
+                       "examples" / "ariadne" / "documents" / "volume_filters.ari";
+  if (!fs::exists(doc))
+    GTEST_SKIP() << "demo not found at " << doc.string();
+  cvc::app app;
+  if (!register_source_components(app))
+    GTEST_SKIP() << "component sources not found";
+  LoadResult r = load_file(app, doc.string());
+  ASSERT_TRUE(r.ok) << r.error;
+  for (const std::string &w : r.warnings)
+    EXPECT_NE(w.find("'viewport' has no registered handler"), std::string::npos) << w;
+  ASSERT_EQ(r.scene.nodes.size(), 3u);
+  for (const auto &n : r.scene.nodes) {
+    EXPECT_EQ(n.type, "volume_slice");
+    EXPECT_EQ(n.source_data, "ct");
+  }
+  EXPECT_NE(find(r.root, Kind::Window, "Filters"), nullptr);
+  EXPECT_NE(find(r.root, Kind::Window, "Slice"), nullptr);
+}
+
 // The volume_render demo: one volume_render node on a data: entry, a Renderer combo bound to its
 // renderer key, and the transfer function editor on its model.
 TEST(AriadneComponents, VolumeRenderDemoLoadsClean) {
