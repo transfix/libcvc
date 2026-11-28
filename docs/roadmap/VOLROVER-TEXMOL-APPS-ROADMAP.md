@@ -1,8 +1,8 @@
 # VolumeRover and TexMol as Ariadne Applications — Roadmap (sketch)
 
 **Status:** 2026-11-28. Joe accepted every §9 recommendation, then moved PEDetection from "left
-behind" to a port, V11 (§9). CC1, PP1, V0, V1 and M0b have started, in parallel sessions; nothing
-of them has landed yet.
+behind" to a port, V11 (§9). CC1, PP1, V0, V1 and M0b have started, in parallel sessions. V0 is
+built (§2.4).
 
 **Asked for (Joe, 2026-11-27):** "surely we arent done with the porting. we need whatever is left
 in volrover and texmol that we havent ported, then we need new versions of both volrover and texmol
