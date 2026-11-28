@@ -735,7 +735,29 @@ the first of these places:
    build tree.
 
 All three give the files the page used to pin by SRI hash on jsDelivr. The gallery copies them
-with the page: `build-pages.py` copies what `<page>.page-files` lists.
+with the page: `build-pages.py` copies what `<page>.page-files` lists. The image addon
+(`addon-image.js` 0.8.0, the release for xterm.js 5.5) is looked for on its own, the same three
+ways: in `CVC_XTERM_DIR`, in a prefix's `share/xterm.js/` (cvcpkg's `xterm-js-addon-image`), or
+downloaded, so a prefix with only the other three packages still gives them.
+
+**Pictures in pixels.** The page loads xterm.js's image addon, which draws Sixel and iTerm2
+inline images. `ari` can't ask a page what it draws, so it sends a document's pictures as
+half-blocks unless the page config's flags ask for pixels (ARIADNE.md §4, the FTXUI backend's
+image modes):
+
+```json
+{"flags": ["--graphics", "iterm"]}
+```
+
+`iterm` sends each picture as a JPEG that the terminal scales to its cells, so a zoom keeps it
+in place. `sixel` sends exact pixels cut to the cell size, which the page measures once the
+terminal has its size and passes as `--cell-size` (unless the flags give one). `ari` keeps
+cutting at that size, so after a zoom the pictures keep their pixels and no longer fill their
+cells exactly; `iterm` is the one to use in a page. With pixels on, `ari`
+sends each frame as a synchronized update (`CSI ? 2026 h` … `l`) and the pictures after the
+repaint. xterm.js 5.5 has no synchronized updates, so the page writes each update to the terminal
+in one piece; split at the repaint's NUL, the next frame's repaint covered the pictures before
+the terminal showed them.
 
 **The tvision page.** `ari_tvision.html` is the same page on the tvision desktop. It needs
 cvcpkg's tvision with its browser console (`tvision` cvc.4, wasm column, on the catalog since

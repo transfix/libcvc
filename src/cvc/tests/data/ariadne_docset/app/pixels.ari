@@ -1,0 +1,15 @@
+# The browser smoke test's pictures in pixels (src/arigl/web/test/arigl_web_smoke.mjs, /apps/pix/
+# and /apps/pixsixel/): ari.html, whose page config asks for --graphics iterm or sixel, must draw
+# this picture through xterm.js's image addon. The config preloads checker.png beside the page. A
+# counter changes every tick, so every frame repaints the screen, as an app with a clock does: the
+# repaint covers the picture, and the picture must still show.
+meta: {min_libcvc: 4.0.10}
+init: (state-set "pixels.ticks" 0)
+on_tick: (state-set "pixels.ticks" (+ 1 (int (state-get "pixels.ticks"))))
+root:
+  - text: "pixels: a picture"
+  - text: ticks
+    bind: pixels.ticks
+  - image: checker
+    src: file://checker.png
+    size: [160, 160]

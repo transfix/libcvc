@@ -902,7 +902,9 @@ Three backends ship:
     cell size need not be known. `Auto` picks it, after Kitty and Sixel, when
     `$TERM_PROGRAM` names such a terminal (`gfx::iterm_terminal`: WezTerm, iTerm2, mintty)
     and stdout is a tty, off Windows. A page with xterm.js's image addon asks for it
-    (`--graphics iterm`), as arigl_term's does.
+    (`--graphics iterm`), as arigl_term's does; `ari.html` has the addon, and its page config's
+    flags ask (docs/CVCGL_WASM.md, "Pictures in pixels"). There `--graphics sixel` works too:
+    the page measures the cell size and passes `--cell-size`.
   - **Detection.** `run()` asks the terminal before FTXUI takes it over, because FTXUI's
     input parser has no APC case and a late kitty reply would arrive as typed text: on
     `/dev/tty` in raw mode it sends a kitty query, `CSI 16 t` (the cell size in pixels)
