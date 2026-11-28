@@ -22,14 +22,24 @@
 //
 //   * the city: a city bundle's world (a document's `source: { data }` dataset), rasterized onto
 //     `grid` x `grid` cells over its bounds at the trained metric (0.05 navigator units a metre),
-//     or, with none, the synthetic city the trainer learns on (cvc::nav::city_scene). Either is
-//     walled at its edge.
+//     an arena the document draws up (`arena:`, swarm_arena: an open field, its walls, and the
+//     phantom walls of a stale map of it), or, with neither, the synthetic city the trainer learns
+//     on (cvc::nav::city_scene). Each is walled at its edge.
+//   * the map the agents set out with: the city as it is, or, where the city has a stale map
+//     (swarm_city::prior) and the `phantoms` key is on, that map, with walls the city lacks. They
+//     learn the city as it is by sensing it, so a phantom wall stands in their belief until their
+//     sensors' rays clear it.
 //   * the navigator: cvc::nav::sim_world, its `agents` driven by the published trained CoefMLP
 //     (coef_mlp::default_weights_path; the built-in biased net when none is installed) with the
 //     trainer's vehicle (city_scene's rr, d_hat, dt and vmax), sensing the city into `belief`
 //     planes under `fog` (shared: one plane; grouped: max(2, agents / 64); private: one each),
 //     steering round one another (`separate`, sep_radius and sep_gain in vehicle radii) and
-//     spawned on one edge with their goals on the other (`spawn: opposed`).
+//     spawned on one edge with their goals on the other (`spawn: opposed`), or (`vehicles:`)
+//     each where the document lists it, driving to its own goal.
+//   * `route: belief` (GRL-SNAM's belief route): each agent drives an 8-connected A* route over
+//     its own belief plane, its waypoints its goal in turn, planned again from where it is each
+//     time a belief flip changes some plane's map. A believed wall bends the route from the
+//     start; once sensing clears it, the route goes straight through where it stood.
 //   * `targets` colour-coded rally points: each agent is sent to the target of its goal's
 //     latitude band, each target the scattered goal nearest its band's centre, and each agent
 //     wears its target's colour.
@@ -44,8 +54,11 @@
 // Its keys, under the key root (`<prefix>.swarm` for a node with no `keys:`), seeded from the
 // node's props while unset:
 //   agents belief fog plant seed     what the next build makes (`request: restart`, a
-//                                    sim.restart): agent count, shared|grouped|private, 0|1, the
-//                                    plant's name, the scatter's seed
+//   phantoms range                   sim.restart): agent count (with vehicles: listed, the first
+//                                    that many of them), shared|grouped|private, 0|1, the plant's
+//                                    name, the scatter's seed, whether the agents set out with
+//                                    the city's stale map (1, where it has one) or with the city
+//                                    as it is (0), and the sensor's range (world units)
 //   separate sep_gain                inter-agent avoidance, on (1) or off, and its gain in vehicle
 //                                    radii: live
 //   follow                           the agent the view follows (-1: none): live
@@ -58,7 +71,11 @@
 //   stats.*                          agents planes arrived tick driving policy city ready
 //                                    building status vehicle_length vehicle_radius span
 //                                    wall_height bounds ("min_x min_y min_z max_x max_y max_z",
-//                                    a camera's frame request) center.{x,y,z}
+//                                    a camera's frame request) center.{x,y,z}; time (world
+//                                    seconds since the build), range (the sensor's, world
+//                                    units), ghosts (cells some plane believes blocked that the
+//                                    city is not; on the sense cadence) and ghosts0 (at the
+//                                    build), replans (the times routes were planned since it)
 //   follow_pose.{x,y,z,heading}      the followed agent, each frame
 //
 // One per swarm node, with nothing process-wide: two documents' swarms are two of these.
@@ -66,6 +83,7 @@
 #ifndef __CVC_ARIADNE_SCENE_SWARM_H__
 #define __CVC_ARIADNE_SCENE_SWARM_H__
 
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -83,6 +101,27 @@ class world_geometry;
 namespace ariadne {
 
 struct Value;
+
+// A vehicle a document lists (`vehicles:`): where it starts and where it drives to, in world units,
+// and its colour (unset: the targets' hsv colour for its place in the list).
+struct swarm_vehicle {
+  double start[2] = {0.0, 0.0};
+  double goal[2] = {0.0, 0.0};
+  float color[3] = {0.8f, 0.8f, 0.8f};
+  bool has_color = false;
+  std::string name;
+};
+
+// An arena a document draws up (`arena:`), in place of a city: an open field in world units
+// (metres at the trained metric), walled at its edge. Boxes are x0 y0 x1 y1, each blocking the
+// cells whose centres it covers (at least one row or column of them, however thin it is).
+struct swarm_arena {
+  double min_x = -100.0, min_y = -100.0, max_x = 100.0, max_y = 100.0;
+  std::vector<std::array<double, 4>> walls;    // blocked in the arena and in its map
+  std::vector<std::array<double, 4>> phantoms; // blocked in its map only: a stale map's walls
+  double wall_height = 6.0;                    // the height its walls are drawn at
+  std::string name = "the arena";
+};
 
 // What a swarm is built as: a node's props, or a host's own.
 struct swarm_spec {
@@ -102,16 +141,29 @@ struct swarm_spec {
   // else the built-in biased net; "default": the built-in biased net.
   std::string policy;
   int sense_every = 15; // navigator steps between the fog and discovered-wall repaints
+  int sense_ticks = 4;  // navigator steps between senses (sim_world's sense_every)
   // The status line's words: what the agents are, and what the groups a target makes are (empty:
   // not counted): "800 agents ..." or "60 vehicles · 6 convoys ...".
   std::string noun = "agents";
   std::string groups;
+  // The vehicles, listed: each starts and drives where it says, in place of the spawn's scatter
+  // and the targets (each is its own target, in its own colour). agents defaults to how many.
+  std::vector<swarm_vehicle> vehicles;
+  // An arena, in place of a city (has_arena): the node's `arena:`.
+  swarm_arena arena;
+  bool has_arena = false;
+  std::string route = "none"; // none | belief (this header's top)
+  double range = 60.0;        // the sensor's range, world units (the range key's start)
   // The navigator on a thread of its own where there are threads (natively, a browser built with
   // them); false: on the frame's thread, as a browser without threads steps it. Not a prop.
   bool worker = true;
 
   // A node's props: agents, grid, belief, fog, seed, spawn, targets, reach, separate,
-  // sep_radius, sep_gain, plant, policy, sense_every, noun, groups. Others are left as they are.
+  // sep_radius, sep_gain, plant, policy, sense_every, noun, groups, vehicles (each {start: [x, y],
+  // goal: [x, y], color, name}), arena ({bounds: [x0, y0, x1, y1] or size: [w, h] about the
+  // origin, walls and phantoms: lists of [x0, y0, x1, y1], wall_height, name}), route, range,
+  // sense_ticks.
+  // Others are left as they are.
   static swarm_spec from_props(const Value &props);
 };
 
@@ -124,8 +176,13 @@ struct swarm_city {
   double min_z = 0.0, max_z = 0.0; // its ground's lowest point and its highest (a building's top)
   double scale = 0.05;             // navigator units a world unit
   std::shared_ptr<const cvc::height_field> terrain; // null: flat at 0
-  bool real = false;                                // a city bundle's; false: the synthetic city
+  bool real = false;  // a city bundle's (its data node draws it); false: the swarm draws it
+  bool arena = false; // a document's arena: in metres, so its vehicles are a Humvee long
   std::string name;
+  // The map its agents set out with, [rows*cols] (empty: occ, the city as it is): occ and the walls
+  // a stale map shows that the city lacks, its phantoms (cells blocked here and free in occ).
+  std::vector<std::uint8_t> prior;
+  double wall_h = 0.0; // the height its walls are drawn at; 0: 0.06 of its span
 
   double span() const { return max_x - min_x; }
   // The ground at (x, y), clamped to the bounds; 0 without a terrain or over a hole.
@@ -139,6 +196,10 @@ swarm_city synthetic_swarm_city(int grid);
 // synthetic city's occupancy over its bounds, as the demos did. Empty (rows 0) without bounds.
 swarm_city swarm_city_from_world(const cvc::world::world_geometry &world, int grid,
                                  const std::string &name = std::string());
+// An arena on a grid of square cells, its longer side `grid` of them (the far edges moved to the
+// last cell's centre), walled at its edge, its prior its occupancy and its phantoms when it has
+// any.
+swarm_city arena_swarm_city(const swarm_arena &arena, int grid);
 
 class SceneSwarm {
 public:
@@ -170,6 +231,7 @@ public:
     std::vector<int> mode;      // [n]
     std::vector<std::uint8_t> reached;
     std::vector<double> ground; // [n] z
+    std::vector<float> carrot;  // [2n] world: each agent's live carrot, what it steers at
     long arrived = 0;
   };
   const frame &now() const;
@@ -186,8 +248,11 @@ public:
   // demos drew it at (a real 4.72 m Humvee on a real city, 2 radii on the synthetic one).
   double vehicle_radius() const;
   double vehicle_length() const;
-  // The synthetic city's wall height (0.06 of its span), the height its blocks are drawn at.
+  // The height the city's walls are drawn at: its wall_h, else 0.06 of its span (the synthetic
+  // city's blocks).
   double wall_height() const;
+  // The sensor's range in world units, as this world was built (the range key).
+  double sensor_range() const;
 
   // What the view draws, for this generation.
   const std::vector<float> &colors() const;        // [3n] each agent's target colour
@@ -207,6 +272,20 @@ public:
     std::vector<int> planes;
   };
   const std::vector<sensed_wall> &sensed_walls() const;
+  // What the planes believe, on the same cadence: per cell 0 no plane's map blocks it, 1 some
+  // plane's map blocks it and so does the city (a wall it knows of), 2 some plane's map blocks it
+  // and the city does not (a ghost: a stale map's phantom not yet sensed clear). ghosts() counts
+  // the 2s, and ghosts_at_build() counted them as the world was built.
+  const std::vector<std::uint8_t> &belief() const;
+  int ghosts() const;
+  int ghosts_at_build() const;
+
+  // With route: belief (empty otherwise): each agent's route in world units, x, y pairs from its
+  // first waypoint to its goal, and the waypoint it drives to now (an index into it).
+  // routes_revision() bumps each time they are planned.
+  const std::vector<std::vector<float>> &routes() const;
+  const std::vector<int> &route_cursor() const;
+  std::uint64_t routes_revision() const;
 
   // The agent nearest a world point (-1 with none).
   int nearest_agent(double x, double y) const;

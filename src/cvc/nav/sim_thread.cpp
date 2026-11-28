@@ -132,6 +132,8 @@ std::shared_ptr<const sim_thread::snapshot> sim_thread::make_snapshot() const {
   s->reached.resize(n);
   world_.snapshot(s->pos.data(), s->heading.data(), s->speed.data(), s->mode.data(),
                   s->reached.data());
+  s->carrot.resize(static_cast<std::size_t>(n) * 2);
+  world_.carrots_world(s->carrot.data());
   return s;
 }
 

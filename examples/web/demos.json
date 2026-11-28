@@ -28,10 +28,12 @@
     "terminal_tour_term",
     "nav_fleet_swarm_ari",
     "nav_scrub",
+    "nav_fog_ghost_ari",
     "bunny_shadow",
     "terrain_lab",
     "nav_city_swarm",
-    "nav_city_drive"
+    "nav_city_drive",
+    "nav_fog_ghost"
   ],
   "demos": {
     "arigl": {
@@ -122,6 +124,15 @@
       "card": false,
       "desc": "the old terrain lab address: opens the Ariadne terrain lab (terrain_lab_ari)"
     },
+    "nav_fog_ghost_ari": {
+      "app": "arigl",
+      "doc": "nav_fog_ghost",
+      "title": "fog ghost",
+      "desc": "a vehicle detours a wall its stale map shows, then senses it was never there",
+      "blurb":
+          "The fog-of-war ghost story from GRL-SNAM on a 2-D map: one vehicle crosses an open field with a stale map that shows a wall across its path, a wall the field does not have. Belief is all it has, so its A* route over that belief bends round the wall's end; as it drives, its sensor's rays clear the phantom cell by cell (an amber wall wearing away, amber lights going out on the ground), the route is planned again, and it drives straight through where the wall stood. The ground shows what it knows (never seen, remembered, in view), the blue plan runs to its carrot against the yellow track it has driven, and a caption tells the story at half real time. Switch to the dynamic scenario, an honest map and a second vehicle crossing the path, or to a 3-D view. cvc::nav's reactive drive in an Ariadne document: no Python, no libtorch.",
+      "thumb": "img/nav_fog_ghost_ari.jpg"
+    },
     "lsystem_forest": {
       "desc": "a procedural L-system island with wind, sea and ray-cast cloud volumes",
       "blurb":
@@ -160,6 +171,12 @@
       "blurb":
           "cvc::nav's own trainer runs a short training in the page, saving a checkpoint every few steps; every checkpoint is then deployed on a walled square of city blocks it trained on, on a Jolt Humvee that stops against the buildings and on nav's kinematic bicycle that drives through them (the Plant combo switches), and you scrub through them: checkpoint k drives beside step 0, with the deployed metric against the training step, the loss curve, and the Stats and Ledger of both runs at the play head (the books against U_nav, the plant ledger). No Python, no libtorch, nothing fetched.",
       "thumb": "img/nav_scrub.jpg"
+    },
+    "nav_fog_ghost": {
+      "app": "arigl",
+      "doc": "nav_fog_ghost",
+      "card": false,
+      "desc": "the old fog-ghost address (a retired C++ demo): opens the Ariadne fog ghost (nav_fog_ghost_ari)"
     },
     "volren_bunny": {
       "desc": "the Stanford bunny as a signed-distance volume, CPU-raycast live",

@@ -22,9 +22,14 @@
 //     city: city           # a data: entry's name: the city bundle it crosses (the synthetic city
 //                          # when it has none, or its load fails)
 //     agents: 800          # belief, fog, seed, spawn, targets, reach, separate, sep_radius,
-//     belief: grouped      # sep_gain, plant, policy, grid, sense_every (scene_swarm.h), each a
-//     targets: 16          # key under keys: (swarm) that a panel drives
+//     belief: grouped      # sep_gain, plant, policy, grid, sense_every, sense_ticks
+//     targets: 16          # (scene_swarm.h), each a key under keys: (swarm) that a panel drives
 //     keys: swarm
+//     # arena: { size: [200, 200], walls: [...], phantoms: [[-0.5, -50, 0.5, 50]] }
+//     #                    # in place of city: an open field the document draws up, and the walls
+//     #                    # of a stale map of it (scene_swarm.h); vehicles: [{start, goal, color}]
+//     #                    # lists each vehicle, route: belief drives each on an A* route over its
+//     #                    # belief, range: is its sensor's (world units)
 //     children:
 //       - { node: swarm_agents, type: swarm_layer, layer: agents, look: humvee, lod: true }
 //       - { node: swarm_flags, type: swarm_layer, layer: flags, visible: show.flags }
@@ -38,15 +43,24 @@
 //            vehicles culled. Without lod, white while wall-following and green once there.
 //   flags    a pole and a flag in each vehicle's colour above it
 //   goals    a beacon over each vehicle's goal, sunk once it is there
-//   trails   the last `segments:` (12) moves of each vehicle, every `every:` (3) frames; `width:`
+//   trails   the last `segments:` (12) moves of each vehicle, every `every:` (3) navigator frames
+//            (a move of over three vehicle lengths is a jump, and its trail starts again); `width:`
 //            a number or a state key
-//   path     the followed vehicle's trail, wider and yellow
+//   path     the followed vehicle's trail, wider and yellow (segments: up to 1024: its whole track)
 //   belief   the walls the fleet has sensed, see-through boxes in the colours of the belief planes
 //            that saw them, cycling where several did (`height:`; material: { opacity })
 //   dots     a marker per vehicle over everything, for a map view
 //   targets  a disc per rally point over everything, for a map view
-//   city     the synthetic city's blocks and ground (its fog of war on the ground under fog); on a
-//            real city, nothing
+//   city     the synthetic city's blocks, or an arena's walls, and the ground (its fog of war on
+//            the ground under fog; with belief: true, a light per cell the fleet's map blocks, red
+//            where the city has a wall and amber where it has none); on a real city, nothing
+//   ghosts   the cells the fleet's map blocks that the city does not (a stale map's phantoms) as a
+//            see-through amber wall (`height:`, `color:`; material: { opacity }, 0.45), worn away
+//            cell by cell as the sensors clear it
+//   plan     each vehicle's plan, live: to its carrot (what the drive steers at) and on to its
+//            route's waypoint or its goal, blue (`width:` 5, `color:`, `tubes:`)
+//   route    each vehicle's route ahead (route: belief), cyan (`width:` 4, `color:`, `tubes:`)
+//   sensor   a ring the sensor's range round each vehicle, cyan (`width:` 2, `color:`, `tubes:`)
 //   follow   an empty node at the followed vehicle, heading its way: a track camera's target
 //
 // Each frame (tick_scene) the swarm takes its keys, runs the steps due on the world clock and

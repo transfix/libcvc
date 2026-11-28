@@ -70,6 +70,7 @@ public:
     std::vector<float> speed;          // [n] world m/s
     std::vector<int> mode;             // [n] 0 seek / 1 wall
     std::vector<std::uint8_t> reached; // [n]
+    std::vector<float> carrot;         // [n*2] world: each agent's live carrot (carrots_world)
   };
 
   struct options {
