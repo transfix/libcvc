@@ -4,10 +4,12 @@
 Runtime, its two evaluation lanes, the per-frame contract, document structure,
 `include`/`import`/`load` composition, and state + channel scoping.*
 
-This is the authoring and architecture guide. The normative spec is
-[`docs/roadmap/CVCGL-UI-DSL-ROADMAP.md`](roadmap/CVCGL-UI-DSL-ROADMAP.md); where a
-number here differs from the roadmap, **the code is authoritative** and this guide
-cites `file:line` so you can confirm it. Ariadne builds on `cvc::state` and the
+This is the authoring and architecture guide. The normative specification is
+[`ARIADNE_SPEC.md`](ARIADNE_SPEC.md), with the `.ari` schema (§14) as its structural half;
+where this guide and the spec differ, the spec is right, and where libcvc does not yet do
+what the spec says, the spec's §9 lists it. This guide cites `file:line` so you can confirm
+what it says in the code. [`roadmap/CVCGL-UI-DSL-ROADMAP.md`](roadmap/CVCGL-UI-DSL-ROADMAP.md)
+is the design history. Ariadne builds on `cvc::state` and the
 `state_exec` DSL — read [`STATE_API.md`](STATE_API.md) and
 [`STATE_EXEC_DEVELOPER_GUIDE.md`](STATE_EXEC_DEVELOPER_GUIDE.md) first if those are
 unfamiliar; every binding, computed field, and handler in an `.ari` document is a
@@ -977,6 +979,7 @@ The structure a document may have, every key and the values it takes, is the `.a
 ([`src/cvc/ariadne/schema/ari.v1.schema.json`](../src/cvc/ariadne/schema/ari.v1.schema.json)).
 The loader stays lenient, loading what it understands, but a build with the validator checks
 every document against the schema as it loads and warns about each place that breaks it (§14).
+What each block means, and when it acts, is [`ARIADNE_SPEC.md`](ARIADNE_SPEC.md) §8.
 
 ### 5.1 Top-level keys
 
@@ -1013,7 +1016,9 @@ and the relay read (`python:`, `wasm:`, `server:`, `relay:`, `world:`) are in th
 than `min_libcvc`, the load **fails with no tree** (major.minor.patch compare, ignoring
 `-pre` / `+build` suffixes; `version_at_least`,
 [`loader.cpp`](../src/cvc/ariadne/loader.cpp)). A missing `min_libcvc` only warns. A
-fragment pulled in by `load:` carries its own `meta` and is gated independently.
+document opened in a `mounts:` slot (§6.8) carries its own `meta` and is gated independently
+when it opens. A static `load:` fragment is meant to be gated the same way, but libcvc does
+not gate it yet ([`ARIADNE_SPEC.md`](ARIADNE_SPEC.md) §3, §9).
 
 ```yaml
 meta:
@@ -6609,7 +6614,8 @@ Two parts of a load go down a level of YAML at a time rather than a widget or a 
   is level 1). That is ten times the deepest shipped document's 13. A document, library, fragment
   or `include:` expansion whose YAML goes deeper is not checked. Instead it gets one schema
   issue, at its first value past the limit: `nested more than 128 levels of YAML deep, the most
-  the schema check goes (docs/ARIADNE.md §6.7): this document is not checked`. The load goes on,
+  the schema check goes (docs/ARIADNE.md §6.7): this document is not checked` (for an `include:`
+  expansion, `this widget is not checked`). The load goes on,
   as it does for any schema issue, and `ari validate` fails the document. The deepest check that
   runs takes 320 to 384 KiB.
 
@@ -6820,7 +6826,7 @@ A mounted module is sandboxed to its sub-prefix. Access to the parent's state is
 - scalar `name: target` grants read-write;
 - map `name: {to:, mode: ro|rw}` **fails closed** — only an exact `"rw"` mode is
   writable (`expand_load`, [`loader.cpp`](../src/cvc/ariadne/loader.cpp)); anything else is
-  read-only. A hole whose name starts with `/` is rejected.
+  read-only, a missing mode too. A hole whose name starts with `/` is rejected.
 
 At reconcile, `wire_holes` ([`ariadne.cpp`](../src/cvc/ariadne/ariadne.cpp)) plants a
 transparent link at `resolve_bind(sub_prefix, name)` pointing to
@@ -9638,7 +9644,8 @@ The `.ari` schema is a JSON Schema
 ([`src/cvc/ariadne/schema/ari.v1.schema.json`](../src/cvc/ariadne/schema/ari.v1.schema.json)):
 every top-level block, every built-in widget type and scene node, and the keys and values each
 takes, each described. It is the definition of a document's structure; where this guide and the
-schema disagree, the schema (with the loader beside it) is right. The library carries it
+schema disagree, the schema (with the loader beside it) is right. Its other half, what each block
+means and when it acts, is [`ARIADNE_SPEC.md`](ARIADNE_SPEC.md). The library carries it
 compiled in (`cvc::ariadne::ari_schema_json()`; `ari schema` prints it), and an install puts it
 at `share/libcvc/ariadne/schema/ari.v1.schema.json`, so an editor can check a document as it is
 written. With the YAML language server (VS Code's YAML extension), a modeline does it:
@@ -9675,7 +9682,9 @@ loader reads them, not by their quotes.
 A build with the validator (json-schema-validator over nlohmann-json; `have_jsonschema()`,
 `ari info`'s *json_schema*) checks every document it loads:
 
-- the document itself, before anything else reads it;
+- the document itself, right after the `min_libcvc` gate (§5.2) and before anything else reads
+  it. A document too new for this build is refused unchecked, since it may use keys this
+  build's schema does not know;
 - each library it `import:`s, and each fragment it `load:`s (after the mount's `args:`);
 - each `include:` expansion, as a widget, after its args are substituted and its slots filled.
   A problem there is reported in the unit's own file and line, with the context
@@ -9754,3 +9763,5 @@ A widget type's schema, `w_<type>`, lists its own
 keys and takes the shared ones by the one pattern every type carries
 (`EveryWidgetTakesTheSharedKeys`); a new widget type also needs its link in `short_widget`, in
 the loader's order, and its entry in `typed_widget` (`EveryBuiltinWidgetTypeHasItsSchema`).
+A new top-level block also needs its entry in [`ARIADNE_SPEC.md`](ARIADNE_SPEC.md) §8, saying
+what it means and when it acts (`AriSpec.EveryTopLevelBlockHasItsEntry`).
