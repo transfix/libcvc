@@ -978,7 +978,7 @@ bool fleet_metric_known(const std::string &metric) {
 world_rules default_world_rules() { return world_rules{}; }
 
 bool controller_kernel_known(const std::string &kernel, int version) {
-  return kernel == "walker" && version == 1;
+  return kernel == "walker" && (version == 1 || version == 2);
 }
 
 std::string check_world_rules(const world_rules &r) {
@@ -1001,12 +1001,24 @@ std::string check_world_rules(const world_rules &r) {
       return at + " is defined twice";
     if (!controller_kernel_known(c.kernel, c.version))
       return at + ": this build has no kernel " + c.kernel + "@" + std::to_string(c.version) +
-             " (it runs walker@1)";
+             " (it runs walker@1 and walker@2)";
     for (const auto &[name, v] : c.params) {
       if (!cvc::state::isValidStateName(name))
         return at + ": param '" + name + "' is not a name";
       if (!std::isfinite(v))
         return at + ": param '" + name + "' must be finite";
+    }
+    if (c.kernel == "walker" && c.version == 2) {
+      const avatar_swim w = avatar_swim_of(c.params);
+      for (const double v :
+           {w.walk_speed, w.wade_depth, w.swim_depth, w.wade_slow, w.swim_speed, w.swim_sprint,
+            w.swim_force, w.dive_speed, w.climb_height, w.swim_cost})
+        if (v < 0.0)
+          return at + ": walker@2's knobs must be >= 0";
+      if (w.wade_slow > 1.0)
+        return at + ": walker@2's wade_slow must be at most 1";
+      if (!(w.wade_depth < w.swim_depth))
+        return at + ": walker@2's wade_depth must be below its swim_depth";
     }
   }
 

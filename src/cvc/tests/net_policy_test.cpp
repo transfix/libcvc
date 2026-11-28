@@ -738,6 +738,165 @@ TEST(NetCredentials, AStoreNameLivesInTheConfigDir) {
 #endif
 }
 
+// --- credentials per principal (docs/roadmap/ARIADNE_SHELL.md 4.12) ----------------------------
+
+TEST(NetCredentialPrincipals, ACredentialIsFoundOnlyByItsPrincipal) {
+  CredentialStore store;
+  const Origin tx = origin("https://tx.wtf"), apps = origin("https://apps.example.org");
+  EXPECT_EQ(store.principal(), "local");
+  const std::shared_ptr<CredentialStore> remote =
+      store.for_principal("remote:https://apps.example.org");
+  ASSERT_TRUE(remote);
+  EXPECT_EQ(remote->principal(), "remote:https://apps.example.org");
+  ASSERT_TRUE(store.capture("txwtf", tx, kToken));
+  // A stranger names the reader's credential: nothing, for any origin.
+  EXPECT_FALSE(remote->has("txwtf"));
+  EXPECT_FALSE(remote->token_for("txwtf", tx));
+  EXPECT_TRUE(remote->names().empty());
+  // Its own, of the same name, from its own origin: the reader's is untouched.
+  const std::string mine = "cmVtb3RlLXByaW5jaXBhbHMtdG9rZW4";
+  ASSERT_TRUE(remote->capture("txwtf", apps, mine));
+  EXPECT_EQ(remote->token_for("txwtf", apps), mine);
+  EXPECT_EQ(store.token_for("txwtf", tx), kToken);
+  EXPECT_FALSE(store.token_for("txwtf", apps)) << "the reader's view finds none of the stranger's";
+  // Two views of one principal see the same; its spelling does not matter.
+  const std::shared_ptr<CredentialStore> again =
+      store.for_principal("remote:HTTPS://Apps.Example.org:443/");
+  ASSERT_TRUE(again);
+  EXPECT_TRUE(again->same_view(*remote));
+  EXPECT_FALSE(again->same_view(store));
+  EXPECT_EQ(again->token_for("txwtf", apps), mine);
+  // clear and forget are a principal's own.
+  remote->clear();
+  EXPECT_FALSE(remote->has("txwtf"));
+  EXPECT_EQ(store.token_for("txwtf", tx), kToken);
+  ASSERT_TRUE(remote->capture("txwtf", apps, mine));
+  EXPECT_TRUE(store.forget("txwtf"));
+  EXPECT_TRUE(remote->has("txwtf"));
+  // A store of its own (another file) shares nothing with this one.
+  CredentialStore other;
+  EXPECT_FALSE(other.for_principal("remote:https://apps.example.org")->has("txwtf"));
+}
+
+TEST(NetCredentialPrincipals, BindingsAndRenewersAreAPrincipalsOwn) {
+  CredentialStore store;
+  const Origin tx = origin("https://tx.wtf"), apps = origin("https://apps.example.org");
+  store.bind("txwtf", {tx}); // the launcher's policy binds its own names
+  const std::shared_ptr<CredentialStore> remote =
+      store.for_principal("remote:https://apps.example.org");
+  EXPECT_TRUE(remote->binding("txwtf").empty());
+  std::string why;
+  EXPECT_TRUE(remote->capture("txwtf", apps, kToken, &why)) << why;
+  EXPECT_FALSE(store.capture("txwtf", apps, kToken, &why)) << "the reader's is bound to tx.wtf";
+  struct Renewer : cvc::net::CredentialRenewer {
+    bool expiring() const override { return false; }
+    using cvc::net::CredentialRenewer::renew;
+    std::string renew(const std::string &, const std::function<bool()> &) override { return ""; }
+  };
+  const auto r = std::make_shared<Renewer>();
+  store.set_renewer("txwtf", r);
+  EXPECT_EQ(store.renewer("txwtf"), r);
+  EXPECT_EQ(remote->renewer("txwtf"), nullptr);
+  remote->clear();
+  EXPECT_EQ(store.renewer("txwtf"), r) << "its clear drops its own renewers only";
+}
+
+TEST(NetCredentialPrincipals, PrincipalsAsWritten) {
+  for (const char *p : {"local", "file:/home/joe/apps", "file:C:/Users/Joe Q/apps",
+                        "remote:https://apps.example.org", "remote:http://127.0.0.1:8080"})
+    EXPECT_TRUE(CredentialStore::valid_principal(p)) << p;
+  EXPECT_EQ(CredentialStore::canonical_principal("remote:HTTPS://Apps.Example.org:443/"),
+            "remote:https://apps.example.org");
+  EXPECT_EQ(CredentialStore::canonical_principal("file:/home/joe/apps"), "file:/home/joe/apps");
+  for (const std::string p :
+       {std::string(), std::string("Local"), std::string("nicotina"), std::string("file:"),
+        std::string("remote:"), std::string("remote:https://apps.example.org/orrery"),
+        std::string("remote:ftp://apps.example.org"), std::string("remote:https://joe@x.test"),
+        std::string("file:/a\nb"), "file:/" + std::string(5000, 'a')}) {
+    EXPECT_FALSE(CredentialStore::valid_principal(p)) << p;
+    EXPECT_EQ(CredentialStore().for_principal(p), nullptr) << p;
+  }
+}
+
+TEST(NetCredentialPrincipals, TheFileKeepsEachLinesPrincipal) {
+  TempDir dir;
+  const fs::path file = dir.path / "creds";
+  const Origin tx = origin("https://tx.wtf"), apps = origin("https://apps.example.org"),
+               notes = origin("https://notes.example");
+  const std::string mine = "cmVtb3RlLXByaW5jaXBhbHMtdG9rZW4";
+  const std::string theirs = "ZmlsZS1wcmluY2lwYWxzLXRva2VuLTE";
+  {
+    CredentialStore store(file.string());
+    ASSERT_TRUE(store.capture("txwtf", tx, kToken));
+    ASSERT_TRUE(
+        store.for_principal("remote:https://apps.example.org")->capture("txwtf", apps, mine));
+    ASSERT_TRUE(store.for_principal("file:/home/joe/My Apps")->capture("notes", notes, theirs));
+  }
+  const std::string text = read_file(file);
+  EXPECT_NE(text.find("# cvc credentials v2"), std::string::npos) << text;
+  EXPECT_NE(text.find("\nlocal txwtf https://tx.wtf " + kToken + "\n"), std::string::npos) << text;
+  EXPECT_NE(
+      text.find("\nremote:https://apps.example.org txwtf https://apps.example.org " + mine + "\n"),
+      std::string::npos)
+      << text;
+  EXPECT_NE(text.find("\nfile:/home/joe/My%20Apps notes https://notes.example " + theirs + "\n"),
+            std::string::npos)
+      << "a space in a directory stays inside its word: " << text;
+  CredentialStore again(file.string());
+  std::string why;
+  ASSERT_TRUE(again.load(&why)) << why;
+  EXPECT_EQ(again.token_for("txwtf", tx), kToken);
+  EXPECT_FALSE(again.token_for("txwtf", apps));
+  EXPECT_EQ(again.for_principal("remote:https://apps.example.org")->token_for("txwtf", apps), mine);
+  EXPECT_EQ(again.for_principal("file:/home/joe/My Apps")->token_for("notes", notes), theirs);
+  EXPECT_FALSE(again.has("notes"));
+}
+
+// A file written before principals were kept: its three-word lines are the local principal's, and
+// the next change writes them in the new form.
+TEST(NetCredentialPrincipals, AnOldFilesLinesLoadAsLocal) {
+  TempDir dir;
+  const fs::path file = dir.path / "creds";
+  {
+    std::ofstream out(file, std::ios::binary);
+    out << "# cvc credentials v1: <name> <origin> <token> a line. Owner-only;\n"
+           "# these are secrets. Written by the host; do not edit.\n"
+           "txwtf https://tx.wtf "
+        << kToken << "\n";
+  }
+  fs::permissions(file, fs::perms::owner_read | fs::perms::owner_write);
+  CredentialStore store(file.string());
+  std::string why;
+  ASSERT_TRUE(store.load(&why)) << why;
+  const Origin tx = origin("https://tx.wtf");
+  EXPECT_EQ(store.token_for("txwtf", tx), kToken);
+  EXPECT_FALSE(store.for_principal("remote:https://apps.example.org")->has("txwtf"));
+  ASSERT_TRUE(store.capture("other", tx, "YW5vdGhlci10b2tlbi12YWx1ZQ"));
+  EXPECT_NE(read_file(file).find("\nlocal txwtf https://tx.wtf " + kToken + "\n"),
+            std::string::npos)
+      << read_file(file);
+}
+
+TEST(NetCredentialPrincipals, AMalformedPrincipalIsRefusedWithoutQuotingTheLine) {
+  TempDir dir;
+  const fs::path file = dir.path / "creds";
+  for (const std::string principal :
+       {"nicotina", "remote:https://apps.example.org/orrery", "file:%zz", "file:"}) {
+    {
+      std::ofstream out(file, std::ios::binary | std::ios::trunc);
+      out << "local txwtf https://tx.wtf " << kToken << "\n"
+          << principal << " txwtf https://tx.wtf " << kToken << "\n";
+    }
+    fs::permissions(file, fs::perms::owner_read | fs::perms::owner_write);
+    CredentialStore store(file.string());
+    std::string why;
+    EXPECT_FALSE(store.load(&why)) << principal;
+    EXPECT_NE(why.find("line 2"), std::string::npos) << why;
+    EXPECT_EQ(why.find(kToken), std::string::npos) << why;
+    EXPECT_FALSE(store.has("txwtf")) << "nothing loaded";
+  }
+}
+
 // --- the capture's JSON scan and the blanking --------------------------------------------------
 
 TEST(NetCapture, TakesTheFieldAndLeavesEveryOtherByte) {

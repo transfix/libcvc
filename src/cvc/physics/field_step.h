@@ -87,10 +87,11 @@ struct field_body {
   // solid body, an avatar's mass over its density), and a wading vehicle's chassis (vehicle.h)
   // floods and keeps only wading_desc::displacement.
   double buoyancy = 1.0;
-  // The share of a fluid's damping its cells feel: body_desc::displacement, since the water it
-  // moves aside is what damps it. A flooded chassis keeps the whole (the water inside moves with
-  // it), so mark_vehicle leaves this alone.
-  double damping = 1.0;
+  // The share of a fluid's damping and drag its cells feel: body_desc::displacement, the body
+  // being that share of its cells (the water it moves aside damps it, and its smaller frontal area
+  // takes the drag). A flooded chassis keeps the whole (the water inside moves with it), so
+  // mark_vehicle leaves this alone. A wind's drag is never cut.
+  double water_share = 1.0;
   field_hull hull;      // a fluid pushes on its triangles in place of the cells
   field_load load;      // the last step's
   // Its outline as a wake cuts it (immersion.h): its hull, else its shape, made when a wake first
@@ -167,7 +168,7 @@ public:
   void set_displacement(body_id id, double share) {
     const auto it = _bodies.find(id.value);
     if (it != _bodies.end())
-      it->second.buoyancy = it->second.damping = share;
+      it->second.buoyancy = it->second.water_share = share;
   }
 
   // A vehicle's chassis (body_added first): its centre of mass, no flow drag, and the share of
