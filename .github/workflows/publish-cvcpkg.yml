@@ -342,8 +342,10 @@ jobs:
   # Ends a run whose CUDA lane job never got a runner, instead of leaving it
   # open until GitHub cancels the job at 24 h.
   #
-  # Exits as soon as every CUDA job of this run has a runner (usually within
-  # minutes). If one waits STALE_MINUTES while no job runs on that lane, it
+  # Exits as soon as each CUDA lane's first job of this run (build-cuda,
+  # build-cuda-windows) has a runner, usually within minutes. build-cuda-gl
+  # starts hours later and is not watched (see there). If one waits
+  # STALE_MINUTES while no job runs on that lane, it
   # warns, waits for the rest of the run to finish, then cancels the run, so
   # `gh run rerun --failed` is possible right away. A normal Windows CUDA build
   # takes about 30 min, so 60 min of queueing with nothing running on the lane
@@ -3302,7 +3304,7 @@ jobs:
             --output-dir dist \
             --token "$CVCPKG_TOKEN"
 
-      # ── CUDA family: pycvc-cp311-cuda + pycvc-gl-cp311-cuda ─────────────────────────
+      # ── CUDA family: pycvc-cp311-cuda here, pycvc-gl-cp311-cuda in build-cuda-gl ────
       #
       # Which packages need a -cuda peer is decided by ONE question: does this
       # package's own compiled output change when CVC_USING_CUDA flips?
@@ -3322,8 +3324,10 @@ jobs:
       # These steps mirror the CPU `build` job's Linux family steps; the only
       # deltas are the CUDA stage prefix and the -cuda recipe names. Guarded
       # with !cancelled() so one package failing does not skip the others.
+      # pycvc-gl-cp311-cuda links this release's published cvcgl, which the
+      # `build` job publishes, so it is built in build-cuda-gl, after that job.
 
-      # swig for the pycvc-cp311-cuda / pycvc-gl-cp311-cuda steps below, FROM THE
+      # swig for the pycvc-cp311-cuda step below (and build-cuda-gl's), FROM THE
       # CATALOG — the same `swig` those recipes already declare under host_tools.
       # fetch-cvcpkg installs build+runtime deps only ("host_tools excluded —
       # CI provides cmake/ninja"), which is true of the GitHub-hosted images but
@@ -3338,16 +3342,15 @@ jobs:
         if: ${{ !cancelled() && matrix.config == 'release' }}
         uses: ./.github/actions/install-cvcpkg-swig
 
-      - name: Install CUDA family deps (Python 3.11 + numpy + VTK)
+      - name: Install CUDA family deps (Python 3.11 + numpy)
         if: ${{ !cancelled() && matrix.config == 'release' }}
         shell: bash
         run: |
           set -euo pipefail
           PY="$GITHUB_WORKSPACE/py"
-          # Same set as the CPU family step. The PUBLISHED cvcgl that
-          # pycvc-gl-cp311-cuda links comes later, from "Install this release's
-          # cvcgl", which waits for the build job to publish it.
-          cvcpkg install python311 numpy-cp311 vtk vtk-python-cp311 xorgproto \
+          # The core bindings need no VTK (bindings/pycvc finds it only for
+          # pycvc.gl); build-cuda-gl installs VTK and cvcgl for pycvc-gl-cp311-cuda.
+          cvcpkg install python311 numpy-cp311 \
             --prefix "$PY" --config release --link shared
           # numpy's bundled openblas is not self-resolved by RPATH, so a bare
           # `import numpy` (which find_package(Python3 ... NumPy) performs)
@@ -3355,10 +3358,7 @@ jobs:
           #
           # This reaches every later step (GITHUB_ENV), so each cvcpkg call below
           # drops it (env -u LD_LIBRARY_PATH): cvcpkg is a frozen binary with its
-          # own libraries, and once cvcgl's closure is in $PY/lib it loads those
-          # instead and segfaults on exit. v4.0.3's cvcgl install did, 40 times out
-          # of 40, each after "done", and the wait below read it as "not on the
-          # catalog yet" for 120 min.
+          # own libraries, and loads $PY/lib's instead (see build-cuda-gl).
           export LD_LIBRARY_PATH="$PY/lib/python3.11/site-packages/numpy.libs:$PY/lib:${LD_LIBRARY_PATH:-}"
           NPY_INC="$("$PY/bin/python3.11" -c 'import numpy; print(numpy.get_include())')"
           {
@@ -3417,23 +3417,185 @@ jobs:
             echo "dry-run: skipping pycvc-cp311-cuda publish"
           fi
 
-      # pycvc-gl-cp311-cuda links the published cvcgl (this job does not build
-      # cvcgl; see the family header above), and it must be THIS release's: its
-      # recipe pins cvcgl ==<version>, so consumers install it beside this
-      # release's cvcgl whatever it was built against. An unversioned install
-      # took the newest cvcgl on the catalog, and the build job publishes cvcgl
-      # well after this lane gets here: v4.0.1's pycvc-gl-cp311-cuda was built
-      # against cvcgl 4.0.0+cvc.3 (installed 20:16Z; cvcgl 4.0.1 published at
-      # 21:05Z). So wait for `cvcgl==<version>` (any +cvc.N) on the catalog, up
-      # to WAIT_MINUTES, and fail rather than link another release. A dry run
-      # publishes nothing, so there it falls back to the newest cvcgl.
-      - name: Install this release's cvcgl (waits for the build job to publish it)
+      # The container runs as root (--user root, needed for apt) but the
+      # workspace is a bind-mount of the runner's _work dir on the host, and the
+      # runner service there is an unprivileged user. Everything this job writes
+      # — including .git — therefore lands root-owned, and the NEXT job to use
+      # this runner fails trying to clean or re-checkout it. The symptom is an
+      # unrelated job going red on a machine nobody touched, so restore
+      # ownership here rather than leaving that landmine.
+      # if: always() — a failed build leaves exactly the same root-owned tree.
+      - name: Restore workspace ownership to the runner user
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The parent dir is created by the runner process itself (outside the
+          # container), so it still carries the host user's uid:gid.
+          owner="$(stat -c '%u:%g' "$(dirname "$GITHUB_WORKSPACE")")"
+          echo "Restoring $GITHUB_WORKSPACE to $owner"
+          chown -R "$owner" "$GITHUB_WORKSPACE"
+
+  # ── pycvc-gl-cp311-cuda, once the build matrix has published cvcgl ────────
+  #
+  # pycvc-gl-cp311-cuda links the published cvcgl (no CUDA lane builds cvcgl; see
+  # build-cuda's family header), and it must be THIS release's: its recipe pins
+  # cvcgl ==<version>, so consumers install it beside this release's cvcgl
+  # whatever it was built against. v4.0.1's was built against cvcgl 4.0.0+cvc.3,
+  # by an unversioned install that took the newest cvcgl on the catalog. The
+  # cvcgl comes from the `build` job's linux x86_64 release row (pyver 311).
+  #
+  # This used to be the last step of build-cuda, which polled the catalog for that
+  # cvcgl for up to 120 min. The build rows wait in the GitHub-hosted queue, often
+  # for hours, while build-cuda gets its self-hosted runner at once, so the wait
+  # ran out first: v4.0.10's build-cuda gave up at 16:10Z, and the linux row
+  # published cvcgl 4.0.10 at 17:00Z. v4.0.9 failed the same way, and the last
+  # pycvc-gl-cp311-cuda on the catalog was 4.0.7. A job of its own that needs
+  # `build` starts once every build row has finished, however late, and holds no
+  # runner while it waits. A job cannot need a single matrix row, so it waits for
+  # all of them (in v4.0.10 the linux row finished last anyway).
+  #
+  # It also needs build-cuda: it does not publish unless libcvc-cuda and
+  # pycvc-cp311-cuda, its runtime deps, did. It rebuilds libcvc-cuda from the
+  # same source with the recipe's script (about 8 min on this runner) instead of
+  # installing the published one, so a dry run, which publishes nothing, builds
+  # what a tag builds.
+  #
+  # Reruns publish only what is missing: `cvcpkg publish` skips a variant whose
+  # exact version (+cvc.N), platform, arch, config and link are on the server
+  # already ("skipping ... (already on server)"), and every pack pins its +cvc.N
+  # from compute-revisions, which a rerun of failed jobs keeps. `gh run rerun
+  # --failed` reruns this job along with a failed build row or build-cuda.
+  #
+  # cuda-lane-watchdog does not cover this job: it exits once build-cuda and
+  # build-cuda-windows have runners, hours before this job exists. If the linux
+  # CUDA runner goes offline between build-cuda and the end of the build
+  # matrix, this job waits for it until GitHub cancels it at 24 h. Everything
+  # else in the run has published by then.
+  build-cuda-gl:
+    needs: [compute-revisions, build, build-cuda]
+    # !cancelled(): a failed build row must not skip it. It checks the catalog
+    # for this release's cvcgl instead, so it fails only when the linux row did
+    # not publish one.
+    if: ${{ !cancelled() && needs.build-cuda.result == 'success' }}
+    runs-on: [self-hosted, linux, cuda]
+    timeout-minutes: 120
+    # build-cuda's image, for build-cuda's reason: the glibc floor.
+    container:
+      image: nvidia/cuda:12.9.1-devel-ubuntu22.04
+      options: --user root
+    strategy:
+      fail-fast: false
+      matrix:
+        config: [release]
+    steps:
+      # build-cuda's first steps, for its reasons (see there): this bare toolkit
+      # image has no cmake, ninja, python or git, and they must be in place
+      # before actions/checkout.
+      - name: Install build toolchain (container)
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential git curl ca-certificates \
+            python3 python3-pip python3-venv python-is-python3
+          pip install --no-cache-dir 'cmake<4' ninja
+
+      - uses: actions/checkout@v5
+
+      - name: Install cvcpkg (from cy-pca/cvcpkg master)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install 'cvcpkg[publish] @ git+https://github.com/cy-pca/cvcpkg@master'
+          cvcpkg --version
+
+      - name: Fetch cvcpkg
+        id: libcvc-deps
+        uses: ./.github/actions/fetch-cvcpkg
+        with:
+          build_type: Release
+          link: shared
+
+      - name: Ensure cvcpkg can publish (httpx)
+        shell: bash
+        run: |
+          set -euo pipefail
+          exe="$(command -v cvcpkg)"
+          if [ "$(head -c 2 "$exe")" != "#!" ]; then
+            echo "cvcpkg publish extra ok: $exe is the frozen cvcpkg, which bundles httpx"
+            exit 0
+          fi
+          py="$(head -n1 "$exe" | sed -e 's/^#!//' -e 's/[[:space:]].*$//')"
+          if [ "$py" = "/bin/sh" ]; then
+            py="$(sed -n "2s/^'''exec' \"\([^\"]*\)\".*/\1/p" "$exe")"
+          fi
+          case "$py" in */python*) ;; *) py="$(command -v python3)" ;; esac
+          "$py" -m pip install 'httpx>=0.24'
+          "$py" -c 'import httpx; print("cvcpkg publish extra ok: httpx", httpx.__version__)'
+
+      # The libcvc-cuda that pycvc-gl-cp311-cuda compiles against, built as
+      # build-cuda builds the one it publishes. build-cuda checks that configure
+      # enabled each feature; this job runs only after it passed.
+      - name: Build & install libcvc-cuda (the recipe's script)
+        shell: bash
+        run: |
+          set -euo pipefail
+          deps="${{ steps.libcvc-deps.outputs.path }}"
+          if [ -z "$deps" ]; then
+            deps="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"
+          fi
+          export CVC_SOURCE_DIR="$GITHUB_WORKSPACE"
+          export CVC_BUILD_DIR="$GITHUB_WORKSPACE/build"
+          export CVC_INSTALL_DIR="$GITHUB_WORKSPACE/stage"
+          export CVC_DEPS_PREFIX="$deps"
+          export CVC_BUILD_TYPE="${{ matrix.config }}"
+          export CVC_LINK=shared
+          bash cvcpkg/recipes/libcvc-cuda/build.sh
+
+      # swig from the catalog, as in build-cuda (the container has none).
+      - name: Install swig (cvcpkg)
+        uses: ./.github/actions/install-cvcpkg-swig
+
+      - name: Install pycvc-gl deps (Python 3.11 + numpy + VTK)
+        shell: bash
+        run: |
+          set -euo pipefail
+          PY="$GITHUB_WORKSPACE/py"
+          # Same set as the CPU family step. The published cvcgl comes next.
+          cvcpkg install python311 numpy-cp311 vtk vtk-python-cp311 xorgproto \
+            --prefix "$PY" --config release --link shared
+          # numpy's bundled openblas is not self-resolved by RPATH, so a bare
+          # `import numpy` (which find_package(Python3 ... NumPy) performs)
+          # fails without numpy.libs on the loader path. Same guard as the CPU job.
+          #
+          # This reaches every later step (GITHUB_ENV), so each cvcpkg call below
+          # drops it (env -u LD_LIBRARY_PATH): cvcpkg is a frozen binary with its
+          # own libraries, and once cvcgl's closure is in $PY/lib it loads those
+          # instead and segfaults on exit. v4.0.3's cvcgl install did, 40 times out
+          # of 40, each after "done", and the old 120-min wait read it as "not on
+          # the catalog yet".
+          export LD_LIBRARY_PATH="$PY/lib/python3.11/site-packages/numpy.libs:$PY/lib:${LD_LIBRARY_PATH:-}"
+          NPY_INC="$("$PY/bin/python3.11" -c 'import numpy; print(numpy.get_include())')"
+          {
+            echo "PY=$PY"
+            echo "NPY_INC=$NPY_INC"
+            echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
+          } >> "$GITHUB_ENV"
+
+      # `cvcgl==<version>` (any +cvc.N). The build job has finished, so the linux
+      # row has published it or never will: WAIT_MINUTES only absorbs a slow
+      # catalog. A dry run publishes nothing, so there it falls back to the newest
+      # cvcgl when this version is not on the catalog.
+      - name: Install this release's cvcgl
         id: cvcgl
-        if: ${{ !cancelled() && steps.swig.outcome == 'success' && matrix.config == 'release' }}
         shell: bash
         env:
           DO_PUBLISH: ${{ (github.event_name == 'push' || github.event.inputs.dry_run == 'false') && '1' || '0' }}
-          WAIT_MINUTES: '120'
+          WAIT_MINUTES: '10'
         run: |
           set -euo pipefail
           PY="$GITHUB_WORKSPACE/py"
@@ -3444,8 +3606,8 @@ jobs:
             env -u LD_LIBRARY_PATH cvcpkg install "cvcgl==$VER" --prefix "$PY" --config release \
               --link shared >"$log" 2>&1
           }
-          # Exit 128 + N is cvcpkg killed by signal N (a crash), not a cvcgl still
-          # to come: say so and stop rather than wait out WAIT_MINUTES.
+          # Exit 128 + N is cvcpkg killed by signal N (a crash), not a cvcgl
+          # missing from the catalog: say so and stop.
           crashed() {
             [ "$1" -ge 128 ] || return 1
             cat "$log"
@@ -3474,16 +3636,15 @@ jobs:
             fi
             if [ "$(date +%s)" -ge "$deadline" ]; then
               cat "$log"
-              echo "::error::cvcgl $VER (linux/x86_64/release) did not reach the catalog within $WAIT_MINUTES min, so pycvc-gl-cp311-cuda is not built against another release's cvcgl. Rerun this job once the build job has published cvcgl $VER."
+              echo "::error::cvcgl $VER (linux/x86_64/release) is not on the catalog, and every build row has finished: the 'build (release, 311, ubuntu-22.04, linux, x86_64)' row did not publish it. Fix that row, then rerun the failed jobs (gh run rerun --failed reruns this one with it)."
               exit 1
             fi
-            echo "$(date -u +%H:%M:%SZ) cvcgl $VER is not on the catalog yet (the build job publishes it); retrying in 2 min"
-            sleep 120
+            echo "$(date -u +%H:%M:%SZ) cvcgl $VER is not on the catalog yet; retrying in 1 min"
+            sleep 60
           done
           cat "$log"
 
       - name: Build, pack & publish pycvc-gl-cp311-cuda
-        if: ${{ !cancelled() && steps.swig.outcome == 'success' && steps.cvcgl.outcome == 'success' && matrix.config == 'release' }}
         shell: bash
         env:
           CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
@@ -3497,7 +3658,7 @@ jobs:
           : "${CVC_SWIG_EXECUTABLE:?cvcpkg swig missing -- the Install swig (cvcpkg) step did not run}"
           : "${SWIG_LIB:?SWIG_LIB unset -- the Install swig (cvcpkg) step did not run}"
           # Scene module. cvcgl comes from $PY (the published single package),
-          # not from a source build — see the family header above.
+          # not from a source build — see build-cuda's family header.
           #
           # -L$PY/lib: the published static cvcgl's export links libX11 BY NAME
           # ($<LINK_ONLY:X11> -> a bare -lX11). This container has no system
@@ -3540,21 +3701,13 @@ jobs:
             echo "dry-run: skipping pycvc-gl-cp311-cuda publish"
           fi
 
-      # The container runs as root (--user root, needed for apt) but the
-      # workspace is a bind-mount of the runner's _work dir on the host, and the
-      # runner service there is an unprivileged user. Everything this job writes
-      # — including .git — therefore lands root-owned, and the NEXT job to use
-      # this runner fails trying to clean or re-checkout it. The symptom is an
-      # unrelated job going red on a machine nobody touched, so restore
-      # ownership here rather than leaving that landmine.
-      # if: always() — a failed build leaves exactly the same root-owned tree.
+      # Root-owned files on the runner's bind-mounted workspace break the next
+      # job there; see the same step in build-cuda.
       - name: Restore workspace ownership to the runner user
         if: always()
         shell: bash
         run: |
           set -euo pipefail
-          # The parent dir is created by the runner process itself (outside the
-          # container), so it still carries the host user's uid:gid.
           owner="$(stat -c '%u:%g' "$(dirname "$GITHUB_WORKSPACE")")"
           echo "Restoring $GITHUB_WORKSPACE to $owner"
           chown -R "$owner" "$GITHUB_WORKSPACE"
