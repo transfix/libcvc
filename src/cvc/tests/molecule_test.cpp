@@ -423,3 +423,165 @@ TEST(MolFiles, EachAppHasItsOwnHandlers) {
   EXPECT_THROW(mol::read_molecule(b, (d / "x.mol2").string()), mol::molecule_file_error);
   fs::remove_all(d);
 }
+
+// ---- the writers (T9) ----
+
+namespace {
+// Two molecules' atoms and records are the same, coordinates to `xyz` and charges and radii to
+// `qr` (what a writer's precision keeps).
+void expect_same(const mol::molecule &a, const mol::molecule &b, double xyz, double qr,
+                 bool records = true) {
+  ASSERT_EQ(a.atoms.size(), b.atoms.size());
+  for (std::size_t i = 0; i < a.atoms.size(); ++i) {
+    const mol::atom &p = a.atoms[i], &q = b.atoms[i];
+    SCOPED_TRACE("atom " + std::to_string(i));
+    EXPECT_EQ(p.serial, q.serial);
+    EXPECT_EQ(p.name, q.name);
+    EXPECT_EQ(p.residue, q.residue);
+    EXPECT_EQ(p.chain, q.chain);
+    EXPECT_EQ(p.residue_seq, q.residue_seq);
+    EXPECT_EQ(p.insertion, q.insertion);
+    EXPECT_EQ(p.hetero, q.hetero);
+    EXPECT_EQ(p.model, q.model);
+    EXPECT_NEAR(p.x, q.x, xyz);
+    EXPECT_NEAR(p.y, q.y, xyz);
+    EXPECT_NEAR(p.z, q.z, xyz);
+    EXPECT_NEAR(p.charge, q.charge, qr);
+    EXPECT_NEAR(p.radius, q.radius, qr);
+    if (records) {
+      EXPECT_EQ(p.alt_loc, q.alt_loc);
+      EXPECT_EQ(p.element, q.element);
+      EXPECT_NEAR(p.occupancy, q.occupancy, 0.005);
+      EXPECT_NEAR(p.b_factor, q.b_factor, 0.005);
+    }
+  }
+  if (!records)
+    return;
+  EXPECT_EQ(a.id, b.id);
+  EXPECT_EQ(a.title, b.title);
+  ASSERT_EQ(a.structures.size(), b.structures.size());
+  for (std::size_t i = 0; i < a.structures.size(); ++i) {
+    const mol::secondary_structure &s = a.structures[i], &t = b.structures[i];
+    SCOPED_TRACE("structure " + std::to_string(i));
+    EXPECT_EQ(s.type, t.type);
+    EXPECT_EQ(s.id, t.id);
+    EXPECT_EQ(s.chain, t.chain);
+    EXPECT_EQ(s.start_seq, t.start_seq);
+    EXPECT_EQ(s.start_insertion, t.start_insertion);
+    EXPECT_EQ(s.end_seq, t.end_seq);
+    EXPECT_EQ(s.end_insertion, t.end_insertion);
+    EXPECT_EQ(s.helix_class, t.helix_class);
+    EXPECT_EQ(s.strand, t.strand);
+    EXPECT_EQ(s.sense, t.sense);
+  }
+}
+
+mol::molecule every_model(const std::string &text) {
+  mol::molecule_read_params p;
+  p.model = 0;
+  return pdb(text, p);
+}
+} // namespace
+
+TEST(MolWrite, PdbReadsBackTheSame) {
+  const mol::molecule m = every_model(kPdb);
+  std::ostringstream out;
+  mol::write_pdb(out, m);
+  const std::string text = out.str();
+  const mol::molecule back = every_model(text);
+  expect_same(m, back, 0.0, 0.0);
+  EXPECT_EQ(back.models, 2);
+  // v3.3's columns: the C-alpha's name from column 14, the iron's from 13, its element in 77-78.
+  EXPECT_NE(text.find("ATOM      2  CA  ALA A   1      11.639   6.071  -5.147  1.00  0.00"),
+            std::string::npos)
+      << text;
+  EXPECT_NE(text.find("HETATM    7 FE   HEM A 100"), std::string::npos) << text;
+  EXPECT_NE(text.find("HELIX    1   1 ALA A    1  GLY A    2  1"), std::string::npos) << text;
+  EXPECT_NE(text.find("MODEL        2"), std::string::npos) << text;
+  // Each line fits the format's 80 columns.
+  std::istringstream lines(text);
+  for (std::string l; std::getline(lines, l);)
+    EXPECT_LE(l.size(), 80u) << l;
+}
+
+TEST(MolWrite, OneGrlReadsBackTheSame) {
+  std::ifstream in(k1grl, std::ios::binary);
+  const mol::molecule m = mol::read_pdb(in, {}, k1grl);
+  std::ostringstream out;
+  mol::write_pdb(out, m);
+  std::istringstream back(out.str());
+  expect_same(m, mol::read_pdb(back, {}, "back.pdb"), 0.0, 0.0);
+}
+
+TEST(MolWrite, PqrReadsBackTheSame) {
+  const mol::molecule m = every_model(kPdb);
+  std::ostringstream out;
+  mol::write_pqr(out, m);
+  mol::molecule_read_params p;
+  p.model = 0;
+  const mol::molecule back = pqr(out.str(), p);
+  // A PQR line has no alternate location, occupancy, B-factor or element column, and no records.
+  expect_same(m, back, 0.0005, 0.00005, false);
+  // An insertion code rides on the residue number.
+  mol::molecule ins;
+  ins.atoms.push_back(m.atoms[0]);
+  ins.atoms.back().insertion = 'A';
+  ins.atoms.back().model = 0;
+  std::ostringstream o2;
+  mol::write_pqr(o2, ins);
+  EXPECT_EQ(pqr(o2.str()).atoms.at(0).insertion, 'A') << o2.str();
+}
+
+TEST(MolWrite, XyzrReadsBackExactly) {
+  mol::molecule m;
+  for (const double v : {0.1, 1.0 / 3.0, -12345.678901234, 6.02e23}) {
+    mol::atom a;
+    a.x = v;
+    a.y = -v;
+    a.z = v * 2;
+    a.radius = std::abs(v);
+    m.atoms.push_back(a);
+  }
+  std::ostringstream out;
+  mol::write_xyzr(out, m);
+  std::istringstream in(out.str());
+  const mol::molecule back = mol::read_xyzr(in);
+  ASSERT_EQ(back.atoms.size(), m.atoms.size());
+  for (std::size_t i = 0; i < m.atoms.size(); ++i) {
+    EXPECT_EQ(back.atoms[i].x, m.atoms[i].x);
+    EXPECT_EQ(back.atoms[i].y, m.atoms[i].y);
+    EXPECT_EQ(back.atoms[i].z, m.atoms[i].z);
+    EXPECT_EQ(back.atoms[i].radius, m.atoms[i].radius);
+  }
+}
+
+TEST(MolWrite, ByExtensionThroughTheApp) {
+  cvc::app app;
+  EXPECT_EQ(mol::molecule_write_extensions(app),
+            (std::vector<std::string>{".ent", ".pdb", ".pqr", ".xyzr"}));
+  const mol::molecule m = every_model(kPdb);
+  const fs::path d = temp_dir();
+  for (const char *name : {"a.pdb", "a.ent", "a.pqr", "a.xyzr"}) {
+    SCOPED_TRACE(name);
+    mol::write_molecule(app, m, (d / name).string());
+    mol::molecule_read_params p;
+    p.model = 0;
+    EXPECT_EQ(mol::read_molecule(app, (d / name).string(), p).atoms.size(), m.atoms.size());
+  }
+  EXPECT_NE(error_of([&] {
+              mol::write_molecule(app, m, (d / "a.mol2").string());
+            }).find("no writer for '.mol2'"),
+            std::string::npos);
+  EXPECT_NE(error_of([&] {
+              mol::write_molecule(app, m, (d / "no" / "such" / "dir" / "a.pdb").string());
+            }).find("can't open"),
+            std::string::npos);
+  // A handler that reads only is passed over for writing.
+  cvc::app other;
+  ASSERT_TRUE(mol::molecule_handlers(other).insert(
+      boost::shared_ptr<mol::molecule_file_io>(new mol2_stub)));
+  EXPECT_NE(
+      error_of([&] { mol::write_molecule(other, m, (d / "a.mol2").string()); }).find("no writer"),
+      std::string::npos);
+  fs::remove_all(d);
+}
