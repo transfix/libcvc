@@ -188,6 +188,18 @@ add_executable(room_aoi_test room_aoi_test.cpp)
 add_executable(room_aoi_relay_test room_aoi_relay_test.cpp)
 add_executable(physics_codec_test physics_codec_test.cpp)
 add_executable(physics_field_test physics_field_test.cpp)
+# The wake goldens (PhysicsFieldWake and PhysicsFieldWakeShore's CrossPlatformGoldenHash) take
+# inputs computed here, such as the coast's distance 7 - x - 0.2 |y|, and this file calls
+# cvc/physics/types.h's inline dot(). Under clang's default contraction on aarch64 (the macOS arm64
+# lanes) that distance fuses into an FMA and the golden moves. In a Debug build nothing is inlined,
+# and the executable's own copy of an inline function is the one a shared libcvc calls (dyld keeps
+# the first weak definition it loads), so a contracted dot() here moves the field step's bits too.
+# Build it without contraction, as the physics sources are.
+if(NOT MSVC)
+  set_source_files_properties(physics_field_test.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+else()
+  set_source_files_properties(physics_field_test.cpp PROPERTIES COMPILE_OPTIONS "/fp:precise")
+endif()
 add_executable(physics_hull_test physics_hull_test.cpp)
 add_executable(physics_immersion_test physics_immersion_test.cpp)
 # ImmersionDigest pins the columns of bodies whose poses are computed here: build without FMA
@@ -223,6 +235,15 @@ add_executable(ph_compose_parity_test ph_compose_parity_test.cpp)
 add_executable(ph_microgrid_test ph_microgrid_test.cpp)
 add_executable(ph_query_test ph_query_test.cpp)
 add_executable(ph_train_test ph_train_test.cpp)
+# TheTapesDerivativesMatchFiniteDifferences holds the tape's value, rounded once per operation, to
+# the same expression over double here (EXPECT_DOUBLE_EQ, 4 ulps). Under clang's default contraction
+# on aarch64, x * y + 2 x and 1.5 + x * x fuse into FMAs on the double side only, and it lands 5 to
+# 8 ulps away. Build it without contraction, so both sides do the same operations.
+if(NOT MSVC)
+  set_source_files_properties(ph_train_test.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+else()
+  set_source_files_properties(ph_train_test.cpp PROPERTIES COMPILE_OPTIONS "/fp:precise")
+endif()
 add_executable(ph_convoy_test ph_convoy_test.cpp)
 add_executable(ph_se2_test ph_se2_test.cpp)
 add_executable(ph_se2_train_test ph_se2_train_test.cpp)
@@ -246,12 +267,16 @@ add_executable(physics_dyn_boat_plant_test physics_dyn_boat_plant_test.cpp)
 # StepsAsTheDynamicPlantDoes (and the four-wheel StepsAsTheFourWheelPlantDoes) hold the plant
 # (built with -ffp-contract=off) to its model called inline here, bit for bit: build them the same
 # way, or clang contracts this copy into FMAs on aarch64 (the macOS arm64 lanes) and the last bits
-# differ.
+# differ. The boat test calls cvc/physics/types.h's inline dot(), and in a Debug build its copy is
+# the one the shared libcvc's field step calls (see physics_field_test above): contracted, it moved
+# DynBoatPlant.CrossPlatformGoldenHash on the macOS Debug lane.
 if(NOT MSVC)
   set_source_files_properties(physics_dyn_bike_plant_test.cpp physics_dyn_4w_plant_test.cpp
+                              physics_dyn_boat_plant_test.cpp
                               PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
 else()
   set_source_files_properties(physics_dyn_bike_plant_test.cpp physics_dyn_4w_plant_test.cpp
+                              physics_dyn_boat_plant_test.cpp
                               PROPERTIES COMPILE_OPTIONS "/fp:precise")
 endif()
 # cvc::physics::mujoco_robot on the Menagerie's Go2. Built in every lane: without CVC_WITH_MUJOCO it
