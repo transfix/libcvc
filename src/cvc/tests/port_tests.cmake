@@ -23,6 +23,7 @@ set(CVC_PORT_TESTS
   molecule_test
   molecule_view_test
   molecule_groups_test
+  molecule_intrinsics_test
   blur_test
   planar_test
   tiler_test
@@ -96,6 +97,8 @@ target_compile_definitions(tiler_test PRIVATE
 
 # molecule_test reads PDB entry 1GRL from the source tree (examples/data/molecules).
 target_compile_definitions(molecule_test PRIVATE
+  CVC_REPO_DIR="${CMAKE_CURRENT_LIST_DIR}/../../..")
+target_compile_definitions(molecule_intrinsics_test PRIVATE
   CVC_REPO_DIR="${CMAKE_CURRENT_LIST_DIR}/../../..")
 target_compile_definitions(molecule_groups_test PRIVATE
   CVC_REPO_DIR="${CMAKE_CURRENT_LIST_DIR}/../../..")

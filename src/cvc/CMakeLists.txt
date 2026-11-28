@@ -181,6 +181,7 @@ set(INCLUDE_FILES
   ../../inc/cvc/mol/blur.h
   ../../inc/cvc/mol/groups.h
   ../../inc/cvc/mol/molecule.h
+  ../../inc/cvc/mol/molecule_intrinsics.h
   ../../inc/cvc/mol/torsions.h
   ../../inc/cvc/mol/view.h
   ../../inc/cvc/volume/point_classes.h
@@ -367,6 +368,7 @@ set(SOURCE_FILES
   mol/blur.cpp
   mol/groups.cpp
   mol/molecule.cpp
+  mol/molecule_intrinsics.cpp
   mol/torsions.cpp
   mol/view.cpp
   volume/point_classes.cpp

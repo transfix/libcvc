@@ -36,6 +36,7 @@
 #include <cvc/gl/ariadne/volume_render_nodes.h>
 #include <cvc/gl/ariadne/volume_slice_nodes.h>
 #include <cvc/gl/ariadne/world_nodes.h>
+#include <cvc/mol/molecule_intrinsics.h>        // install_molecule_intrinsics
 #include <cvc/volume/segmentation_intrinsics.h> // install_segmentation_intrinsics
 #include <cvc/volume/volume_filter_intrinsics.h> // install_volume_filter_intrinsics
 #include <cvc/volume/volume_grid_contour_intrinsics.h>
@@ -65,6 +66,7 @@ void register_cvcgl_extensions(cvc::app &app) {
   register_swarm_node_types(app);       // "nav_swarm", "swarm_layer"
   register_entity_node_types(app);      // "entity_layer"
   register_molecule_node_type(app);     // "molecule" (cvc::mol views: spheres, sticks, cartoon)
+  cvc::install_molecule_intrinsics(app); // mol.info, .torsions, .blur, .view in its documents
 }
 
 } // namespace ariadne
