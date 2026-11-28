@@ -347,6 +347,35 @@ bool has_start(std::string_view module, bool &start, std::string &error) {
   return true;
 }
 
+bool imports_match(const std::vector<FunctionImport> &declared, const std::vector<Import> &host,
+                   std::string &error) {
+  for (const FunctionImport &f : declared) {
+    const std::string what = f.module + "." + f.name;
+    std::string params, results;
+    if (f.module == "ari" && f.name == "gas") {
+      params = "\x7e"; // the gas pass's ari.gas (meter.h), the runtime's own
+    } else {
+      const auto im = std::find_if(host.begin(), host.end(), [&](const Import &i) {
+        return i.module == f.module && i.name == f.name;
+      });
+      if (im == host.end()) {
+        error = "it imports " + what + ", which the host doesn't define";
+        return false;
+      }
+      for (int i = 0; i < im->params; ++i)
+        params.push_back((im->wide >> i) & 1u ? '\x7e' : '\x7f');
+      if (im->returns)
+        results = im->returns_i32 ? "\x7f" : "\x7e";
+    }
+    if (f.params != params || f.results != results) {
+      error = "it imports " + what + " as (func" + type_text(f.params, f.results) +
+              "), and the host's " + what + " is (func" + type_text(params, results) + ")";
+      return false;
+    }
+  }
+  return true;
+}
+
 std::string type_text(std::string_view params, std::string_view results) {
   std::string s;
   const auto list = [&s](const char *what, std::string_view types) {
@@ -414,6 +443,92 @@ std::string cap_memory(std::string_view module, std::uint64_t max_bytes, std::st
   }
   if (max_pages)
     *max_pages = pages;
+  return out;
+}
+
+std::string start_as_export(std::string_view module, std::string_view name, bool &had,
+                            std::string &error) {
+  error.clear();
+  had = false;
+  if (!is_module(module, error))
+    return {};
+  struct Section {
+    std::uint8_t id;
+    std::string_view content;
+  };
+  std::vector<Section> sections;
+  Reader r{module, 8};
+  while (!r.done()) {
+    const std::uint8_t id = r.byte();
+    const std::uint64_t size = r.leb();
+    if (r.bad || size > module.size() - r.at) {
+      error = "a section runs past the module's end";
+      return {};
+    }
+    sections.push_back({id, module.substr(r.at, static_cast<std::size_t>(size))});
+    r.skip(size);
+  }
+  const auto start =
+      std::find_if(sections.begin(), sections.end(), [](const Section &s) { return s.id == 8; });
+  if (start == sections.end())
+    return std::string(module);
+  Reader sr{start->content};
+  const std::uint64_t func = sr.leb();
+  if (sr.bad) {
+    error = "its start section doesn't hold a function index";
+    return {};
+  }
+  // The export entry: the name, kind 0 (a function), the start function's index.
+  std::string entry;
+  put_leb(entry, name.size());
+  entry.append(name);
+  entry.push_back('\0');
+  put_leb(entry, func);
+  const auto exports =
+      std::find_if(sections.begin(), sections.end(), [](const Section &s) { return s.id == 7; });
+  std::string with; // the export section, with the entry
+  if (exports == sections.end()) {
+    put_leb(with, 1);
+  } else {
+    Reader er{exports->content};
+    const std::uint64_t n = er.leb();
+    const std::size_t entries = er.at; // where the entries start, after their count
+    if (er.bad) {
+      error = "its export section can't be read";
+      return {};
+    }
+    for (std::uint64_t i = 0; i < n; ++i) {
+      if (name_of(er) == name) {
+        error = "it exports " + std::string(name) + " itself, the name its start function takes";
+        return {};
+      }
+      er.byte();
+      er.leb();
+      if (er.bad) {
+        error = "its export section can't be read";
+        return {};
+      }
+    }
+    put_leb(with, n + 1);
+    with.append(exports->content.substr(entries));
+  }
+  with.append(entry);
+  std::string out(module.substr(0, 8));
+  out.reserve(module.size() + entry.size() + 8);
+  const auto put = [&](std::uint8_t id, std::string_view content) {
+    out.push_back(static_cast<char>(id));
+    put_leb(out, content.size());
+    out.append(content);
+  };
+  for (const Section &s : sections) {
+    if (s.id == 7)
+      put(7, with);
+    else if (s.id == 8 && exports == sections.end())
+      put(7, with); // the export section goes where the start was: after the globals, in order
+    else if (s.id != 8)
+      put(s.id, s.content);
+  }
+  had = true;
   return out;
 }
 

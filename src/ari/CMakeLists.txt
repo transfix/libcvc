@@ -76,9 +76,9 @@ if(NOT EMSCRIPTEN AND (CVC_BUILD_PYCVC OR ARI_WITH_PYTHON))
       target_link_libraries(arix PRIVATE cvc)
     endif()
     cvc_ariadne_python_host(arix)
-    # ... with WebAssembly guests where wasmtime's C API is found (src/ariadne_wasm); with
-    # -DARI_WITH_WASM=ON a missing one is a configure error.
-    option(ARI_WITH_WASM "arix requires WebAssembly guests (wasmtime's C API)" OFF)
+    # ... with WebAssembly guests where a runtime is found (src/ariadne_wasm: wasmtime's C API, or
+    # WAMR's where there is no wasmtime); with -DARI_WITH_WASM=ON a missing one is a configure error.
+    option(ARI_WITH_WASM "arix requires WebAssembly guests (wasmtime's or WAMR's C API)" OFF)
     include("${CMAKE_CURRENT_LIST_DIR}/../ariadne_wasm/ariadne_wasm.cmake")
     cvc_find_ariadne_wasm(ARI_WITH_WASM)
     if(CVC_ARIADNE_WASM_FOUND)

@@ -626,6 +626,122 @@ jobs:
           "$node" --version
           "$node" build-wasm/bin/ariadne_wasm_browser_test.js --gtest_color=no
 
+  # WebAssembly guests on WAMR (src/ariadne_wasm/wamr_runtime.cpp, ARIADNE_SCRIPTING_HOSTS.md G3):
+  # the runtime of arix and ariglx where cvcpkg has no wasmtime (the BSDs and Haiku), forced on
+  # here on Linux (-DCVC_ARIADNE_WASM_RUNTIME=wamr). The wasm engine's tests run on it as they do on
+  # wasmtime in package-linux: ariadne_wasm_test (guests from WAT text, which binaryen reads and
+  # transforms as they load: the cvcpkg `binaryen` package, wasm_transform.cpp),
+  # ariadne_wasm_transform_test (the test guests transformed by binaryen's own wasm-opt, which run
+  # as they are), and arix's documents with a guest (arix_wasm_block, arix_wasi_stubs; arix with
+  # the cvcpkg python312 embedded). Only when the engine, the tests or this file changed.
+  wasm-wamr:
+    name: wasm-wamr (linux, WAMR)
+    runs-on: ubuntu-22.04
+    concurrency:
+      group: ci-${{ github.ref }}-wasm-wamr
+      cancel-in-progress: true
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Did the wasm engine change?
+        id: paths
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+          else
+            base="${{ github.event.before }}"
+          fi
+          run=true
+          if [ -n "$base" ] && [ "$base" != "0000000000000000000000000000000000000000" ] \
+             && git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            if ! git diff --name-only "$base" HEAD -- src/ariadne_wasm \
+                   src/cvc/tests/ariadne_wasm_test.cpp src/cvc/tests/ariadne_wasm_browser_test.cpp \
+                   src/cvc/tests/CMakeLists.txt src/ari src/ariadne_python \
+                   src/cvc/ariadne inc/cvc/ariadne src/cvc/state inc/cvc/state \
+                   CMakeLists.txt src/cvc/CMakeLists.txt CMake cvcpkg/recipes/libcvc \
+                   .github/workflows/ci.yml | grep -q .; then
+              run=false
+            fi
+          fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+          echo "the wasm engine changed: $run"
+
+      - name: Fetch cvcpkg
+        if: steps.paths.outputs.run == 'true'
+        id: libcvc-deps
+        uses: ./.github/actions/fetch-cvcpkg
+        with:
+          build_type: Release
+          link: shared
+
+      - name: Install build tools (cvcpkg)
+        if: steps.paths.outputs.run == 'true'
+        uses: ./.github/actions/cvcpkg-build-tools
+
+      # WAMR, binaryen (its library for the engine, its wasm-opt for the test guests) and the Python
+      # arix embeds, in a prefix of their own: the interpreter bundle carries its own zlib and
+      # openssl, which must not shadow the deps bundle's. wamr is pinned at 2.4.4+cvc.4, the first
+      # build without WAMR's own WASI (cvc.3's takes a guest's WASI imports before the host's).
+      - name: Install WAMR, binaryen and Python (cvcpkg)
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          set -euo pipefail
+          prefix="$RUNNER_TEMP/wamr-prefix"
+          cvcpkg install wamr==2.4.4+cvc.4 binaryen python312 --prefix "$prefix" \
+            --config release --link shared
+          test -f "$prefix/lib/libiwasm.a" && test -f "$prefix/lib/libbinaryen.a"
+          "$prefix/bin/wasm-opt" --version
+          echo "WAMR_PREFIX=$prefix" >> "$GITHUB_ENV"
+
+      - name: Configure (CVC_ARIADNE_WASM_RUNTIME=wamr)
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          set -euo pipefail
+          if [ -n "${{ steps.libcvc-deps.outputs.path }}" ]; then
+            deps="${{ steps.libcvc-deps.outputs.path }}"
+          else
+            deps="${LIBCVC_DEPS_PREFIX:-$HOME/libcvc-deps}"
+          fi
+          export LD_LIBRARY_PATH="$deps/lib:$WAMR_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$deps;$WAMR_PREFIX" \
+            -DCVC_BUILD_TESTS=ON \
+            -DCVC_BUILD_CVCGL=OFF \
+            -DCVC_ENABLE_CUDA=OFF \
+            -DCVC_ARIADNE_WASM_RUNTIME=wamr \
+            -DARI_WITH_PYTHON=ON \
+            -DPython3_EXECUTABLE="$WAMR_PREFIX/bin/python3.12" \
+            -DCVC_WASM_OPT="$WAMR_PREFIX/bin/wasm-opt" \
+            | tee configure.log
+          for t in ariadne_wasm_test ariadne_wasm_transform_test arix; do
+            grep -qE "^-- $t: WebAssembly guests \(WAMR: .*binaryen: " configure.log \
+              || { echo "::error::$t was not configured on WAMR with binaryen"; exit 1; }
+          done
+          grep -q "ariadne_wasm_transform_test: the test guests, transformed by" configure.log \
+            || { echo "::error::the configure did not transform the test guests"; exit 1; }
+
+      - name: Build the engine's tests, ari and arix
+        if: steps.paths.outputs.run == 'true'
+        run: cmake --build build --parallel --target ariadne_wasm_test ariadne_wasm_transform_test ari arix
+
+      - name: Run the wasm engine's tests on WAMR
+        if: steps.paths.outputs.run == 'true'
+        run: |
+          set -euo pipefail
+          build/bin/ariadne_wasm_test --gtest_color=no
+          build/bin/ariadne_wasm_transform_test --gtest_color=no
+          tests='^(arix_wasm_block|arix_wasi_stubs|ari_wasm_needs_arix)$'
+          n=$(ctest --test-dir build -N -R "$tests" | grep -c 'Test *#' || true)
+          [ "$n" -eq 3 ] || { echo "::error::$n of arix's 3 wasm tests reached CTestTestfile.cmake"; exit 1; }
+          ctest --test-dir build -R "$tests" --output-on-failure --timeout 600
+
   # The permissive geometry libraries that replace CGAL's GPL packages in the VolumeRover ports
   # (docs/roadmap/VOLROVER-LIBRARY-PORTS-ROADMAP.md §1.2, §1.8): permissive_libs_test (reentrant
   # Qhull, Clipper2, CDT and Shewchuk's predicates on known answers, against each other and on two

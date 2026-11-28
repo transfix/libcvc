@@ -1,41 +1,87 @@
 # WebAssembly guests in Ariadne documents (the wasm engine): docs/roadmap/ARIADNE_SCRIPTING_HOSTS.md
-# §8.2-8.7, phases G1 and G2.
+# §8.2-8.7, phases G1, G2 and G3.
 #
 #   cvc_ariadne_wasm_host(<target> [INSTALL] [ASYNC_LOAD])
 #
 # compiles the engine (wasm_engine.cpp, the CBOR codec, wasm_binary.cpp, the WASI stubs, the gas
 # pass and the runtime) into a target that already links cvc, and defines CVC_ARIADNE_WASM, so a
-# host's main.cpp turns its guests on. Natively the runtime is wasmtime's C API (the cvcpkg
-# `wasmtime` package: wasmtime::wasmtime), linked here. On Windows, with wasmtime.dll's import
-# library, the DLL is copied beside the target; with the static library the target carries it.
-# INSTALL also installs that DLL into bin, beside the host. Under Emscripten the runtime is the
-# page's own WebAssembly (browser_runtime.cpp), which runs guests transformed ahead
-# (cvc_ariadne_wasm_transform), and nothing is linked. ASYNC_LOAD is for a target linked with
-# Asyncify (-sASYNCIFY), as ariglx is: a guest the page won't compile or instantiate on its own
-# thread (Chrome refuses a module over 8 MB there) is then compiled and instantiated
-# asynchronously, and the document's load waits for it. Without it such a guest fails to load.
+# host's main.cpp turns its guests on. Natively the runtime is the one cvc_find_ariadne_wasm chose
+# (CVC_ARIADNE_WASM_BACKEND), linked here:
+#   - wasmtime's C API (the cvcpkg `wasmtime` package: wasmtime::wasmtime), where it is found. On
+#     Windows, with wasmtime.dll's import library, the DLL is copied beside the target; with the
+#     static library the target carries it. INSTALL also installs that DLL into bin, beside the
+#     host.
+#   - WAMR's wasm-c-api (the cvcpkg `wamr` package's static libiwasm: iwasm::iwasm,
+#     wamr_runtime.cpp), where there is no wasmtime: the BSDs and Haiku (G3). It runs guests
+#     transformed for the browser. With binaryen (the cvcpkg `binaryen` package's static
+#     libbinaryen: binaryen::binaryen) the host also transforms any other guest as it loads it, and
+#     reads the text format (wasm_transform.cpp, CVC_ARIADNE_WASM_BINARYEN); without it, it runs
+#     only guests transformed at install.
+# Under Emscripten the runtime is the page's own WebAssembly (browser_runtime.cpp), which runs
+# guests transformed ahead (cvc_ariadne_wasm_transform), and nothing is linked. ASYNC_LOAD is for a
+# target linked with Asyncify (-sASYNCIFY), as ariglx is: a guest the page won't compile or
+# instantiate on its own thread (Chrome refuses a module over 8 MB there) is then compiled and
+# instantiated asynchronously, and the document's load waits for it. Without it such a guest fails
+# to load.
 set(_CVC_ARIADNE_WASM_DIR "${CMAKE_CURRENT_LIST_DIR}")
+
+# Which runtime runs the guests natively: wasmtime where it is found, else WAMR (auto); or the one
+# named, which a configure then requires.
+set(CVC_ARIADNE_WASM_RUNTIME "auto" CACHE STRING
+    "The wasm guests' native runtime: auto (wasmtime where found, else WAMR), wasmtime or wamr")
+set_property(CACHE CVC_ARIADNE_WASM_RUNTIME PROPERTY STRINGS auto wasmtime wamr)
 
 #   cvc_find_ariadne_wasm(<required>)
 #
-# Look for wasmtime's C API. Sets CVC_ARIADNE_WASM_FOUND. With <required> true a miss is an error;
-# otherwise the guests are left out of the host. Under Emscripten there is nothing to find: the
-# browser backend needs no library.
+# Look for a runtime for the guests, as CVC_ARIADNE_WASM_RUNTIME says: wasmtime's C API, and where
+# it misses (or with CVC_ARIADNE_WASM_RUNTIME=wamr) WAMR's, with binaryen if it is there. Sets
+# CVC_ARIADNE_WASM_FOUND, and CVC_ARIADNE_WASM_BACKEND (wasmtime, wamr or browser). With
+# <required> true a miss is an error; otherwise the guests are left out of the host. Under
+# Emscripten there is nothing to find: the browser backend needs no library.
 macro(cvc_find_ariadne_wasm required)
+  set(CVC_ARIADNE_WASM_FOUND FALSE)
+  set(CVC_ARIADNE_WASM_BACKEND "")
   if(EMSCRIPTEN)
     set(CVC_ARIADNE_WASM_FOUND TRUE)
+    set(CVC_ARIADNE_WASM_BACKEND browser)
   else()
-    if(NOT TARGET wasmtime::wasmtime)
-      if(${required})
-        find_package(wasmtime CONFIG REQUIRED)
-      else()
-        find_package(wasmtime CONFIG QUIET)
+    if(NOT CVC_ARIADNE_WASM_RUNTIME MATCHES "^(auto|wasmtime|wamr)$")
+      message(FATAL_ERROR "CVC_ARIADNE_WASM_RUNTIME is auto, wasmtime or wamr, not "
+                          "'${CVC_ARIADNE_WASM_RUNTIME}'")
+    endif()
+    if(NOT CVC_ARIADNE_WASM_RUNTIME STREQUAL "wamr")
+      if(NOT TARGET wasmtime::wasmtime)
+        if(${required} AND CVC_ARIADNE_WASM_RUNTIME STREQUAL "wasmtime")
+          find_package(wasmtime CONFIG REQUIRED)
+        else()
+          find_package(wasmtime CONFIG QUIET)
+        endif()
+      endif()
+      if(TARGET wasmtime::wasmtime)
+        set(CVC_ARIADNE_WASM_FOUND TRUE)
+        set(CVC_ARIADNE_WASM_BACKEND wasmtime)
       endif()
     endif()
-    if(TARGET wasmtime::wasmtime)
-      set(CVC_ARIADNE_WASM_FOUND TRUE)
-    else()
-      set(CVC_ARIADNE_WASM_FOUND FALSE)
+    if(NOT CVC_ARIADNE_WASM_FOUND AND NOT CVC_ARIADNE_WASM_RUNTIME STREQUAL "wasmtime")
+      if(NOT TARGET iwasm::iwasm)
+        find_package(iwasm CONFIG QUIET)
+      endif()
+      if(TARGET iwasm::iwasm)
+        set(CVC_ARIADNE_WASM_FOUND TRUE)
+        set(CVC_ARIADNE_WASM_BACKEND wamr)
+        if(NOT TARGET binaryen::binaryen)
+          find_package(binaryen CONFIG QUIET)
+        endif()
+      endif()
+    endif()
+    if(${required} AND NOT CVC_ARIADNE_WASM_FOUND)
+      if(CVC_ARIADNE_WASM_RUNTIME STREQUAL "wamr")
+        message(FATAL_ERROR "WebAssembly guests are required, and WAMR (the cvcpkg `wamr` "
+                            "package: iwasmConfig.cmake) isn't found")
+      else()
+        message(FATAL_ERROR "WebAssembly guests are required, and neither wasmtime (the cvcpkg "
+                            "`wasmtime` package) nor WAMR (`wamr`) is found")
+      endif()
     endif()
   endif()
 endmacro()
@@ -145,6 +191,54 @@ function(cvc_ariadne_wasm_test_guests target)
   message(STATUS "${target}: the test guests, transformed by ${CVC_WASM_OPT}")
 endfunction()
 
+# The WAMR backend in <target> (cvc_ariadne_wasm_host, G3): wamr_runtime.cpp on WAMR's wasm-c-api
+# and wamr_load.cpp on its native API, both in the static libiwasm, and wasm_transform.cpp where
+# binaryen is found. binaryen's C++ headers (include/binaryen: "wasm.h", "ir/...", "support/...")
+# are on wasm_transform.cpp's include path only, so their names shadow nothing in the host's
+# other files, and outside MSVC that file is built without RTTI, as libbinaryen is.
+function(_cvc_ariadne_wasm_wamr target)
+  target_sources(${target} PRIVATE "${_CVC_ARIADNE_WASM_DIR}/wamr_runtime.cpp"
+                                   "${_CVC_ARIADNE_WASM_DIR}/wamr_load.cpp")
+  target_link_libraries(${target} PRIVATE iwasm::iwasm)
+  # The backend pauses guests by Asyncify, as the browser's does (the tests' cases for that).
+  target_compile_definitions(${target} PRIVATE CVC_ARIADNE_WASM_WAMR)
+  if(WIN32)
+    # The static libiwasm.lib: its declarations without dllimport (wasm_c_api.h, wasm_export.h).
+    target_compile_definitions(${target} PRIVATE WASM_API_EXTERN= WASM_RUNTIME_API_EXTERN=)
+    target_link_libraries(${target} PRIVATE ntdll ws2_32)
+  endif()
+  get_target_property(_lib iwasm::iwasm IMPORTED_LOCATION)
+  if(TARGET binaryen::binaryen)
+    set(_t "${_CVC_ARIADNE_WASM_DIR}/wasm_transform.cpp")
+    target_sources(${target} PRIVATE "${_t}")
+    target_compile_definitions(${target} PRIVATE CVC_ARIADNE_WASM_BINARYEN)
+    get_target_property(_binc binaryen::binaryen INTERFACE_INCLUDE_DIRECTORIES)
+    get_target_property(_bdefs binaryen::binaryen INTERFACE_COMPILE_DEFINITIONS)
+    get_target_property(_blib binaryen::binaryen IMPORTED_LOCATION)
+    get_target_property(_bdeps binaryen::binaryen INTERFACE_LINK_LIBRARIES)
+    set_property(SOURCE "${_t}" TARGET_DIRECTORY ${target} APPEND PROPERTY INCLUDE_DIRECTORIES
+                 ${_binc})
+    if(_bdefs)
+      set_property(SOURCE "${_t}" TARGET_DIRECTORY ${target} APPEND PROPERTY COMPILE_DEFINITIONS
+                   ${_bdefs})
+    endif()
+    if(NOT MSVC)
+      set_property(SOURCE "${_t}" TARGET_DIRECTORY ${target} APPEND PROPERTY COMPILE_OPTIONS
+                   -fno-rtti)
+    endif()
+    # The library by its file, without the target's include directories.
+    target_link_libraries(${target} PRIVATE "${_blib}")
+    if(_bdeps)
+      target_link_libraries(${target} PRIVATE ${_bdeps})
+    endif()
+    message(STATUS "${target}: WebAssembly guests (WAMR: ${_lib}; binaryen: ${_blib}, so any "
+                   "guest, and the text format)")
+  else()
+    message(STATUS "${target}: WebAssembly guests (WAMR: ${_lib}; no binaryen, so only guests "
+                   "transformed at install)")
+  endif()
+endfunction()
+
 function(cvc_ariadne_wasm_host target)
   cmake_parse_arguments(_w "INSTALL;ASYNC_LOAD" "" "" ${ARGN})
   target_sources(${target} PRIVATE "${_CVC_ARIADNE_WASM_DIR}/wasm_engine.cpp"
@@ -162,6 +256,10 @@ function(cvc_ariadne_wasm_host target)
     else()
       message(STATUS "${target}: WebAssembly guests (the browser's own WebAssembly)")
     endif()
+    return()
+  endif()
+  if(CVC_ARIADNE_WASM_BACKEND STREQUAL "wamr")
+    _cvc_ariadne_wasm_wamr(${target})
     return()
   endif()
   target_sources(${target} PRIVATE "${_CVC_ARIADNE_WASM_DIR}/wasmtime_runtime.cpp")

@@ -74,9 +74,10 @@
 #               bundle (cy-pca/cvcpkg#638). libcvc, ari, ari-media and arisrv in debug too.
 #   * Windows has no debug row (see the matrix exclude): a debug build there needs debug
 #               builds of its C++ deps, which the catalog lacks.
-#   * FreeBSD, OpenBSD, NetBSD — libcvc + ari + arisrv + ari-media + arisrvx + cvcgl + arigl +
-#               pycvc-cp312, release only (Haiku: libcvc + ari have rows, not submitted yet;
-#               see fleet-bsd-haiku). Built by the cvcpkg.org fleet, not here
+#   * FreeBSD, OpenBSD, NetBSD — libcvc + ari + arisrv + ari-media + arix (its wasm guests on
+#               WAMR) + arisrvx + cvcgl + arigl + pycvc-cp312, release only (Haiku: libcvc
+#               + ari have rows, not submitted yet; see fleet-bsd-haiku). Built by the
+#               cvcpkg.org fleet, not here
 #               (GitHub has no such runners): push-recipes pushes the recipes with this run's
 #               tarball as their source, and fleet-bsd-haiku submits them as one DAG, for the
 #               columns each recipe's matrix names.
@@ -324,7 +325,7 @@ jobs:
             --recipes-dir "$RUNNER_TEMP/recipes" \
             --dag-id "$dag" --no-deps --skip-existing \
             --wait --wait-timeout 6000 \
-            libcvc ari arisrv ari-media arisrvx cvcgl arigl pycvc-cp312
+            libcvc ari arisrv ari-media arix arisrvx cvcgl arigl pycvc-cp312
           rc=$?
           if [ "$rc" = 75 ]; then
             echo "::notice::Still building on the fleet after 100 min, nothing failed; the bundles publish when they finish ($CVCPKG_SERVER/v1/builds?dag_id=$dag)."

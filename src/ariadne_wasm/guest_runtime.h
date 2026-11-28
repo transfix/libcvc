@@ -1,9 +1,9 @@
 // guest_runtime.h — the WebAssembly runtimes behind the wasm engine, behind one interface
 // (docs/roadmap/ARIADNE_SCRIPTING_HOSTS.md §8.3): compile a module, instantiate it with the
 // host's imports, start a call of an export, and run it a slice of gas at a time, pausing at an
-// import that has to wait. wasmtime is the backend natively (wasmtime_runtime.cpp), and the page's
-// own WebAssembly in the browser (browser_runtime.cpp, G2); WAMR comes later (G3) under the same
-// calls.
+// import that has to wait. wasmtime is the backend natively (wasmtime_runtime.cpp), WAMR where
+// there is no wasmtime, the BSDs and Haiku (wamr_runtime.cpp, G3), and the page's own WebAssembly
+// in the browser (browser_runtime.cpp, G2).
 //
 // Gas is what the gas pass counts (meter.h), so a guest's work counts the same in every runtime:
 // each block's cost, charged against the guest's own ari_gas global, and a call of ari.gas when the
@@ -11,9 +11,10 @@
 // guests transformed at install (cvc_ariadne_wasm_transform, ariadne_wasm.cmake): metered, then
 // binaryen's `wasm-opt --asyncify --pass-arg=asyncify-imports@ari.* -O1`, so that every `ari`
 // import, ari.gas among them, is a point the guest may pause at. The browser unwinds the guest's
-// stack into its own memory there, and rewinds it to the same point on the next poll. wasmtime runs
-// the transformed guests as it runs the originals: they're metered already, and their Asyncify
-// exports go unused.
+// stack into its own memory there, and rewinds it to the same point on the next poll. WAMR can't
+// pause a call either, and pauses a guest the same way; it transforms a guest that wasn't, as it
+// loads it, where the host links binaryen (wasm_transform.h). wasmtime runs the transformed guests
+// as it runs the originals: they're metered already, and their Asyncify exports go unused.
 //
 // Everything here runs on the thread that drains the runtime. One call runs on an instance at a
 // time (a store allows one future), and the engine enforces it.
@@ -157,8 +158,8 @@ public:
                                                 std::string &error) = 0;
 };
 
-// This build's runtime (wasmtime natively, the page's WebAssembly under Emscripten). Null with
-// `error` set when it can't start.
+// This build's runtime (wasmtime or WAMR natively, as cvc_find_ariadne_wasm chose; the page's
+// WebAssembly under Emscripten). Null with `error` set when it can't start.
 std::unique_ptr<Runtime> make_runtime(std::string &error);
 
 } // namespace wasm

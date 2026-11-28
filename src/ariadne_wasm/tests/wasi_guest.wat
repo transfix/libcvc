@@ -147,7 +147,7 @@
     (call $put_e (call $fd_filestat_get (i32.const 1) (i32.const 1072)))
     (call $put (i64.load8_u (i32.const 1088)))
     (call $put (i64.load (i32.const 1104)))
-    (call $put_e (call $fd_write (i32.const 1) (i32.const 32768) (i32.const 1024) (i32.const 1024)))
+    (call $put_e (call $fd_write (i32.const 1) (i32.const 57344) (i32.const 1024) (i32.const 1024)))
     (call $put_e (call $fd_write (i32.const 1) (i32.const 64) (i32.const 1025) (i32.const 1024)))
     (call $end))
   ;; (sleep): [poll_oneoff's errno for a 1 ms sleep on the monotonic clock, the events it gave,
@@ -177,7 +177,7 @@
   (func (export "writes") (param $p i32) (param $n i32) (result i64) (local $i i32) (local $k i32)
     (local.set $k (i32.mul (call $arg (local.get $p)) (i32.const 100)))
     (loop $l
-      (drop (call $fd_write (i32.const 1) (i32.const 32768) (i32.const 1024) (i32.const 1024)))
+      (drop (call $fd_write (i32.const 1) (i32.const 57344) (i32.const 1024) (i32.const 1024)))
       (local.set $i (i32.add (local.get $i) (i32.const 1)))
       (br_if $l (i32.lt_u (local.get $i) (local.get $k))))
     (i64.const 0))

@@ -86,9 +86,10 @@ if(NOT EMSCRIPTEN AND (CVC_BUILD_PYCVC OR ARISRV_WITH_PYTHON))
     endif()
     cvc_ariadne_python_host(arisrvx SERVER)
     # ... and clients' WebAssembly guests (client_guests:, roadmap §6.3 and §8.6, G4) where
-    # wasmtime's C API is found (src/ariadne_wasm); with -DARISRV_WITH_WASM=ON a missing one is a
-    # configure error. Stock arisrv carries no wasm runtime.
-    option(ARISRV_WITH_WASM "arisrvx requires WebAssembly guests (wasmtime's C API)" OFF)
+    # a runtime is found (src/ariadne_wasm: wasmtime's C API, or WAMR's where there is no wasmtime);
+    # with -DARISRV_WITH_WASM=ON a missing one is a configure error. Stock arisrv carries no wasm
+    # runtime.
+    option(ARISRV_WITH_WASM "arisrvx requires WebAssembly guests (wasmtime's or WAMR's C API)" OFF)
     include("${CMAKE_CURRENT_LIST_DIR}/../ariadne_wasm/ariadne_wasm.cmake")
     cvc_find_ariadne_wasm(ARISRV_WITH_WASM)
     set(ARISRVX_WASM ${CVC_ARIADNE_WASM_FOUND})
