@@ -369,7 +369,7 @@ TEST(Mol1grl, AGroElSubunit) {
 TEST(MolFiles, ReadsByExtension) {
   cvc::app app;
   const std::vector<std::string> ext = mol::molecule_read_extensions(app);
-  EXPECT_EQ(ext, (std::vector<std::string>{".ent", ".pdb", ".pqr", ".xyzr"}));
+  EXPECT_EQ(ext, (std::vector<std::string>{".ent", ".pdb", ".pdb1", ".pqr", ".pts", ".xyzr"}));
   const fs::path d = temp_dir();
   write(d / "a.PQR", "ATOM 1 CA ALA 1 1 2 3 0.5 1.7\n");
   write(d / "a.xyzr", "1 2 3 1.5\n4 5 6 1.5\n");
@@ -415,8 +415,8 @@ TEST(MolFiles, EachAppHasItsOwnHandlers) {
   cvc::app a, b;
   ASSERT_TRUE(
       mol::molecule_handlers(a).insert(boost::shared_ptr<mol::molecule_file_io>(new mol2_stub)));
-  EXPECT_EQ(mol::molecule_read_extensions(a).size(), 5u);
-  EXPECT_EQ(mol::molecule_read_extensions(b).size(), 4u);
+  EXPECT_EQ(mol::molecule_read_extensions(a).size(), 7u);
+  EXPECT_EQ(mol::molecule_read_extensions(b).size(), 6u);
   const fs::path d = temp_dir();
   write(d / "x.mol2", "");
   EXPECT_EQ(mol::read_molecule(a, (d / "x.mol2").string()).atoms.size(), 1u);
@@ -558,10 +558,10 @@ TEST(MolWrite, XyzrReadsBackExactly) {
 TEST(MolWrite, ByExtensionThroughTheApp) {
   cvc::app app;
   EXPECT_EQ(mol::molecule_write_extensions(app),
-            (std::vector<std::string>{".ent", ".pdb", ".pqr", ".xyzr"}));
+            (std::vector<std::string>{".ent", ".pdb", ".pdb1", ".pqr", ".pts", ".xyzr"}));
   const mol::molecule m = every_model(kPdb);
   const fs::path d = temp_dir();
-  for (const char *name : {"a.pdb", "a.ent", "a.pqr", "a.xyzr"}) {
+  for (const char *name : {"a.pdb", "a.ent", "a.pdb1", "a.pqr", "a.xyzr", "a.pts"}) {
     SCOPED_TRACE(name);
     mol::write_molecule(app, m, (d / name).string());
     mol::molecule_read_params p;
@@ -584,4 +584,27 @@ TEST(MolWrite, ByExtensionThroughTheApp) {
       error_of([&] { mol::write_molecule(other, m, (d / "a.mol2").string()); }).find("no writer"),
       std::string::npos);
   fs::remove_all(d);
+}
+
+TEST(MolPts, ACountThenPoints) {
+  std::istringstream in("# TexMol's points\n3\n1 2 3 1.5\n4 5 6 1.6\n7 8 9 1.7\n");
+  const mol::molecule m = mol::read_pts(in);
+  ASSERT_EQ(m.atoms.size(), 3u);
+  EXPECT_EQ(m.atoms[2].x, 7.0);
+  EXPECT_EQ(m.atoms[2].radius, 1.7);
+  EXPECT_EQ(m.atoms[2].serial, 3);
+  // A count that doesn't match the points: read anyway, as TexMol did.
+  std::istringstream more("5\n1 2 3 1.5\n");
+  EXPECT_EQ(mol::read_pts(more).atoms.size(), 1u);
+  std::istringstream bad_count("three\n1 2 3 1.5\n");
+  EXPECT_NE(error_of([&] { mol::read_pts(bad_count, "x.pts"); }).find("x.pts:1"),
+            std::string::npos);
+  std::istringstream bad_line("1\n1 2 3\n");
+  EXPECT_NE(error_of([&] { mol::read_pts(bad_line); }).find("not four"), std::string::npos);
+  // And back.
+  std::ostringstream out;
+  mol::write_pts(out, m);
+  std::istringstream back(out.str());
+  EXPECT_EQ(out.str().substr(0, 2), "3\n");
+  EXPECT_EQ(mol::read_pts(back).atoms.size(), 3u);
 }

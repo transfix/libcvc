@@ -318,7 +318,7 @@ void decode_molecule(DataDecode &d) {
   const auto &f = only_file(d);
   const std::string ext = extension(f.path);
   cvc::mol::molecule m;
-  if (ext == ".pdb" || ext == ".ent" || ext == ".pqr" || ext == ".xyzr") {
+  if (ext == ".pdb" || ext == ".ent" || ext == ".pdb1" || ext == ".pqr" || ext == ".xyzr") {
     std::istringstream in(*f.bytes);
     if (ext == ".pqr")
       m = cvc::mol::read_pqr(in, {}, f.path);
@@ -516,7 +516,7 @@ std::string default_decoder(bool many, const std::string &name) {
       return "volume";
   if (ext == ".vgr")
     return "point_classes";
-  if (ext == ".pdb" || ext == ".ent" || ext == ".pqr" || ext == ".xyzr")
+  if (ext == ".pdb" || ext == ".ent" || ext == ".pdb1" || ext == ".pqr" || ext == ".xyzr")
     return "molecule";
   if (ext == ".ser" || ext == ".contour" || ext == ".cvcc")
     return "contours";

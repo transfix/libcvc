@@ -275,7 +275,7 @@ public:
 
 private:
   std::string _id = "pdb : v1";
-  std::vector<std::string> _ext{".pdb", ".ent"};
+  std::vector<std::string> _ext{".pdb", ".ent", ".pdb1"};
 };
 
 class pqr_io : public molecule_file_io {
@@ -320,6 +320,27 @@ private:
   std::vector<std::string> _ext{".xyzr"};
 };
 
+class pts_io : public molecule_file_io {
+public:
+  bool can_write() const override { return true; }
+  void write(app &, const molecule &m, const std::string &filename) const override {
+    write_to(filename, m, write_pts);
+  }
+  const std::string &id() const override { return _id; }
+  const std::vector<std::string> &extensions() const override { return _ext; }
+  bool can_read() const override { return true; }
+  molecule read(app &, const std::string &filename, const molecule_read_params &) const override {
+    std::ifstream in(fs::path(filename), std::ios::binary);
+    if (!in)
+      throw molecule_file_error("read_molecule: can't open '" + filename + "'");
+    return read_pts(in, filename);
+  }
+
+private:
+  std::string _id = "pts : v1";
+  std::vector<std::string> _ext{".pts"};
+};
+
 // The app's molecule handlers: app.slot<T>() makes one per app, with the built-in formats, the
 // first time it is asked (§1.3: no process-wide table).
 struct molecule_io_slot {
@@ -329,6 +350,7 @@ struct molecule_io_slot {
     handlers.insert(boost::shared_ptr<molecule_file_io>(new pdb_io));
     handlers.insert(boost::shared_ptr<molecule_file_io>(new pqr_io));
     handlers.insert(boost::shared_ptr<molecule_file_io>(new xyzr_io));
+    handlers.insert(boost::shared_ptr<molecule_file_io>(new pts_io));
   }
 };
 
@@ -598,6 +620,48 @@ molecule read_xyzr(std::istream &in, const std::string &name) {
 
 // ---- files ----
 
+molecule read_pts(std::istream &in, const std::string &name) {
+  molecule m;
+  std::string raw;
+  std::size_t n = 0;
+  bool counted = false;
+  while (std::getline(in, raw)) {
+    ++n;
+    const std::string_view line = trim(raw);
+    if (line.empty() || line.front() == '#')
+      continue;
+    std::istringstream ss{std::string(line)};
+    std::vector<std::string> t;
+    for (std::string w; ss >> w;)
+      t.push_back(w);
+    if (!counted) {
+      int count = 0;
+      if (t.size() != 1 || !to_int(t[0], count) || count < 0)
+        throw molecule_file_error(where(name, n) + ": '" + std::string(line) +
+                                  "' is not a count of points");
+      counted = true;
+      m.atoms.reserve(static_cast<std::size_t>(count));
+      continue;
+    }
+    if (t.size() != 4)
+      throw molecule_file_error(where(name, n) + ": " + std::to_string(t.size()) +
+                                " fields, not four (x y z radius)");
+    atom a;
+    a.serial = static_cast<int>(m.atoms.size()) + 1;
+    double *const v[4] = {&a.x, &a.y, &a.z, &a.radius};
+    for (int i = 0; i < 4; ++i)
+      if (!to_double(t[static_cast<std::size_t>(i)], *v[i]))
+        throw molecule_file_error(where(name, n) + ": '" + t[static_cast<std::size_t>(i)] +
+                                  "' is not a number");
+    if (a.radius < 0)
+      throw molecule_file_error(where(name, n) + ": the radius is negative");
+    m.atoms.push_back(std::move(a));
+  }
+  if (in.bad())
+    throw molecule_file_error(name + ": can't read it");
+  return m;
+}
+
 molecule molecule_file_io::read(app &, const std::string &filename,
                                 const molecule_read_params &) const {
   throw molecule_file_error("read_molecule: '" + filename + "': the " + id() +
@@ -772,6 +836,11 @@ void write_pqr(std::ostream &out, const molecule &m) {
       out << "ENDMDL\n";
   });
   out << "END\n";
+}
+
+void write_pts(std::ostream &out, const molecule &m) {
+  out << m.atoms.size() << "\n";
+  write_xyzr(out, m);
 }
 
 void write_xyzr(std::ostream &out, const molecule &m) {
