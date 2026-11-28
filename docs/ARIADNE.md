@@ -5194,6 +5194,12 @@ mounted scene are named after the mount, so two documents' views of one name nev
 `fill: true` makes a viewport as wide and as tall as the rest of its window (the scene window's
 does).
 
+Only cvcGL's windowed host draws a mounted document's scene. `ari` on FTXUI or tvision has no scene
+adapter (no `gl.scene`): a `mounts:` slot there refuses a document with a scene, and a `load:` runs
+without its scene, with a warning. arigl's terminal scene (TerminalScene) draws only the document's
+own scene, and ignores a mounted one with a warning. Either way the mount's scene window stays
+hidden (`<sub>.ariadne.scene` stays 0), and the Windows menu does not list it.
+
 **Groups in one scene.** Where the "scenes" should share the lights and the shadows, make them
 tagged groups of one scene. `main_view: { show: [...], hide: [...] }` in `scene:` picks the groups
 the main view draws, as a viewport's `show:` / `hide:` do, and the main camera is framed on them.

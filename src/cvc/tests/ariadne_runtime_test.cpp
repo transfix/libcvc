@@ -14717,6 +14717,71 @@ root:
   fs::remove_all(dir);
 }
 
+// docs/roadmap/ARIADNE_SHELL.md 4.3 (SH3) on a host that draws no mounted scene (ari's terminals,
+// with no scene adapter; an adapter whose realize_mount says no): a load:'s scene is ignored with
+// a warning, its scene window stays hidden, and the Windows menu does not offer it. Where the
+// scene is drawn, the menu lists it under the application's name.
+TEST(AriadneMounts, AHostThatDrawsNoSceneListsNoSceneWindow) {
+  const fs::path dir = fs::temp_directory_path() / "ariadne_mounts_no_scene";
+  fs::remove_all(dir);
+  write_doc(dir, "spin.ari", R"(meta: { name: Spinner, min_libcvc: "0.0.0" }
+scene:
+  nodes:
+    - { node: box, source: { primitive: cube } }
+)");
+  const fs::path host = write_doc(dir, "host.ari", R"(meta: { name: Host, min_libcvc: "0.0.0" }
+root:
+  - window: Main
+  - load: spin.ari
+    as: sp
+)");
+  struct Drawn : SceneAdapter {
+    bool draws = false;
+    void realize(const Scene &, const std::string &, std::vector<std::string> *) override {}
+    bool realize_mount(const std::string &, const Scene &, const std::vector<Scene> &,
+                       const std::string &, std::vector<std::string> *) override {
+      return draws;
+    }
+    void sync_visibility(cvc::app &) override {}
+    void tick() override {}
+  };
+  struct Case {
+    const char *what;
+    bool adapter, draws;
+  };
+  for (const Case c : {Case{"no scene adapter (ari)", false, false},
+                       Case{"an adapter that draws no mounted scene", true, false},
+                       Case{"an adapter that draws it", true, true}}) {
+    SCOPED_TRACE(c.what);
+    Drawn scene;
+    scene.draws = c.draws;
+    cvc::app app;
+    AppRuntime art(app, "ui", c.adapter ? &scene : nullptr);
+    TrayBackend be;
+    art.set_backend(be);
+    art.load((dir / "host.ari").string());
+    for (int i = 0; i < 4; ++i) {
+      be.log.clear();
+      art.runtime().render();
+      art.drain();
+    }
+    be.log.clear();
+    art.runtime().render(); // a frame after the mount's scene was settled
+    EXPECT_EQ(sval(app, "ui.includes.sp.ariadne.scene"), c.draws ? "1" : "0");
+    EXPECT_TRUE(be.saw("toggle:Main")) << be.dump();
+    EXPECT_EQ(be.saw("toggle:Spinner"), c.draws) << be.dump();
+    if (!c.adapter) {
+      bool warned = false;
+      for (const std::string &w : art.runtime().take_reactive_warnings())
+        warned = warned || w.find("this host draws no scene") != std::string::npos;
+      for (const cvc::notification_entry &e : cvc::notifications(app))
+        warned = warned || e.text.find("this host draws no scene") != std::string::npos;
+      EXPECT_TRUE(warned) << "the scene is ignored aloud";
+    }
+  }
+  fs::remove_all(dir);
+}
+
 TEST(AriadneMounts, TheShippedExamplesKeepWithinTheLocalBudget) {
   const fs::path root = fs::path(__FILE__).parent_path().parent_path().parent_path().parent_path();
   const fs::path docs = root / "examples" / "ariadne" / "documents";

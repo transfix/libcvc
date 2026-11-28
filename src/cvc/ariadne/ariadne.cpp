@@ -2617,6 +2617,10 @@ struct Runtime::Impl {
     // raise paths.
     struct Item {
       std::string title, open_path, raise_path;
+      // Listed only while this key is "1": a mount's scene window (ARIADNE_SHELL.md 4.3), at
+      // <sub>.ariadne.scene, which only a host that drew its scene sets. Elsewhere (ari's
+      // terminals, a scene adapter that draws no mounted scene) the window never shows.
+      std::string when_path;
     };
     std::vector<Item> items;
     // The windows a `repeat:` makes (conference_roster's per-peer cameras): their template in
@@ -2819,6 +2823,7 @@ struct Runtime::Impl {
   };
   std::vector<RepeatedWindow> repeated_windows(); // this frame's instances
   bool windows_menu_has_items();                  // anything to list this frame
+  bool windows_menu_listed(const WindowsMenuPlan::Item &it); // its when_path, if any, is "1"
   void emit_windows_menu(const std::string &title);
   void emit_windows_menu_items();
 
@@ -5932,6 +5937,8 @@ void Runtime::Impl::plan_windows_menu() {
         windows.push_back({w.label.empty() ? id : w.label,
                            resolve_bind(scope, "tree." + id + ".open"),
                            resolve_bind(scope, "tree." + id + ".raise")});
+        if (mount && id == kSceneWindowId) // the loader's scene window, shown as its scene is
+          windows.back().when_path = resolve_bind(scope, "ariadne.scene");
         p.any_closable = p.any_closable || w.closable;
         in_menubar = false;
         break;
@@ -5989,9 +5996,14 @@ std::vector<Runtime::Impl::RepeatedWindow> Runtime::Impl::repeated_windows() {
   return out;
 }
 
+bool Runtime::Impl::windows_menu_listed(const WindowsMenuPlan::Item &it) {
+  return it.when_path.empty() || read_string(app, it.when_path) == "1";
+}
+
 bool Runtime::Impl::windows_menu_has_items() {
-  return !windows_menu.items.empty() || !frame_apps.empty() ||
-         (!windows_menu.repeated.empty() && !repeated_windows().empty());
+  return std::any_of(windows_menu.items.begin(), windows_menu.items.end(),
+                     [&](const WindowsMenuPlan::Item &it) { return windows_menu_listed(it); }) ||
+         !frame_apps.empty() || (!windows_menu.repeated.empty() && !repeated_windows().empty());
 }
 
 void Runtime::Impl::emit_windows_menu(const std::string &title) {
@@ -6018,8 +6030,9 @@ void Runtime::Impl::emit_windows_menu_items() {
     }
   };
   for (const WindowsMenuPlan::Item &it : windows_menu.items)
-    if (quit_apps.empty() || app_running(it.open_path)) // §5.25 a quit application's come back
-      item(it.title, it.open_path, it.raise_path);      // with it
+    if ((quit_apps.empty() || app_running(it.open_path)) && // §5.25 a quit application's come
+        windows_menu_listed(it))                            // back with it
+      item(it.title, it.open_path, it.raise_path);
   for (const RepeatedWindow &r : repeated_windows()) {
     b.push_id(r.id.c_str()); // two instances may share a title (the label, before their names)
     item(r.title, r.open_path, r.raise_path);
