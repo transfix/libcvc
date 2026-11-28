@@ -22,7 +22,7 @@ requires:
   - gl.scene                       # a scene renderer realizes the scene: block (arigl; not ari)
 
 import:
-  - cvc://components/contour_tiler.ari
+  - cvc://components/mesh/contour_tiler.ari
 
 # The main view opens low over where ax008 meets ax010 and its mitochondria (the sections are
 # stacked up z, 4 microns of them), on the right of the panel, once the scene is realized; ax006

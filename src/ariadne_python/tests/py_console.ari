@@ -1,4 +1,4 @@
-# The py_console component (components/py_console.ari) over a document's console: true, as
+# The py_console component (components/dev/py_console.ari) over a document's console: true, as
 # `arix test` runs it (ctest arix_py_console), and drawn in the terminal by `arix snapshot` (ctest
 # arix_py_console_terminal). Each test has a console of its own; they all share the document's
 # namespace, where the block defined double() and chatter(), an async export the threads test
@@ -12,7 +12,7 @@ meta:
 
 requires: [python]
 
-import: cvc://components/py_console.ari
+import: cvc://components/dev/py_console.ari
 
 python:
   console: true

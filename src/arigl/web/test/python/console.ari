@@ -8,7 +8,7 @@ meta:
 
 requires: [python]
 
-import: cvc://components/py_console.ari
+import: cvc://components/dev/py_console.ari
 
 python:
   console: true

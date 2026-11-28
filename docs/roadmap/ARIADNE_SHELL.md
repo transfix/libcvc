@@ -1,7 +1,8 @@
 # Ariadne shell: one document that hosts other documents
 
-*Draft design, 2026-11-22, with the decisions of 2026-11-23 in section 6. Nothing in it is
-built. The section numbers in [ARIADNE.md](../ARIADNE.md) are cited as §N.*
+*Draft design, 2026-11-22, with the decisions of 2026-11-23 in section 6. SH0, SH1, SH2, SH4, SH8
+and SH11 are built (their "As built" notes below); the rest is not. The section numbers in
+[ARIADNE.md](../ARIADNE.md) are cited as §N.*
 
 ## 1. Goal
 
@@ -126,7 +127,7 @@ windows:
   - window: Launcher                             # the catalog as a table, Open buttons
     children: [...]
 root:
-  - load: cvc://components/processes.ari         # 4.7
+  - load: cvc://components/dev/processes.ari         # 4.7
     as: processes
   - mounts: shell.apps                           # 4.2: one isolated mount per entry
     allow: { bind: shell.allow }                 # empty: any file or link (4.2, 4.13)
@@ -598,7 +599,7 @@ meta:
   `includes.fe` for a mount's. Runtime-started processes already carry their scope
   (`live_actions_`, the mounts' ticks). `process_info` gets it from the process's context. The
   threaded plan's published rows (state-exec-perf S2-Q9) carry it too.
-- **`components/processes.ari`** is a window with a table: application (its `scope` looked up in
+- **`components/dev/processes.ari`** is a window with a table: application (its `scope` looked up in
   `ariadne.apps`), pid, name, status, steps, what it waits on, memory, and a Kill button. Its
   `on_tick:` polls `(ps)` twice a second into its own state, with a cap on the rows. The outermost
   document's rows are named by its `meta.name`.
@@ -1167,7 +1168,7 @@ ship drawn under the UI.
 
 | Phase | Content | Tests |
 |---|---|---|
-| SH0 | `scope` on `(ps)` and `(inspect)` rows; the `ariadne.apps.*` mirror; `components/processes.ari` | runtime: a mount's resident is listed with its scope; Kill from the view; `ari test` on the component |
+| SH0 | `scope` on `(ps)` and `(inspect)` rows; the `ariadne.apps.*` mirror; `components/dev/processes.ari` | runtime: a mount's resident is listed with its scope; Kill from the view; `ari test` on the component |
 | SH1 | `mounts:` and the verbs, `allow:`, the `requires:` check at mount; a `data:` entry's `uri: { arg }`; a budget per mount with defaults by principal and the shell's notice (4.11); `shell.ari` with a catalog of the example documents without scenes (`tray_demo`, `json_feed`, `apps/counter`) | runtime and loader: open, close (its memory freed), reopen with state kept, hot reload, refused URI, unmet `requires:`; a busy mount held to its budget while the others run; a tmux run on FTXUI |
 | SH2 | Views drawn into textures (4.4): every `viewport` renders into a texture of its own and draws it as an image in its window; no background hole. A cvcGL change every view gains from | goldens of a window over a view and a view's window over another window, each stacking right; a scrolled and a clipped view; the first frame drawn; picks still land |
 | SH3 | Scenes of mounted documents, for `load:` and `mounts:`: `realize_mount`, `clear_mount`, `viewport scene: { mount }`; the scene window (`view: window`), its scene's own renderer into a texture; a world clock per scene, at its `clock: hz` or the shell's rate; background worlds running, held by the setting or per application | loader: a fragment's scene is parsed; AriRuntime: two mounts' scenes realized apart, binds resolve under the sub-prefix; two worlds side by side step at their own rates, and one without a rate at the shell's; a held world is not stepped while its window is closed; a golden of two applications' scene windows overlapping, one with a `volren` node |

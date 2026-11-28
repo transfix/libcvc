@@ -27,7 +27,7 @@ requires:
   - gl.scene                       # a scene renderer realizes the scene: block (arigl; not ari)
 
 import:
-  - cvc://components/volume_grid.ari
+  - cvc://components/volume/volume_grid.ari
 
 # The trace waits in the request key until the volume is there. Every third plane from 5 (plane
 # 31 of this 64^3 field has a sliver signed inside at the grid's edge).

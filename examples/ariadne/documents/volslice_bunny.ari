@@ -19,8 +19,8 @@ requires:
 import:
   - cvc://components/stage_lighting.ari
   - cvc://components/camera_controls.ari
-  - cvc://components/volslice_controls.ari
-  - cvc://components/transfer_function.ari
+  - cvc://components/volume/volslice_controls.ari
+  - cvc://components/volume/transfer_function.ari
 
 menubar:
   - menu: Sim

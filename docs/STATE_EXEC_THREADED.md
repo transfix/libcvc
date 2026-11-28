@@ -3833,7 +3833,7 @@ the same programs' in one group, point by point (6.3).
 
 **Compatibility scan (S2b)**, at its cut and head (S2.md section 8):
 - `.ari` documents calling `ps`, `kill`, `pause`, `resume` or `inspect`: master's
-  `components/processes.ari` (#1499, the Ariadne shell's Processes view) and its test
+  `components/dev/processes.ari` (#1499, the Ariadne shell's Processes view) and its test
   `processes_component.ari`. Every process of a Runtime has its owner tag, a loaded document's
   too, so the component now lists only its own Runtime's processes in group 0, where it listed
   every document's (Q5's intent); its Kill acts on rows it listed, and its test's assertions hold.

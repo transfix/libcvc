@@ -1,8 +1,8 @@
 # VolumeRover and TexMol as Ariadne Applications — Roadmap (sketch)
 
 **Status:** 2026-11-28. Joe accepted every §9 recommendation, then moved PEDetection from "left
-behind" to a port, V11 (§9). CC1, PP1, V0, V1 and M0b have started, in parallel sessions; nothing
-of them has landed yet.
+behind" to a port, V11 (§9). CC1, PP1, V0, V1 and M0b have started, in parallel sessions. CC1 is
+built (§4.2, ARIADNE.md §6.5), with §7.6's fixes; the others have not landed yet.
 
 **Asked for (Joe, 2026-11-27):** "surely we arent done with the porting. we need whatever is left
 in volrover and texmol that we havent ported, then we need new versions of both volrover and texmol
@@ -610,6 +610,8 @@ generated panel, with its run and stop buttons and its result picker added by ha
 windows in §5 and §6 small. The jobs window is `jobs.ari`, planned by the TexMol plan's J1.
 
 ### 7.6 Documentation fixes found on the way
+
+All three were fixed with CC1.
 
 - ARIADNE_SHELL.md's status line ("Nothing in it is built").
 - ARIADNE.md §6.5 still says most components use a fixed node id, and its table misses seven

@@ -266,7 +266,7 @@ if(NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR AND NOT EMSCRIPTEN)
                    "-DEXPECT6=opened: nothing"
                    "-DREJECT1=last words here"
                    -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_snapshot.cmake")
-  # The Processes window's DSL (components/processes.ari): its rows by application, from (ps)'s
+  # The Processes window's DSL (components/dev/processes.ari): its rows by application, from (ps)'s
   # scope and the ariadne.apps mirror of the application it loads (tests/processes_app.ari).
   add_test(NAME ari_processes_component
            COMMAND ari test --component-path "${CMAKE_CURRENT_SOURCE_DIR}/../cvc/ariadne"

@@ -1,0 +1,43 @@
+# dev/INDEX.ari — the dev collection of the Ariadne component library (docs/ARIADNE.md §6.5):
+# the document's running programs (processes) and a Python console (py_console).
+#
+# Import a component by its path in the collection and include its unit:
+#
+#     import: cvc://components/dev/<file>.ari
+#     windows:
+#       - include: <unit>            # or, parametrized:  { include: <unit>, args: { node: myNode } }
+#
+# This file is in the top INDEX.ari's shape, and data-only like it: each catalog: entry's file: is
+# relative to this directory, and `nodes:` lists the scene node types the component can drive (any
+# one of them; [] for none). The top INDEX.ari's collections: lists this collection.
+
+meta:
+  name: "Ariadne components: dev"
+  description: Tools for working on a document, shipped with libcvc (import via cvc://components/dev/…).
+  min_libcvc: 4.0.10
+
+catalog:
+  - component: py_console
+    file: py_console.ari
+    unit: py_console
+    nodes: []
+    binds: "<prefix>.{id}.log (the scrollback), <prefix>.{id}.draft and <prefix>.tree.{id}.*"
+    for: "a Python console in the document's own namespace: a scrollback, an input line (Enter runs it, or Run under ImGui; Shift+Enter for a new line), and Clear"
+    args: { id: py_console, title: Python }
+    verbs: [python-console, python-console-clear]
+    note: "needs arix/ariglx/ariglx-web and console: true in the document's python: block (with requires: [python])"
+  - component: py_console_panel
+    file: py_console.ari
+    unit: py_console_panel
+    nodes: []
+    binds: "<prefix>.{id}.log, <prefix>.{id}.draft"
+    for: "the same console without a window, to embed in a document's own window"
+    args: { id: py_console }
+  - component: processes
+    file: processes.ari
+    unit: processes
+    nodes: []
+    binds: "<prefix>.{rows}.* rows (count, total, more, at, every, max, <i>.{pid,scope,app,name,status,steps,waits,memory}); reads <prefix>.ariadne.apps.* and <prefix>.ariadne.name (the Runtime's mirror)"
+    for: "the document's running DSL programs, a row each: the application each belongs to (from its (ps) scope), pid, name, status, steps, what it waits on, memory, and a Kill button (docs/roadmap/ARIADNE_SHELL.md 4.10)"
+    args: { id: processes, title: Processes, rows: processes }   # defaults
+    note: "call (processes-step ROWS) from on_tick: it polls (ps) twice a second (ROWS.every), at most ROWS.max rows (50); (processes-kill ROWS I) is the Kill button; each mounts: application's share of its budget goes in ROWS.apps.<i>.{name,principal,steps,time,memory,held}, from ariadne.apps.<key>.budget.*"

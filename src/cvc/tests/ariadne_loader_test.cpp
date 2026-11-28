@@ -5229,12 +5229,86 @@ TEST(AriadneModularity, ImportComponentViaCvcScheme) {
   fs::remove_all(root, ec);
 }
 
-// Every SHIPPED component (src/cvc/ariadne/components/*.ari, found from this file's location) is
-// imported through cvc:// and included the way a document does: it must expand to a window whose
-// widgets all parse and bind, and INDEX.ari must catalog it. A component's unit is named after
-// its file. The cvc:// search path is the SOURCE tree only: CVC_ARIADNE_PATH (searched first)
-// would otherwise serve, say, a stale installed copy of each component -- the test plants such a
-// decoy library on it to prove the source file is the one validated.
+namespace {
+
+// A component library index (components/INDEX.ari, or a collection's) read as data: its
+// catalog:, collections: and moved: lists, each a sequence of maps (empty where the file has
+// none). The loader leaves those blocks to tooling, so block parsers registered on a fresh app
+// hand them over.
+struct ComponentIndex {
+  bool ok = false;
+  std::string error;
+  Value catalog, collections, moved;
+};
+
+ComponentIndex read_component_index(const std::filesystem::path &file) {
+  cvc::app app;
+  ComponentIndex out;
+  register_ari_block(app, "catalog", [&out](const Value &v, LoadResult &) { out.catalog = v; });
+  register_ari_block(app, "collections",
+                     [&out](const Value &v, LoadResult &) { out.collections = v; });
+  register_ari_block(app, "moved", [&out](const Value &v, LoadResult &) { out.moved = v; });
+  const LoadResult r = load_file(app, file.string());
+  out.ok = r.ok;
+  out.error = r.error;
+  return out;
+}
+
+// `p`'s path in the component library rooted at `comps`, '/'-separated ("" for the root itself).
+std::string library_path(const std::filesystem::path &comps, const std::filesystem::path &p) {
+  const std::string rel = p.lexically_relative(comps).generic_string();
+  return rel == "." ? std::string() : rel;
+}
+
+// The unit names the library's files declare: each column-0 `units:` block's keys (two-space
+// indented under it), read from the text the way the component files write them.
+std::set<std::string> declared_unit_names(const std::filesystem::path &comps) {
+  std::set<std::string> names;
+  for (const auto &e : std::filesystem::recursive_directory_iterator(comps)) {
+    if (!e.is_regular_file() || e.path().extension() != ".ari")
+      continue;
+    std::ifstream in(e.path(), std::ios::binary);
+    bool in_units = false;
+    for (std::string line; std::getline(in, line);) {
+      if (!line.empty() && line.back() == '\r')
+        line.pop_back();
+      if (!line.empty() && line.front() != ' ' && line.front() != '#') {
+        in_units = line.rfind("units:", 0) == 0;
+      } else if (in_units && line.size() > 3 && line.compare(0, 2, "  ") == 0 &&
+                 (std::isalnum(static_cast<unsigned char>(line[2])) || line[2] == '_')) {
+        const std::size_t colon = line.find(':');
+        if (colon != std::string::npos)
+          names.insert(line.substr(2, colon - 2));
+      }
+    }
+  }
+  return names;
+}
+
+// A widget tree as text, to compare two expansions: each widget's kind, id, label and bind.
+std::string widget_outline(const Widget &w, int depth = 0) {
+  std::string out = std::string(static_cast<std::size_t>(depth) * 2, ' ') +
+                    std::to_string(static_cast<int>(w.kind)) + " " + w.id + " | " + w.label +
+                    " | " + w.bind + "\n";
+  for (const Widget &c : w.children)
+    out += widget_outline(c, depth + 1);
+  return out;
+}
+
+} // namespace
+
+// Every SHIPPED component (src/cvc/ariadne/components, found from this file's location) is
+// imported through cvc:// by its path in the library and included the way a document does: it
+// must expand to a window whose widgets all parse and bind, and the INDEX.ari of its directory
+// must catalog it. The walk is recursive: each subdirectory is a collection (docs/ARIADNE.md
+// §6.5) the top INDEX.ari lists, with an INDEX.ari of its own, and each file is keyed by its path
+// in the library (volume/volume_grid.ari). Every catalog entry names its file, its unit (or that
+// it is a document of its own) and the node types it drives (nodes:). A file's window is its entry
+// whose unit is named after the file, else its first. A top-level file that moved: lists is a
+// forwarder, which MovedComponentsForwardToTheirCollections checks. The cvc:// search path is the
+// SOURCE tree only: CVC_ARIADNE_PATH (searched first) would otherwise serve, say, a stale installed
+// copy of each component -- the test plants such a decoy library on it to prove the source file is
+// the one validated.
 TEST(AriadneComponents, ShippedComponentsLoadClean) {
   SKIP_WITHOUT_YAML();
   cvc::app app;
@@ -5243,18 +5317,59 @@ TEST(AriadneComponents, ShippedComponentsLoadClean) {
   const fs::path comps = ariadne_dir / "components";
   if (!fs::is_directory(comps))
     GTEST_SKIP() << "component sources not found at " << comps.string();
-  std::ifstream idx(comps / "INDEX.ari", std::ios::binary);
-  ASSERT_TRUE(idx.good()) << "INDEX.ari is missing";
-  const std::string index((std::istreambuf_iterator<char>(idx)), std::istreambuf_iterator<char>());
+  ASSERT_TRUE(fs::is_regular_file(comps / "INDEX.ari")) << "INDEX.ari is missing";
+  const ComponentIndex top = read_component_index(comps / "INDEX.ari");
+  ASSERT_TRUE(top.ok) << "INDEX.ari: " << top.error;
+
+  // The indexes by directory ("" the top): each collection the top lists is a directory with an
+  // INDEX.ari of its own, which has a catalog: only, and every directory is a listed collection.
+  std::map<std::string, ComponentIndex> indexes;
+  indexes.emplace("", top);
+  ASSERT_TRUE(top.collections.is_seq()) << "INDEX.ari has no collections: list";
+  for (const Value &c : top.collections.items) {
+    const std::string name = c.str("collection");
+    SCOPED_TRACE("collection " + name);
+    ASSERT_FALSE(name.empty());
+    EXPECT_EQ(c.str("index"), name + "/INDEX.ari");
+    ASSERT_TRUE(fs::is_regular_file(comps / name / "INDEX.ari")) << "its INDEX.ari is missing";
+    ComponentIndex idx = read_component_index(comps / name / "INDEX.ari");
+    ASSERT_TRUE(idx.ok) << idx.error;
+    EXPECT_TRUE(idx.collections.empty() && idx.moved.empty())
+        << "a collection's INDEX.ari lists no collections and no forwarders";
+    EXPECT_TRUE(indexes.emplace(name, std::move(idx)).second) << "listed twice";
+  }
+  for (const fs::directory_entry &e : fs::recursive_directory_iterator(comps))
+    if (e.is_directory())
+      EXPECT_EQ(indexes.count(library_path(comps, e.path())), 1u)
+          << library_path(comps, e.path()) << " is not a collection the top INDEX.ari lists";
+
+  // The forwarders at the old paths, and every catalog entry of every index.
+  std::set<std::string> forwarders;
+  for (const Value &m : top.moved.items)
+    forwarders.insert(m.str("file"));
+  for (const auto &[dir, idx] : indexes) {
+    const std::string index_file = dir.empty() ? "INDEX.ari" : dir + "/INDEX.ari";
+    ASSERT_TRUE(idx.catalog.is_seq()) << index_file << " has no catalog: list";
+    for (const Value &entry : idx.catalog.items) {
+      const std::string where = (dir.empty() ? "" : dir + "/") + entry.str("file");
+      SCOPED_TRACE(index_file + ": " + entry.str("component"));
+      EXPECT_TRUE(fs::is_regular_file(comps / where)) << "its file " << where << " is missing";
+      EXPECT_TRUE(entry.flag("document") || !entry.str("unit").empty()) << "it has no unit:";
+      const Value *nodes = entry.find("nodes");
+      EXPECT_TRUE(nodes && nodes->is_seq()) << "it has no nodes: list";
+      EXPECT_EQ(forwarders.count(where), 0u) << where << " is a forwarder, not a component";
+    }
+  }
 
   // A dev shell pointing CVC_ARIADNE_PATH at another component library (an installed
   // share/libcvc/ariadne): its copy of every shipped file is broken.
   const fs::path decoy = fs::temp_directory_path() / "ariadne_shipped_components_decoy";
-  fs::create_directories(decoy / "components");
-  for (const fs::directory_entry &e : fs::directory_iterator(comps)) {
+  for (const fs::directory_entry &e : fs::recursive_directory_iterator(comps)) {
     if (!e.is_regular_file())
       continue;
-    std::ofstream o(decoy / "components" / e.path().filename(), std::ios::binary);
+    const fs::path copy = decoy / "components" / e.path().lexically_relative(comps);
+    fs::create_directories(copy.parent_path());
+    std::ofstream o(copy, std::ios::binary);
     o << "units:\n  not_the_source: { text: Decoy }\n";
   }
   {
@@ -5263,39 +5378,52 @@ TEST(AriadneComponents, ShippedComponentsLoadClean) {
     register_cvc_uri_handler(app, {ariadne_dir.string()});
   }
   int checked = 0;
-  for (const fs::directory_entry &e : fs::directory_iterator(comps)) {
+  for (const fs::directory_entry &e : fs::recursive_directory_iterator(comps)) {
     const std::string file = e.path().filename().string();
     if (!e.is_regular_file() || e.path().extension() != ".ari" || file == "INDEX.ari")
       continue;
-    const std::string unit = e.path().stem().string();
-    SCOPED_TRACE(file);
-    const UriResult src = resolve(app, "cvc://components/" + file);
+    const std::string rel = library_path(comps, e.path());
+    const std::string dir = library_path(comps, e.path().parent_path());
+    SCOPED_TRACE(rel);
+    if (dir.empty() && forwarders.count(rel))
+      continue;
+    const UriResult src = resolve(app, "cvc://components/" + rel);
     std::error_code eq_ec;
     EXPECT_TRUE(src.ok && fs::equivalent(fs::path(src.canonical), e.path(), eq_ec))
-        << "cvc://components/" << file << " resolved to '" << src.canonical
+        << "cvc://components/" << rel << " resolved to '" << src.canonical
         << "', not the source file " << e.path().string();
-    // A component that is a document of its own (shell.ari: INDEX.ari says `document: true`) is
+    const auto idx = indexes.find(dir);
+    if (idx == indexes.end())
+      continue; // the directory walk above already failed it
+    const std::string stem = e.path().stem().string();
+    const Value *entry = nullptr;
+    for (const Value &c : idx->second.catalog.items)
+      if (c.str("file") == file &&
+          (!entry || (c.str("unit") == stem && entry->str("unit") != stem)))
+        entry = &c;
+    if (!entry) {
+      ADD_FAILURE() << (dir.empty() ? "INDEX.ari" : dir + "/INDEX.ari") << " does not list "
+                    << file;
+      continue;
+    }
+    // A component that is a document of its own (shell.ari: its entry says `document: true`) is
     // run, not imported: it loads clean as it is.
-    const std::size_t entry = index.find("file: " + file);
-    const std::size_t next = index.find("- component:", entry == std::string::npos ? 0 : entry);
-    if (entry != std::string::npos &&
-        index.substr(entry, next == std::string::npos ? std::string::npos : next - entry)
-                .find("document: true") != std::string::npos) {
+    if (entry->flag("document")) {
       const LoadResult d = load_file(app, e.path().string());
       ASSERT_TRUE(d.ok) << d.error;
       EXPECT_TRUE(d.schema_issues.empty()) << d.schema_issues.front().text();
       for (const std::string &w : d.warnings)
-        ADD_FAILURE() << file << ": " << w;
+        ADD_FAILURE() << rel << ": " << w;
       ++checked;
       continue;
     }
+    const std::string unit = entry->str("unit");
     LoadResult r = load_string(app, "meta: { min_libcvc: \"0.0.0\" }\nimport: cvc://components/" +
-                                        file + "\nwindows:\n  - include: " + unit + "\n");
+                                        rel + "\nwindows:\n  - include: " + unit + "\n");
     ASSERT_TRUE(r.ok) << r.error;
-    // A window, or a widget to embed in a document's own window (card.ari's card).
-    const bool embeddable = index.find("file: " + file) != std::string::npos &&
-                            index.find("not a window: include it") != std::string::npos &&
-                            unit == "card";
+    // A window, or a widget to embed in a document's own window (card.ari's card, whose entry
+    // says it is not a window).
+    const bool embeddable = entry->str("note").find("not a window") != std::string::npos;
     EXPECT_TRUE(
         find(r.root, Kind::Window) != nullptr ||
         (embeddable && !r.root.children.empty() && r.root.children.front().kind == Kind::Group))
@@ -5307,12 +5435,139 @@ TEST(AriadneComponents, ShippedComponentsLoadClean) {
       EXPECT_EQ(w.find("could not be resolved"), std::string::npos) << w;
       EXPECT_EQ(w.find("parse error"), std::string::npos) << w;
     }
-    EXPECT_NE(index.find("file: " + file), std::string::npos) << "INDEX.ari does not list " << file;
     ++checked;
   }
-  EXPECT_GE(checked, 15); // the 14 components shipped with transfer_function, and card
+  EXPECT_GE(checked, 40); // the library, its collections included
   std::error_code ec;
   fs::remove_all(decoy, ec);
+}
+
+// A component that moved into a collection left a forwarder at its old path (the top INDEX.ari's
+// moved:): a document that imports the new path and says nothing else. Through either path a
+// document gets the same units, each expanding to the same widgets, and the same functions, so one
+// that names the old path loads as before (docs/ARIADNE.md §6.5). The probe includes every unit the
+// library declares: the ones a path doesn't bring warn as unknown, the same ones both ways.
+TEST(AriadneComponents, MovedComponentsForwardToTheirCollections) {
+  SKIP_WITHOUT_YAML();
+  cvc::app app;
+  namespace fs = std::filesystem;
+  const fs::path ariadne_dir = fs::path(__FILE__).parent_path().parent_path() / "ariadne";
+  const fs::path comps = ariadne_dir / "components";
+  if (!fs::is_directory(comps))
+    GTEST_SKIP() << "component sources not found at " << comps.string();
+  const ComponentIndex top = read_component_index(comps / "INDEX.ari");
+  ASSERT_TRUE(top.ok) << top.error;
+  ASSERT_GE(top.moved.items.size(), 10u); // the ten CC1 moved
+  {
+    ScopedEnv hermetic("CVC_ARIADNE_PATH", nullptr); // the source tree only
+    register_cvc_uri_handler(app, {ariadne_dir.string()});
+  }
+  const std::set<std::string> units = declared_unit_names(comps);
+  ASSERT_GE(units.size(), 40u);
+  std::string probe = "windows:\n";
+  for (const std::string &u : units)
+    probe += "  - include: " + u + "\n";
+  const auto function_names = [](const LoadResult &r) {
+    std::vector<std::string> names;
+    for (const FunctionDef &f : r.functions)
+      names.push_back(f.name);
+    return names;
+  };
+  for (const Value &m : top.moved.items) {
+    const std::string file = m.str("file"), to = m.str("to");
+    SCOPED_TRACE(file + " -> " + to);
+    ASSERT_EQ(file.find('/'), std::string::npos) << "a forwarder sits at the top";
+    EXPECT_TRUE(fs::is_regular_file(comps / to)) << "its target is missing";
+    // The forwarder imports the new path, and that is all it says.
+    std::ifstream in(comps / file, std::ios::binary);
+    ASSERT_TRUE(in.good()) << "the forwarder is missing";
+    std::vector<std::string> lines;
+    for (std::string line; std::getline(in, line);) {
+      if (!line.empty() && line.back() == '\r')
+        line.pop_back();
+      if (!line.empty() && line.front() != '#')
+        lines.push_back(line);
+    }
+    EXPECT_EQ(lines, std::vector<std::string>{"import: cvc://components/" + to});
+    const auto through = [&](const std::string &path) {
+      return load_string(app, "meta: { min_libcvc: \"0.0.0\" }\nimport: cvc://components/" + path +
+                                  "\n" + probe);
+    };
+    const LoadResult old_path = through(file), new_path = through(to);
+    ASSERT_TRUE(old_path.ok) << old_path.error;
+    ASSERT_TRUE(new_path.ok) << new_path.error;
+    EXPECT_EQ(old_path.warnings, new_path.warnings);
+    EXPECT_EQ(widget_outline(old_path.root), widget_outline(new_path.root));
+    EXPECT_EQ(function_names(old_path), function_names(new_path));
+    // ...and either path brings the unit named after the file.
+    const std::string stem = fs::path(to).stem().string();
+    EXPECT_FALSE(has_warning(new_path, "unknown unit '" + stem + "'"));
+  }
+}
+
+// The cvc handler joins the path after cvc:// to each search directory, so it refuses a path that
+// would leave the directory: a `..` segment ('/' or '\' between segments, on every platform), a
+// leading separator, or a drive or a stream (':'). Collections make documents that import across
+// directories common (docs/ARIADNE.md §6.5). Each app holds its own handler and search path, and
+// both refuse alike.
+TEST(AriadneModularity, CvcSchemeStaysInsideTheSearchPath) {
+  SKIP_WITHOUT_YAML();
+  namespace fs = std::filesystem;
+  const fs::path root = fs::temp_directory_path() / "ariadne_cvc_contained";
+  std::error_code ec;
+  fs::remove_all(root, ec);
+  const auto write = [](const fs::path &p, const std::string &text) {
+    fs::create_directories(p.parent_path());
+    std::ofstream(p, std::ios::binary) << text;
+  };
+  for (const char *side : {"a", "b"}) {
+    write(root / side / "components" / "volume" / "panel.ari",
+          std::string("units:\n  panel:\n    window: ") + side + "\n");
+    write(root / side / "components" / "volume" / "v..2.ari", "units:\n  v2:\n    window: V2\n");
+  }
+  // What each escape below would reach from root/a or root/b.
+  write(root / "secret.ari", "units:\n  secret:\n    window: Secret\n");
+  cvc::app a, b;
+  {
+    ScopedEnv hermetic("CVC_ARIADNE_PATH", nullptr);
+    register_cvc_uri_handler(a, {(root / "a").string()});
+    register_cvc_uri_handler(b, {(root / "b").string()});
+  }
+  const std::vector<std::string> refused = {
+      "cvc://../secret.ari",
+      "cvc://components/../../secret.ari",
+      "cvc://components/volume/../../../secret.ari",
+      "cvc://components\\..\\..\\secret.ari",
+      "cvc://components/volume/..",
+      "cvc://..",
+      "cvc:///secret.ari",
+      "cvc://\\secret.ari",
+      "cvc://" + (root / "secret.ari").generic_string(), // '/' first on POSIX, a drive on Windows
+      "cvc://C:/secret.ari",
+      "cvc://components/volume/panel.ari:stream",
+  };
+  for (cvc::app *app : {&a, &b}) {
+    const std::string side = app == &a ? "a" : "b";
+    SCOPED_TRACE(side);
+    const UriResult own = resolve(*app, "cvc://components/volume/panel.ari");
+    ASSERT_TRUE(own.ok) << own.error;
+    EXPECT_NE(own.content.find("window: " + side), std::string::npos) << "the app's own path";
+    EXPECT_TRUE(resolve(*app, "cvc://components/./volume/panel.ari").ok);
+    EXPECT_TRUE(resolve(*app, "cvc://components/volume/v..2.ari").ok)
+        << "'..' inside a name is not a segment";
+    for (const std::string &uri : refused) {
+      const UriResult r = resolve(*app, uri);
+      EXPECT_FALSE(r.ok) << uri << " resolved to " << r.canonical;
+      EXPECT_NE(r.error.find("is refused"), std::string::npos) << uri << ": " << r.error;
+    }
+    // An import of an escaping path is not resolved, so its units never arrive.
+    const LoadResult doc = load_string(
+        *app, "import: cvc://components/../../secret.ari\nwindows:\n  - include: secret\n");
+    ASSERT_TRUE(doc.ok) << doc.error;
+    EXPECT_TRUE(has_warning(doc, "is refused"));
+    EXPECT_EQ(find(doc.root, Kind::Window, "Secret"), nullptr);
+  }
+  fs::remove_all(root, ec);
 }
 
 // The baseline conference app (examples/ariadne/documents/conference_roster.ari) is the shipped
@@ -7485,7 +7740,7 @@ TEST(AriadneComponents, TransferFunctionUnitsTakeArgsWithDefaults) {
     GTEST_SKIP() << "component sources not found";
   LoadResult r = load_string(app, R"(
 meta: { min_libcvc: "0.0.0" }
-import: cvc://components/transfer_function.ari
+import: cvc://components/volume/transfer_function.ari
 windows:
   - include: transfer_function
   - include: transfer_function
@@ -7675,7 +7930,7 @@ TEST(AriadneComponents, VolumeGridDrivesItsNodesKeys) {
     GTEST_SKIP() << "component sources not found";
   LoadResult r = load_string(app, R"(
 meta: { min_libcvc: "0.0.0" }
-import: cvc://components/volume_grid.ari
+import: cvc://components/volume/volume_grid.ari
 windows:
   - include: volume_grid
   - include: volume_grid
@@ -7792,7 +8047,7 @@ TEST(AriadneComponents, VolumeGridContoursTabDrivesItsNodesKeys) {
     GTEST_SKIP() << "component sources not found";
   LoadResult r = load_string(app, R"(
 meta: { min_libcvc: "0.0.0" }
-import: cvc://components/volume_grid.ari
+import: cvc://components/volume/volume_grid.ari
 windows:
   - include: volume_grid
     args: { node: skull, id: skull_grid }

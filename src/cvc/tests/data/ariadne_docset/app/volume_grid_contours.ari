@@ -12,7 +12,7 @@ data:
     generate: sdf
     params: { mesh: stanford.bunny, dim: 32, fit: { height: 100, up: y } }
 import:
-  - cvc://components/volume_grid.ari
+  - cvc://components/volume/volume_grid.ari
 init: (state-set "vgc.step" "-1")
 # Step -1 asks for the trace once the grid has the volume (not in init:, which may run before the
 # node is up). The clicks name voxels (i, j on plane 16), as a slice view's pick inside the volume

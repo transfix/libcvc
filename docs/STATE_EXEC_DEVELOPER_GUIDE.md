@@ -1635,7 +1635,7 @@ gives neither, so its rows' scope is `""`. An Ariadne Runtime gives each process
 context's chroot and the document's prefix as the owner's root, so a document's own programs
 are `""` and a loaded document's are `includes.<as>` (`includes.<as>.<i>` for a repeated mount):
 a Processes view names each row's application from it (docs/roadmap/ARIADNE_SHELL.md 4.10,
-`components/processes.ari`). A spawned or forked child keeps its parent's owner root and
+`components/dev/processes.ari`). A spawned or forked child keeps its parent's owner root and
 chroot, so it has its parent's scope. The cluster's process rows (`exec_coordinator`'s
 `serialize_process_info`) carry it, and a migrated process keeps its owner root
 (`state_value_codec`).

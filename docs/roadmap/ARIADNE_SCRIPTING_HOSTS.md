@@ -332,7 +332,7 @@ the DSL it has no chroot. So:
 ### 4.5 The console widget
 
 **`py_console` is built** (P2, first part; ARIADNE.md §9.6). It is a shipped component,
-`cvc://components/py_console.ari`, not a core widget: a `text_view` scrollback, a `message_input`
+`cvc://components/dev/py_console.ari`, not a core widget: a `text_view` scrollback, a `message_input`
 and Clear, so every backend already draws it (ImGui, the terminal, the browser). ImGui's input line
 has a Run button (`ariglx`, `ariglx-web`); `arix` runs a cell with Enter.
 

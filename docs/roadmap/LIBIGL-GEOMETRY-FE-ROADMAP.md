@@ -351,7 +351,7 @@ The design copies the forest_trees idiom (seed keys from the node's props, poll 
   §2.6, after `setUseSingleColor(false)`; `updateColors` is not used. Polling in the tick, rather
   than a synchronous `state_object` handler, keeps the work out of the VTK render pass, because
   widget commits happen inside the render walk.
-- **Components** are `src/cvc/ariadne/components/mesh_tools.ari` (bound to a `mesh_lab` node named
+- **Components** are `src/cvc/ariadne/components/mesh/mesh_tools.ari` (bound to a `mesh_lab` node named
   `mesh`) and `fe_controls.ari` (bound to an `fe_lab` node named `domain`). Both are installed and
   embedded for wasm by glob, with no CMake list edit.
 - **`fe_lab`** tet-meshes its volume with the in-tree LGPL `cvc::tetrahedralize` (LBIE), never

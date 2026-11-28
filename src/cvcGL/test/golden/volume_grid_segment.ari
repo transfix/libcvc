@@ -1,5 +1,5 @@
 # volume_grid_segment.ari — golden: the volume_grid component's Segmentation tab
-# (src/cvc/ariadne/components/volume_grid_segmentation.ari) after a run, over VolRover's Visible
+# (src/cvc/ariadne/components/volume/volume_grid_segmentation.ari) after a run, over VolRover's Visible
 # Human CT (examples/data/fem/vh4.rawiv) with the seeds of examples/ariadne/documents/
 # volume_grid_segment.vgr: a seed on the spine and one in each arm, the bones above 72 segmented
 # (the node's request: segment, run as a sliced task the harness waits for), their labels on the
@@ -17,7 +17,7 @@ meta:
   min_libcvc: 4.0.0
 
 import:
-  - cvc://components/volume_grid.ari
+  - cvc://components/volume/volume_grid.ari
 
 data:
   ct: ../../../../examples/data/fem/vh4.rawiv

@@ -1,4 +1,4 @@
-# volume_grid.ari — golden: the volume_grid component (src/cvc/ariadne/components/volume_grid.ari)
+# volume_grid.ari — golden: the volume_grid component (src/cvc/ariadne/components/volume/volume_grid.ari)
 # in its switch layout, VolumeGridRover's: a slice view looking down z under the XY / XZ / ZY
 # switch, the 3D view of the three planes beside it, and the Point classes tab, over the signed
 # distance field of the embedded bunny (32^3 here, to keep the run short) with the point classes of
@@ -10,7 +10,7 @@ meta:
   min_libcvc: 4.0.0
 
 import:
-  - cvc://components/volume_grid.ari
+  - cvc://components/volume/volume_grid.ari
 
 # The app holds the data: the bunny's 32^3 signed distance field (cvcGL's sdf generator) and the
 # point classes of volume_grid.vgr. The grid reads no file; it shows those.

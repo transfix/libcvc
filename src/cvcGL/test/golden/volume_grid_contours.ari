@@ -10,7 +10,7 @@ meta:
   min_libcvc: 4.0.0
 
 import:
-  - cvc://components/volume_grid.ari
+  - cvc://components/volume/volume_grid.ari
 
 data:
   bunny:
