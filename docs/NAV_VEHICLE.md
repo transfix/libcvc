@@ -304,7 +304,8 @@ Measured, a Humvee facing the end of an 8 m dead end with its goal behind it out
 
 ### Vehicle routes in the finale (P9 R3)
 
-On a vehicle plant (`--plant humvee`), `nav_finale` replaces its A* spines with vehicle routes:
+On a vehicle plant (`--plant humvee`), `nav_finale` (a C++ demo, since retired) replaced its A*
+spines with vehicle routes:
 
 - The routes use the plant's turning circle and body (`plant_limits`, `plant_plan_of`), and
   `route_follower` drives them. The spine drawn is the vehicle's route.

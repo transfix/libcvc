@@ -26,7 +26,7 @@ using namespace cvc::nav;
 
 namespace {
 
-// Build a sim_world the way nav_city_swarm does at startup and check the
+// Build a sim_world the way a nav swarm does at startup and check the
 // renderer-facing read-back. Returns 0 on success, 1 on an ABI mismatch.
 int check(int n, sim_world::belief_mode mode, int clusters) {
   training_scene ts = city_scene(96);

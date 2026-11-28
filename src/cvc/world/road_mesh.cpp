@@ -26,6 +26,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cvc/world/road_mesh.h>
+#include <functional>
 #include <vector>
 
 namespace cvc {
@@ -36,12 +37,22 @@ struct P2 {
   double x, y;
 };
 
+// A skirt: a wall from a road's edge down to below the ground (road_mesh_params::skirt_depth).
+struct skirt {
+  double depth = 0.0;              // below the ground; 0: none
+  double rgb[3] = {0.0, 0.0, 0.0}; // its colour
+  std::function<double(double, double)> ground;
+};
+
 struct builder {
   cvc::geometry &g;
   std::uint64_t base() const { return g.const_points().size(); }
   void vert(double x, double y, double z, const double rgb[3]) {
+    vert(x, y, z, rgb, 0.0, 0.0, 1.0); // roads lie ~flat
+  }
+  void vert(double x, double y, double z, const double rgb[3], double nx, double ny, double nz) {
     g.points().push_back(cvc::geometry::point_t{{x, y, z}});
-    g.normals().push_back(cvc::geometry::normal_t{{0.0, 0.0, 1.0}}); // roads lie ~flat
+    g.normals().push_back(cvc::geometry::normal_t{{nx, ny, nz}});
     g.colors().push_back(cvc::geometry::color_t{{rgb[0], rgb[1], rgb[2]}});
   }
   void tri(std::uint64_t a, std::uint64_t b, std::uint64_t c) {
@@ -182,11 +193,54 @@ std::vector<P2> trimmed(const std::vector<P2> &pts, double from, double to) {
   return out;
 }
 
+// A wall along `top` (its points' x, y and road height), from there down to the skirt's depth
+// below the ground, facing `out` (each point's outward horizontal normal).
+struct edge_pt {
+  double x, y, z, nx, ny; // nx, ny: the outward direction the wall faces (it winds by it)
+};
+P2 dir_of(const P2 &a, const P2 &b) {
+  const double dx = b.x - a.x, dy = b.y - a.y, l = std::hypot(dx, dy);
+  return l > 1e-12 ? P2{dx / l, dy / l} : P2{1.0, 0.0};
+}
+// A closed wall (a pad's rim, a loop road's edge) joins its last point back to its first rather
+// than repeating it: a repeated vertex, alike in every attribute, is merged when a mesh is read
+// back (assimp's JoinIdenticalVertices), and a world written again would not be the same bytes.
+void wall(builder &b, std::vector<edge_pt> top, const skirt &s, bool closed = false) {
+  if (closed && top.size() > 2 && top.front().x == top.back().x && top.front().y == top.back().y)
+    top.pop_back();
+  if (s.depth <= 0.0 || top.size() < 2)
+    return;
+  const std::uint64_t v0 = b.base();
+  for (const edge_pt &e : top) {
+    // Lit as the road's top is (its normal up), a shade darker: the side of a slab of pavement.
+    // An up normal also comes back from a glb exactly, where a slanted one can move a bit each
+    // time a mesh is written (assimp normalises normals as it writes them), and a world read back
+    // must write the same bytes again.
+    b.vert(e.x, e.y, e.z, s.rgb);
+    b.vert(e.x, e.y, s.ground(e.x, e.y) - s.depth, s.rgb);
+  }
+  const std::size_t n = top.size(), pieces = closed ? n : n - 1;
+  for (std::size_t i = 0; i < pieces; ++i) {
+    const std::size_t j = (i + 1) % n;
+    const std::uint64_t t0 = v0 + 2 * i, d0 = t0 + 1, t1 = v0 + 2 * j, d1 = t1 + 1;
+    // Wound to face out: the edge runs along the road with the outward normal on its right.
+    const double ex = top[j].x - top[i].x, ey = top[j].y - top[i].y;
+    if (ex * top[i].ny - ey * top[i].nx >= 0.0) {
+      b.tri(t0, t1, d0);
+      b.tri(t1, d1, d0);
+    } else {
+      b.tri(t0, d0, t1);
+      b.tri(t1, d0, d1);
+    }
+  }
+}
+
 // A strip of half width hw along the line, mitred at each bend (the miter held to twice the half
-// width on a hairpin), at z(x, y).
+// width on a hairpin), at z(x, y). With a skirt, its two edges drop in walls to below the ground,
+// and so do an open strip's two ends when `caps` (where no junction pad covers them).
 template <class Z>
 void strip(builder &b, const std::vector<P2> &pts, bool closed, double hw, const double rgb[3],
-           const Z &z) {
+           const Z &z, const skirt &sk = {}, bool caps = false) {
   const std::size_t n = pts.size();
   if (n < 2)
     return;
@@ -195,6 +249,7 @@ void strip(builder &b, const std::vector<P2> &pts, bool closed, double hw, const
     return l > 1e-12 ? P2{dx / l, dy / l} : P2{0.0, 0.0};
   };
   const std::uint64_t v0 = b.base();
+  std::vector<edge_pt> left, right;
   for (std::size_t i = 0; i < n; ++i) {
     P2 tin{0, 0}, tout{0, 0};
     if (i > 0)
@@ -215,13 +270,31 @@ void strip(builder &b, const std::vector<P2> &pts, bool closed, double hw, const
     const double k = hw / std::max(0.5, cosHalf);
     const double lx = pts[i].x + nrm.x * k, ly = pts[i].y + nrm.y * k;
     const double rx = pts[i].x - nrm.x * k, ry = pts[i].y - nrm.y * k;
-    b.vert(lx, ly, z(lx, ly), rgb);
-    b.vert(rx, ry, z(rx, ry), rgb);
+    const double lz = z(lx, ly), rz = z(rx, ry);
+    b.vert(lx, ly, lz, rgb);
+    b.vert(rx, ry, rz, rgb);
+    left.push_back({lx, ly, lz, nrm.x, nrm.y});
+    right.push_back({rx, ry, rz, -nrm.x, -nrm.y});
   }
   for (std::size_t i = 0; i + 1 < n; ++i) {
     const std::uint64_t l0 = v0 + 2 * i, r0 = l0 + 1, l1 = l0 + 2, r1 = l0 + 3;
     b.tri(l0, r0, l1);
     b.tri(l1, r0, r1);
+  }
+  if (sk.depth <= 0.0)
+    return;
+  wall(b, left, sk, closed);
+  wall(b, right, sk, closed);
+  if (!closed && caps) { // the two ends, facing back along the road and on along it
+    const P2 a = dir_of(pts[0], pts[1]), e = dir_of(pts[n - 2], pts[n - 1]);
+    wall(b,
+         {{left.front().x, left.front().y, left.front().z, -a.x, -a.y},
+          {right.front().x, right.front().y, right.front().z, -a.x, -a.y}},
+         sk);
+    wall(b,
+         {{right.back().x, right.back().y, right.back().z, e.x, e.y},
+          {left.back().x, left.back().y, left.back().z, e.x, e.y}},
+         sk);
   }
 }
 
@@ -274,7 +347,15 @@ cvc::geometry extrude_roads(const road_network &net, const road_mesh_params &p,
     std::vector<P2> body = trimmed(pts, into_pad(c.nodes.front()), into_pad(c.nodes.back()));
     if (body.empty())
       body = pts;
-    strip(b, densified(body, p.sample_step), c.closed, hw, rgb, road_z);
+    skirt sk;
+    if (p.skirt_depth > 0.0) {
+      sk.depth = p.skirt_depth;
+      for (int k = 0; k < 3; ++k)
+        sk.rgb[k] = rgb[k] * p.skirt_shade;
+      sk.ground = ground;
+    }
+    strip(b, densified(body, p.sample_step), c.closed, hw, rgb, road_z, sk,
+          /*caps=*/!p.intersections || p.pad_segments < 3);
     if (!p.centerline || c.width < p.centerline_min_width)
       continue;
     auto stop = [&](int v) {
@@ -307,6 +388,20 @@ cvc::geometry extrude_roads(const road_network &net, const road_mesh_params &p,
         const std::uint64_t r0 = c + 1 + k;
         const std::uint64_t r1 = c + 1 + (k + 1) % p.pad_segments;
         b.tri(c, r0, r1);
+      }
+      if (p.skirt_depth > 0.0) { // its rim drops to below the ground too, facing out
+        skirt sk;
+        sk.depth = p.skirt_depth;
+        for (int k = 0; k < 3; ++k)
+          sk.rgb[k] = rgb[k] * p.skirt_shade;
+        sk.ground = ground;
+        std::vector<edge_pt> rim;
+        for (int k = 0; k < p.pad_segments; ++k) {
+          const double a = TWO_PI * double(k) / double(p.pad_segments);
+          const double x = nd.x + r * std::cos(a), y = nd.y + r * std::sin(a);
+          rim.push_back({x, y, pad_z(x, y), std::cos(a), std::sin(a)});
+        }
+        wall(b, rim, sk, /*closed=*/true);
       }
     }
   }

@@ -17,8 +17,8 @@
 // A swarm of navigating vehicles: the simulation of a `type: nav_swarm` scene node
 // ----------------
 // A document declares a swarm and the city it crosses; this runs it (docs/ARIADNE.md §5.4,
-// "Swarms"). It is the simulation the libcvc nav demos (examples/nav/nav_city_swarm.cpp and
-// nav_city_drive.cpp) ran by hand, with the same steps:
+// "Swarms"). It is the simulation libcvc's C++ nav demos (nav_city_swarm and nav_city_drive,
+// since retired) ran by hand, with the same steps:
 //
 //   * the city: a city bundle's world (a document's `source: { data }` dataset), rasterized onto
 //     `grid` x `grid` cells over its bounds at the trained metric (0.05 navigator units a metre),

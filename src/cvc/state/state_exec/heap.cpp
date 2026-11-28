@@ -558,7 +558,7 @@ void heap_after_step(process &proc, std::size_t allocated, uint64_t state_bytes_
     ++proc.heap_measurements;
     return;
   }
-  if (proc.max_memory == 0)
+  if (!proc.measures_heap()) // its own limit, or its frame account's (an Ariadne mount's)
     return;
   proc.heap_alloc_bytes += allocated;
   ++proc.heap_steps;

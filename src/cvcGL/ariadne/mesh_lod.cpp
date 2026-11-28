@@ -92,7 +92,8 @@ bool decimate_mesh_by_role(const std::vector<double> &verts, const std::vector<s
                            const std::vector<unsigned char> &role,
                            const std::vector<unsigned char> &own, double reduction,
                            std::vector<double> &ov, std::vector<std::uint32_t> &ot,
-                           std::vector<unsigned char> &orole, std::vector<unsigned char> &oown) {
+                           std::vector<unsigned char> &orole, std::vector<unsigned char> &oown,
+                           role_decimations *coarsest) {
   std::vector<unsigned char> roles; // in the order their triangles first come
   for (std::size_t t = 0; t + 2 < tris.size(); t += 3) {
     const unsigned char q = role[tris[t]];
@@ -123,7 +124,16 @@ bool decimate_mesh_by_role(const std::vector<double> &verts, const std::vector<s
     }
     std::vector<double> dv;
     std::vector<std::uint32_t> dt;
-    const bool ok = decimate_mesh(pv, pt, reduction, dv, dt);
+    bool ok = decimate_mesh(pv, pt, reduction, dv, dt);
+    if (coarsest) {
+      if (ok) {
+        (*coarsest)[q] = {dv, dt};
+      } else if (const auto it = coarsest->find(q); it != coarsest->end()) {
+        dv = it->second.first;
+        dt = it->second.second;
+        ok = true;
+      }
+    }
     coarser = coarser || ok;
     const std::vector<double> &uv = ok ? dv : pv;
     const std::vector<std::uint32_t> &ut = ok ? dt : pt;

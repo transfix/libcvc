@@ -2,9 +2,9 @@
 // with only the genuinely-host parts in C++: a streamed "agents" scene node (register_scene_node_
 // type + a per-frame geometry rebuild), a couple of capability verbs (sim.restart / sim.step /
 // camera.recenter), and live readouts published to `stats.*` state keys. It is the library-based
-// counterpart to the hand-written nav_city_drive.cpp — the scene, the control panels, and the
-// display toggles are all DECLARED in nav_convoy.ari + cvc://components/*.ari, no bespoke panel
-// code.
+// counterpart to the hand-written C++ nav_city_drive (since retired) — the scene, the control
+// panels, and the display toggles are all DECLARED in nav_convoy.ari + cvc://components/*.ari, no
+// bespoke panel code.
 //
 //   nav_convoy nav_convoy.ari --component-path <repo>/src/cvc/ariadne
 //   nav_convoy nav_convoy.ari --offscreen --png convoy.png --component-path …

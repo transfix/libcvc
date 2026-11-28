@@ -155,6 +155,7 @@ struct vehicle_look {
   std::string data, uri, subpath;
   double scale = 1.0, yaw = 0.0, z = 0.0;
   bool fit = false;
+  bool texture = true; // false: a model drawn in its entity's colours, not its texture (`texture:`)
   // A parted look (kind file, or data with `data:`): the chassis's file and the wheel's, and its
   // rig, given inline (`rig`) or read from `rig_file` (in the package, for a data look) when the
   // view draws it. Fitted to the vehicle always: scale, yaw and z do not apply. Its `path` is
@@ -333,6 +334,9 @@ struct vehicle_start {
   // policy: { uri:, path:, sha256: } (`policy` the uri) or { data: } (`policy_data`).
   std::string policy_path, policy_sha256, policy_data;
   std::string metric; // trained | vehicle | policy ("" policy)
+  // collide: true: a fleet's vehicles kept from passing through each other (nav's hard de-overlap
+  // on its own plants; a Jolt plant's bodies collide anyway).
+  bool collide = false;
   // A fleet's plant: as a list or each team's (`plant` is then the list's first, or "").
   fleet_plants plants;
   bool operator==(const vehicle_start &) const = default;

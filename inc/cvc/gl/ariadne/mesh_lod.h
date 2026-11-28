@@ -19,6 +19,8 @@
 #define CVC_GL_ARIADNE_MESH_LOD_H
 
 #include <cstdint>
+#include <map>
+#include <utility>
 #include <vector>
 
 namespace cvc {
@@ -38,11 +40,19 @@ bool decimate_mesh(const std::vector<double> &verts, const std::vector<std::uint
 // tyres their dark): each role's triangles on their own (decimate_mesh), a role's that collapse
 // kept as they are, into `ov`, `ot`, `orole` and `oown` (a decimated part's points take its first
 // point's own colour). False, the outputs untouched, when no role got coarser.
+//
+// `coarsest`, when given, carries each role's coarsest decimation (its points and triangles) from
+// one rung to the next coarser one: a role that decimates is stored there, and a role that
+// collapses takes what is stored instead of being kept as it is (a small mesh, a boat's hull, at
+// the coarsest rung), so a coarser rung is never finer than the one before it.
+using role_decimations =
+    std::map<unsigned char, std::pair<std::vector<double>, std::vector<std::uint32_t>>>;
 bool decimate_mesh_by_role(const std::vector<double> &verts, const std::vector<std::uint32_t> &tris,
                            const std::vector<unsigned char> &role,
                            const std::vector<unsigned char> &own, double reduction,
                            std::vector<double> &ov, std::vector<std::uint32_t> &ot,
-                           std::vector<unsigned char> &orole, std::vector<unsigned char> &oown);
+                           std::vector<unsigned char> &orole, std::vector<unsigned char> &oown,
+                           role_decimations *coarsest = nullptr);
 
 } // namespace ariadne
 } // namespace gl

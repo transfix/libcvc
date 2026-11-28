@@ -483,8 +483,11 @@ void room_view::update_entities(const cvc::ariadne::entity_playout &entities) {
     std::vector<entity_draw_info> infos;
     for (const std::uint64_t id : shown) {
       const rc::room_entity *e = entities.find(id);
-      if (!e || cvc::ariadne::vehicle_plant_floats(e->plant))
-        continue; // no identity yet, or a boat: a node of its own
+      if (!e)
+        continue; // no identity yet: a node of its own
+      // A boat as a car: its model fitted to its length overall, its keel on its hull's bottom (the
+      // identity's fit_length and base_z); its box look the box, as its own node draws it here
+      // (the relay sends no hull).
       entity_draw_info d;
       d.id = id;
       d.archetype = e->archetype;

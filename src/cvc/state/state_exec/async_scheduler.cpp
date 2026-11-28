@@ -448,6 +448,7 @@ int async_scheduler::execute(const std::string &script, const execute_options &o
   proc.priority_floor_explicit = opts.priority_floor.has_value() && opts.priority_floor_explicit;
   proc.parent_pid = opts.parent_pid;
   proc.keep_alive = opts.keep_alive;
+  adopt_account(proc, opts.account); // its frame budget (an Ariadne mount's)
   proc.max_steps = opts.max_steps;
   proc.max_time = opts.max_time;
   proc.max_step_time = opts.max_step_time;
@@ -493,6 +494,7 @@ int async_scheduler::execute(const value_t &expr, const execute_options &opts) {
   proc.priority_floor_explicit = opts.priority_floor.has_value() && opts.priority_floor_explicit;
   proc.parent_pid = opts.parent_pid;
   proc.keep_alive = opts.keep_alive;
+  adopt_account(proc, opts.account); // its frame budget (an Ariadne mount's)
   proc.max_steps = opts.max_steps;
   proc.max_time = opts.max_time;
   proc.max_step_time = opts.max_step_time;
@@ -566,6 +568,10 @@ void async_scheduler::execute_process_step(const process_ptr &pp, uint64_t max_r
   process &proc = *pp;
   run_steps_ = 1;
   run_unchecked_ = 1;
+  // Its frame budget is spent (an Ariadne mount's, frame_account): it waits for the next frame,
+  // taking no step.
+  if (proc.account && proc.account->spent() && park_for_account(proc))
+    return;
   // Between steps: free the reference cycles programs leaked, once enough piled up (heap.h).
   // Checked every 64 steps: the check reads the registry's counters. The registry is the one its
   // evaluation context has: the one it was given (S1.1), else its evaluator's own. A run's later
@@ -654,7 +660,7 @@ void async_scheduler::execute_process_step(const process_ptr &pp, uint64_t max_r
   // Bound what one native call in this step may allocate (see scheduler.cpp).
   // Armed only when it changes something (see scheduler.cpp).
   std::optional<eval_alloc_guard> step_alloc;
-  if (proc.max_memory > 0 || proc.max_alloc_bytes != kDefaultMaxAllocBytes)
+  if (proc.measures_heap() || proc.max_alloc_bytes != kDefaultMaxAllocBytes)
     step_alloc.emplace(
         ctx, proc.alloc_limit(
                  proc.max_memory > 0 ? mem_tracker_.current_bytes(proc.pid) + proc.heap_bytes : 0));
@@ -785,8 +791,13 @@ void async_scheduler::execute_process_step(const process_ptr &pp, uint64_t max_r
   } else {
     proc.state.stats.add_step_time(secs);
   }
+  // Its frame budget is charged what the step charged it, and the step's time (frame_account).
+  if (proc.account) {
+    const uint64_t after = proc.state.stats.get_step_count();
+    proc.account->charge(after > charged.before ? after - charged.before : 1, secs);
+  }
   // Heap accounting: take a finished measurement, start the next when due (heap.h).
-  if (proc.max_memory > 0 || proc.state.heap_measured)
+  if (proc.measures_heap() || proc.state.heap_measured)
     heap_after_step(proc, step_alloc ? step_alloc->allocated() : 0,
                     mem_tracker_.current_bytes(proc.pid));
 
@@ -807,6 +818,11 @@ void async_scheduler::execute_process_step(const process_ptr &pp, uint64_t max_r
     if (proc.status == process_status::running) {
       // Only reset to ready if the intrinsic didn't change status (sleep/msg-recv set waiting).
       procs_.set_status(proc, process_status::ready);
+    }
+    // The step spent its frame budget: it waits for the next frame now, not at its next pick.
+    if (proc.account && proc.status == process_status::ready && proc.account->spent()) {
+      park_for_account(proc);
+      return;
     }
     chain_now_ = now;
     chain_cpu_ = cpu1;
@@ -964,6 +980,14 @@ bool async_scheduler::continue_run(process &proc, uint64_t max_run, clock::time_
       break;
     if (!proc.pending_signals.empty() || !proc.pending_watch_events.empty())
       break;
+    // Its frame budget (frame_account): spent already, or its steps used up by this run's.
+    if (proc.account) {
+      const frame_account &a = *proc.account;
+      const uint64_t ms = a.max_steps.load(std::memory_order_relaxed);
+      if (a.spent() ||
+          (ms > 0 && a.steps.load(std::memory_order_relaxed) + (proc.step_count() - count0) >= ms))
+        break;
+    }
     const uint64_t n = run_steps_;
     if ((n & 15) == 0 || n == 2 || n == 4 || n == 8) {
       const clock::time_point t = clock::now();
@@ -974,6 +998,13 @@ bool async_scheduler::continue_run(process &proc, uint64_t max_run, clock::time_
         break;
       if (run_budget_ && run_budget_->spent(t, n - checked))
         break;
+      if (proc.account) { // its frame budget's seconds, used up by this run's
+        const double mt = proc.account->max_seconds.load(std::memory_order_relaxed);
+        if (mt > 0.0 && proc.account->seconds.load(std::memory_order_relaxed) +
+                                std::chrono::duration<double>(t - start).count() >=
+                            mt)
+          break;
+      }
       checked = n;
       if (proc.max_time > 0.0) {
         if (!charge_cpu) {
@@ -1317,7 +1348,42 @@ bool async_scheduler::yield_frame(int pid) {
   return true;
 }
 
+void async_scheduler::adopt_account(process &proc, const std::shared_ptr<frame_account> &a) {
+  proc.account = a;
+  if (!a)
+    return;
+  for (const std::weak_ptr<frame_account> &w : accounts_)
+    if (!w.owner_before(a) && !a.owner_before(w))
+      return; // noted already
+  std::erase_if(accounts_, [](const std::weak_ptr<frame_account> &w) { return w.expired(); });
+  accounts_.push_back(a);
+}
+
+bool async_scheduler::park_for_account(process &proc) {
+  if (proc.status != process_status::ready && proc.status != process_status::running)
+    return false;
+  if (proc.status == process_status::running)
+    proc.accumulated_time +=
+        std::chrono::duration<double>(clock::now() - proc.last_run_start).count();
+  proc.awaiting_frame = true;
+  procs_.set_status(proc, process_status::waiting); // among the frame waiters, as yield_frame's
+  proc.account->held.store(true, std::memory_order_relaxed);
+  proc.account->holds.fetch_add(1, std::memory_order_relaxed);
+  chain_valid_ = false; // the park is no step's time
+  return true;
+}
+
 int async_scheduler::wake_awaiting() {
+  // A new frame for every frame budget (frame_account) first, so the processes parked for theirs
+  // run again; an account no process holds any more goes.
+  for (auto it = accounts_.begin(); it != accounts_.end();) {
+    if (const std::shared_ptr<frame_account> a = it->lock()) {
+      a->new_frame();
+      ++it;
+    } else {
+      it = accounts_.erase(it);
+    }
+  }
   std::vector<process *> list;
   list.swap(woken_);
   procs_.take_awaiting(list);
@@ -2350,6 +2416,7 @@ int async_scheduler::fork(int pid) {
   child->root_path = parent.root_path;
   child->owner = parent.owner; // td B28: a host reaps the child with its parent (kill_owner)
   child->owner_root = parent.owner_root;
+  adopt_account(*child, parent.account);         // the parent's frame budget
   child->priority_floor = parent.priority_floor; // design 7.2: fork copies the floor
   child->priority_floor_explicit = parent.priority_floor_explicit;
   child->max_steps = parent.max_steps;

@@ -280,6 +280,8 @@ set(INCLUDE_FILES
   ../../inc/cvc/world/scatter.h
   ../../inc/cvc/world/roads.h
   ../../inc/cvc/world/building_archetypes.h
+  ../../inc/cvc/world/model_assets.h
+  ../../inc/cvc/world/world_theme.h
   ../../inc/cvc/world/sites.h
   ../../inc/cvc/world/road_mesh.h
   ../../inc/cvc/world/road_raster.h
@@ -615,6 +617,8 @@ set(SOURCE_FILES
   world/scatter.cpp
   world/roads.cpp
   world/building_archetypes.cpp
+  world/model_assets.cpp
+  world/world_theme.cpp
   world/sites.cpp
   world/road_mesh.cpp
   world/road_raster.cpp
@@ -2765,6 +2769,11 @@ endif()
 
 # Setup dependencies
 SetupBoost(cvc)
+# NetBSD: Boost.Regex takes its C++03 path there, whose static mutex a header-only Boost does not
+# define (the file says why).
+if(CMAKE_SYSTEM_NAME STREQUAL "NetBSD")
+  target_sources(cvc PRIVATE core/boost_regex_static_mutex.cpp)
+endif()
 
 if(CVC_ENABLE_CUDA)
   SetupCUDA(cvc)

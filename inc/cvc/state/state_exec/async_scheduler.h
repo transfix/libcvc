@@ -339,6 +339,10 @@ public:
   /// does, at the top of a drain, NOT inside step()/sync_run, so an await crosses exactly one
   /// frame). Returns the number re-readied.
   int wake_awaiting();
+  /// Frame budgets (frame_account): wake_awaiting() starts a new frame on every account a
+  /// process it holds was given, before it readies the processes parked for theirs. A process
+  /// whose account is spent parks at its next pick, as yield_frame parks it.
+  std::size_t accounts_seen() const { return accounts_.size(); }
 
   // --- Inter-process messaging (msg-send/msg-recv) ---
   bool receive_message(int pid, const std::string &path) override;
@@ -711,6 +715,14 @@ private:
   const submit_settings &settings_for_submit();
 
   std::vector<process *> woken_; // reused by the waiter wakes
+  // The frame budgets of the processes it has held (frame_account), each once; one no process
+  // holds any more goes at the next frame boundary.
+  std::vector<std::weak_ptr<frame_account>> accounts_;
+  // Give `proc` the account `a` (null: none), and note the account for the frame boundaries.
+  void adopt_account(process &proc, const std::shared_ptr<frame_account> &a);
+  // Park `proc`, ready or running, until the next frame boundary because its account is spent;
+  // false when it is neither.
+  bool park_for_account(process &proc);
   std::vector<int> charged_;     // the pids charge_async_calls charged (reused)
 
   const process_ptr no_process_; // null: current_process() while none is stepped

@@ -547,6 +547,67 @@ TEST(AsyncSchedulerTest, SpawnRunsToCompletion) {
   EXPECT_EQ(sched.current_pid(), -1); // reset after stepping (guard)
 }
 
+// A frame account (docs/roadmap/ARIADNE_SHELL.md 4.11): the processes given one share its steps a
+// frame. Once they are spent each of them waits for the next frame (parked as (await) parks it),
+// never killed, and a process without one runs on; wake_awaiting starts the next frame.
+TEST(AsyncSchedulerTest, AFrameAccountHoldsItsProcessesToTheirFrame) {
+  for (const std::uint64_t slice : {std::uint64_t{1}, std::uint64_t{256}}) {
+    async_scheduler sched;
+    sched.set_slice_steps(slice);
+    auto account = std::make_shared<frame_account>();
+    account->max_steps = 300;
+    execute_options held;
+    held.account = account;
+    const int a = sched.execute(std::string("(begin (set x 0) (while #t (set x (+ x 1))))"), held);
+    const int b = sched.execute(std::string("(begin (set y 0) (while #t (set y (+ y 1))))"), held);
+    const int other =
+        sched.execute(std::string("(begin (set i 0) (while (< i 2000) (set i (+ i 1))) i)"));
+    EXPECT_EQ(sched.accounts_seen(), 1u) << "one account, however many processes share it";
+    sched.sync_run_steps(200000);
+    for (const int pid : {a, b}) {
+      const std::optional<process_info> info = sched.get_process_info(pid);
+      ASSERT_TRUE(info.has_value());
+      EXPECT_EQ(info->status, process_status::waiting)
+          << "held for the frame (slice " << slice << ")";
+    }
+    ASSERT_TRUE(sched.get_process_info(other).has_value());
+    EXPECT_EQ(sched.get_process_info(other)->status, process_status::terminated)
+        << "a process without the account runs on";
+    EXPECT_GE(account->steps.load(), 300u);
+    EXPECT_LE(account->steps.load(), 302u) << "its steps, not a run's more (slice " << slice << ")";
+    EXPECT_TRUE(account->held.load());
+    EXPECT_FALSE(sched.has_runnable());
+    // The next frame: the account starts again and its processes run, to the limit again.
+    EXPECT_EQ(sched.wake_awaiting(), 2);
+    EXPECT_EQ(account->steps.load(), 0u);
+    EXPECT_GE(account->last_steps.load(), 300u);
+    EXPECT_TRUE(account->last_held.load());
+    sched.sync_run_steps(200000);
+    EXPECT_GE(account->steps.load(), 300u);
+    EXPECT_GE(account->holds.load(), 4u) << "each of the two held in each of two frames";
+    // A higher limit is seen at once; memory past its cap holds them too.
+    account->max_steps = 0;
+    account->max_memory = 1000;
+    account->memory = 5000; // the host's sum
+    sched.wake_awaiting();
+    sched.sync_run_steps(10000);
+    EXPECT_EQ(account->steps.load(), 0u) << "past its memory: held before a step";
+    account->memory = 0;
+    sched.wake_awaiting();
+    sched.sync_run_steps(5000);
+    EXPECT_GT(account->steps.load(), 1000u) << "under it again: no limit on steps";
+    EXPECT_TRUE(sched.kill(a));
+    EXPECT_TRUE(sched.kill(b));
+    sched.reap(a);
+    sched.reap(b);
+    sched.reap(other);
+    account.reset();
+    held.account.reset();
+    sched.wake_awaiting();
+    EXPECT_EQ(sched.accounts_seen(), 0u) << "an account no process holds goes";
+  }
+}
+
 TEST(AsyncSchedulerTest, ReceiveMessageSuspendsAndDeliverWakes) {
   async_scheduler sched;
   int pid = sched.execute(std::string("(begin 1 2 3 4 5)"));

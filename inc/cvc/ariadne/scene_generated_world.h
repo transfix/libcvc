@@ -149,6 +149,7 @@ struct GeneratedWorldKeys {
   std::string seed, half, trees, rocks, buildings, tree_gen, amp, water_level, preset, ontology,
       color, request, status, props, building_count, occupied, terrain, water, terrain_gen, city,
       terrain_file, edge, busy, progress, phase, autoregen, pending;
+  std::string theme; // world.theme: the world theme by name (empty: none)
   // Save (a "save" request): world.save.file, world.save.exports, world.save.status.
   std::string save_file, save_exports, save_status;
   // What the relay did with this world, while this host is joined to one that runs it
