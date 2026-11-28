@@ -4010,6 +4010,17 @@ void FtxuiBackend::separator() {
 
 bool FtxuiBackend::button(const char *label) { return button_with(label, ButtonLook{}); }
 
+bool FtxuiBackend::table_header(const std::string &label, int dir, bool sortable) {
+  Impl &m = *m_;
+  const std::string id = m.uid("th|" + label);
+  const bool hit = sortable && m.activated(id);
+  fx::Element el = text_block(table_header_text(label, dir, unicode_glyphs())) | fx::bold;
+  if (sortable && m.has_focus(id))
+    el = el | fx::inverted;
+  m.leaf(id, sortable, el);
+  return hit;
+}
+
 // §5.27 a chosen button is [>label<] in bold, as wide as [ label ], so choosing one moves nothing.
 // A picture (look.icon) isn't drawn: a button is its label in a terminal.
 bool FtxuiBackend::button_with(const char *label, const ButtonLook &look) {
@@ -5630,6 +5641,7 @@ void FtxuiBackend::text_value_colored(const char *, const std::string &, const f
 void FtxuiBackend::begin_text_color(const float[3]) {}
 void FtxuiBackend::end_text_color() {}
 HeatmapEvent FtxuiBackend::heatmap(const char *, const HeatmapSpec &) { return {}; }
+bool FtxuiBackend::table_header(const std::string &, int, bool) { return false; }
 RichTextEvent FtxuiBackend::rich_text(const std::vector<TextRun> &, const RichTextOptions &) {
   return {};
 }

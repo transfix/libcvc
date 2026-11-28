@@ -1,7 +1,7 @@
 schema_version: 1
 recipe:
   name: libcvc-examples
-  upstream_version: "4.0.10"
+  upstream_version: "4.0.11"
   # Replaces cvcgl-examples (last published 3.7.0+cvc.2), with the examples moved to the repo's
   # top-level examples/. The browser gallery is its own package now, libcvc-examples-web.
   cvc_revision: 1
@@ -41,7 +41,7 @@ patches: []
 depends:
   build:
     - name: libcvc
-      version: "==4.0.10"
+      version: "==4.0.11"
     - name: vtk
     - name: boost
     # The demos' control panels. cvcGL compiles ImGuiOverlay to inert stubs when
@@ -54,7 +54,7 @@ depends:
     # The binaries link the installed libcvc + VTK + Boost shared libs (cvcGL
     # itself is built static into them: no soname coupling to the cvcgl SDK).
     - name: libcvc
-      version: "==4.0.10"
+      version: "==4.0.11"
     - name: vtk
     - name: boost
     # imgui-w32 is linked shared, so libimgui-w32.so is a load-time dependency

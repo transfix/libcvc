@@ -133,7 +133,9 @@ cvc::world_clock_keys scene_clock_keys(const SceneClock &clock);
 // host's bind prefix. The declared rate and pause go on the clock when the first drive() binds it.
 class SceneClockDriver {
 public:
-  SceneClockDriver(cvc::app &app, const SceneClock &resolved);
+  // `clock` is the clock it drives: null, the app's (app.world_clock()); a mounted scene's own
+  // (cvc::scene_clock, ARIADNE_SHELL.md 4.4) otherwise, which must outlive this driver.
+  SceneClockDriver(cvc::app &app, const SceneClock &resolved, cvc::world_clock *clock = nullptr);
   ~SceneClockDriver();
   SceneClockDriver(const SceneClockDriver &) = delete;
   SceneClockDriver &operator=(const SceneClockDriver &) = delete;
@@ -188,6 +190,9 @@ public:
   // realize_scene) does too.
   static void use_vehicle_clock(cvc::app &app, const Scene &scene,
                                 std::vector<std::string> *warnings = nullptr);
+  // The same on `clock`: a mounted scene's own (ARIADNE_SHELL.md 4.4).
+  static void use_vehicle_clock(cvc::world_clock &clock, const Scene &scene,
+                                std::vector<std::string> *warnings = nullptr);
   // The world of `scene` from its spec alone: the node transforms composed, each body node's mesh
   // read from its source: (a primitive, a heightfield, a file or an asset), its heightfield's grid
   // for a terrain; each generated_world node run here (its world made now, its world.* keys under
@@ -202,10 +207,13 @@ public:
   // The world from bodies a renderer already holds: their nodes, world matrices and meshes, and
   // the heightfields by node id for terrain bodies. Problems warn, naming the node, and leave that
   // body out. Null only when the physics world itself could not be made.
+  // `clock` is the clock it steps on (its physics step is whole quanta of it, and sync() times
+  // with it): null, the app's; a mounted scene's own (ARIADNE_SHELL.md 4.4), which must outlive it.
   static std::unique_ptr<SceneWorld>
   build(cvc::app &app, const ScenePhysics &spec, const std::vector<SceneBodyInput> &bodies,
         const std::map<std::string, std::shared_ptr<const cvc::height_field>> &fields,
-        const std::string &stats_key, std::vector<std::string> *warnings);
+        const std::string &stats_key, std::vector<std::string> *warnings,
+        cvc::world_clock *clock = nullptr);
 
   ~SceneWorld();
   SceneWorld(const SceneWorld &) = delete;

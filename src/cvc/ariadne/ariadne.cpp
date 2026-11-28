@@ -11,6 +11,7 @@
 #include "file_picker.h"    // §10.8 the Runtime's own "Open file" window
 #include "heatmap_emit.h"   // Kind::Heatmap (the subtree read on a write, the cell events)
 #include "settings_emit.h"  // Kind::Settings (the key walk, its write watch, the edits)
+#include "table_emit.h"     // Kind::Table (the sort format, the header row)
 #include "tf_editor_emit.h" // Kind::TfEditor (model / overlay / view state edges)
 
 #include <algorithm>
@@ -27,6 +28,7 @@
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/ariadne/backend.h>
 #include <cvc/ariadne/bind.h>
+#include <cvc/ariadne/data.h>     // ARIADNE_SHELL.md 4.3 a mount's datasets, bound as it opens
 #include <cvc/ariadne/doc_args.h> // ARIADNE_SHELL.md 4.6 a mount's command line
 #include <cvc/ariadne/files.h> // §10.8 (file-pick): the files the app's programs hold
 #include <cvc/ariadne/grants.h> // ARIADNE_SHELL.md 4.5 what a mount asks for and holds
@@ -36,6 +38,7 @@
 #include <cvc/ariadne/media.h>  // §5.11 pictures by URI
 #include <cvc/ariadne/media_player.h> // §5.13 video: / audio: players
 #include <cvc/ariadne/media_save.h>   // §5.29 saving a picture or a video
+#include <cvc/ariadne/mount_scene.h>  // ARIADNE_SHELL.md 4.3 a mount's scene and datasets
 #include <cvc/ariadne/net_host.h>     // net_host_status (the net capability tokens)
 #include <cvc/ariadne/oidc_host.h>    // pump_oidc
 #include <cvc/ariadne/principal.h>    // set_scope_principal: what a mount runs as (SH11)
@@ -311,6 +314,20 @@ void substitute_index_one(Widget &out, const std::string &idx) {
   if (!out.scope.empty())
     out.scope += "." + idx;
   replace_in(out.app_name_bind, kTok, idx); // §5.25 and its name: (slots.{i}.name)
+  // A table's row count and its headers (rows: runs.{i}.count). Its cells keep their {i}: the row.
+  if (out.table) {
+    const auto has_tok = [&](const std::string &s) { return s.find(kTok) != std::string::npos; };
+    bool any = has_tok(out.table->rows);
+    for (const TableColumn &c : out.table->columns)
+      any = any || has_tok(c.label);
+    if (any) {
+      auto t = std::make_shared<TableSpec>(*out.table);
+      replace_in(t->rows, kTok, idx);
+      for (TableColumn &c : t->columns)
+        replace_in(c.label, kTok, idx);
+      out.table = std::move(t);
+    }
+  }
   // §12: and its parent-scope holes are {i}-substituted too, so an instance can grant a
   // per-instance target (link: { slot: fleet.{i} }) — mirroring the bind/on substitution above.
   for (LinkHole &h : out.links) {
@@ -329,7 +346,10 @@ void substitute_index_in(Widget &out, const std::string &idx) {
     // than the outer index clobbering the inner template's bindings). Single-level still: the
     // inner cannot also reference the outer index — the loader warns on a nested repeat.
     // §5.30 a row's right-click menu acts on that row (on: (delete-row {i})).
-    for (std::vector<Widget> *list : {&w->children, &w->context_items})
+    // A table's cells are its rows' template, left as they are: their {i} is the table's row.
+    for (std::vector<Widget> *list : {&w->children, &w->context_items}) {
+      if (list == &w->children && w->kind == Kind::Table)
+        continue;
       for (Widget &c : *list) {
         if (!c.repeat.empty())
           continue;
@@ -338,6 +358,7 @@ void substitute_index_in(Widget &out, const std::string &idx) {
         else
           todo.push_back(&c);
       }
+    }
     if (todo.empty())
       break;
     w = todo.back();
@@ -805,8 +826,9 @@ constexpr const char *kReadLaneBuiltins[] = {
     "math.floor", "math.ceil", "math.round", "math.pow", "math.log", "math.sin", "math.cos",
     "math.tan", "math.min", "math.max", "math.clamp", "math.pi", "math.e", "collections.map",
     "collections.filter", "collections.reduce", "collections.zip", "collections.flatten",
-    "collections.sort", "collections.reverse", "collections.range", "collections.unique",
-    "collections.dict-keys", "collections.dict-values", "collections.dict-merge"};
+    "collections.sort", "collections.sort-by", "collections.reverse", "collections.range",
+    "collections.unique", "collections.dict-keys", "collections.dict-values",
+    "collections.dict-merge"};
 } // namespace
 
 std::span<const char *const> read_lane_builtins() { return kReadLaneBuiltins; }
@@ -2571,6 +2593,7 @@ struct Runtime::Impl {
       Children,    // emit_children: `w`'s children (context_items, when `items`) from `next`
       Cells,       // a grid's children from `next`, each instance a cell (emit_container)
       Instances,   // a repeat's instances from `next` (begin_repeat), as cells when `cell`
+      TableRows,   // a table's cells from `next`, row after row, `count` rows (begin_table)
       Container,   // emit_container after the children: end_grid and its writes, the scope pops
       Node,        // emit_node after a container's children, by w->kind and `stage`
       ContextMenu, // emit_context_menu after its items
@@ -2581,7 +2604,8 @@ struct Runtime::Impl {
     bool items = false;     // Children: the context menu's items
     bool cell = false;      // Instances: as a grid's cells
     bool outermost = false; // Instances: the outermost repeat (emitting_repeat_ is its template)
-    bool open_item = false; // Instances: an instance's id and instance_path entry are pushed
+    bool open_item = false; // Instances, TableRows: an instance's (a row's) id and instance_path
+                            // entry are pushed
     bool scoped = false;    // Container: a mount pushed its scope
     bool fns = false;       // Container: and its functions
     bool grid = false;      // Container: begin_grid opened one
@@ -2589,10 +2613,10 @@ struct Runtime::Impl {
     bool flag = false;      // Node: Window open, Menu merges the Windows menu, Group inner click
     bool backdrop = false;  // Node: a backdrop is open (Window, Group)
     bool item = false;      // Node(Group): an item group is open
-    std::size_t next = 0;   // Children, Cells, Instances: the next index
-    int count = 0;          // Instances: how many; Node(Group): clicks_fired before its children
+    std::size_t next = 0;   // Children, Cells, Instances, TableRows: the next index
+    int count = 0; // Instances, TableRows: how many; Node(Group): clicks_fired before its children
     const Widget *w = nullptr;
-    std::unique_ptr<std::optional<Widget>> inst; // Instances: the instance drawn now
+    std::unique_ptr<std::optional<Widget>> inst; // Instances, TableRows: the instance drawn now
     std::string path, path2;          // Container: tracks, columns; Node(Window): its open path
     const MenuEvent *outer = nullptr; // ContextMenu: the menu event it took the place of
     std::function<void()> then;
@@ -2611,6 +2635,13 @@ struct Runtime::Impl {
   // `{i}` substituted) for a `repeat` template: drawn by begin_emit, or as a grid's cells.
   void begin_repeat(const Widget &w, bool cell);
   void begin_cells(const Widget &c); // a grid's child: its instances, each in a cell
+  // Kind::Table: its grid, its header row, then its rows on the walk (Op::TableRows). False when
+  // nothing of it is drawn (no columns, or the grid did not open).
+  bool begin_table(const Widget &w, bool dis);
+  // A grid's identity (emit_container, begin_table): its id:, else its label, else its place.
+  std::string grid_id(const Widget &w) const;
+  // §11.4 a grid's persisted track sizes at `path` (none on a forget_layout()'s first frame).
+  std::vector<float> persisted_sizes(const std::string &path);
   // Out of emit_node, so its frame (the stack one step of the walk takes) stays small:
   void emit_mounts(const Widget &w);      // ARIADNE_SHELL.md 4.2 a mounts: slot's mounts
   bool menu_item_action(const Widget &w); // a menu item, its label an expression or not
@@ -2634,6 +2665,10 @@ struct Runtime::Impl {
     // raise paths.
     struct Item {
       std::string title, open_path, raise_path;
+      // Listed only while this key is "1": a mount's scene window (ARIADNE_SHELL.md 4.3), at
+      // <sub>.ariadne.scene, which only a host that drew its scene sets. Elsewhere (ari's
+      // terminals, a scene adapter that draws no mounted scene) the window never shows.
+      std::string when_path;
     };
     std::vector<Item> items;
     // The windows a `repeat:` makes (conference_roster's per-peer cameras): their template in
@@ -2739,6 +2774,20 @@ struct Runtime::Impl {
     std::vector<std::string> warnings;                      // what its last parse warned
   };
   std::map<std::string, MountSlot> mount_slots_;
+  // ARIADNE_SHELL.md 4.3 (SH3): the mounts that carry a scene or datasets, as
+  // plan_windows_menu last walked the tree: each load: (not one under repeat:) and each open
+  // mounts: entry, with what its world does in the background (Runtime::scene_mounts).
+  struct ScenePlan {
+    std::string scope, name, parent_scope;
+    std::shared_ptr<const MountScene> scene;
+    std::string entry;                      // a mounts: entry's key (<slot key>.<as>); "" a load:
+    std::shared_ptr<const MountsSpec> spec; // ... and its slot's
+  };
+  std::vector<ScenePlan> scene_plan_;
+  // The load: mounts of this tree whose datasets are bound (emit_container binds each once).
+  std::set<std::string> data_bound_;
+  // A mount's data: at its sub-prefix (<sub>.data.<name>), each started as a document's is.
+  void bind_mount_data(const std::string &sub, const MountScene &ms);
   // The slots in the tree, each with the scope it sits in, as plan_windows_menu last walked it
   // (into the open mounts too, for theirs).
   std::vector<std::pair<const Widget *, std::string>> mounts_widgets_;
@@ -2911,6 +2960,7 @@ struct Runtime::Impl {
   };
   std::vector<RepeatedWindow> repeated_windows(); // this frame's instances
   bool windows_menu_has_items();                  // anything to list this frame
+  bool windows_menu_listed(const WindowsMenuPlan::Item &it); // its when_path, if any, is "1"
   void emit_windows_menu(const std::string &title);
   void emit_windows_menu_items();
 
@@ -3356,6 +3406,53 @@ void Runtime::Impl::step_walk() {
     }
     return;
   }
+  case Op::TableRows: {
+    // Row i is under push_id(i), its cells one per column, each a copy of the column's cell with
+    // {i} the row. A hidden cell, or one the table has no cell for, is drawn empty: it keeps its
+    // place, so the columns stay in line.
+    const std::size_t cols = f.w->table->columns.size();
+    const std::size_t total = static_cast<std::size_t>(f.count) * cols;
+    if (f.next > 0)
+      emit_path.pop_back(); // the cell before is done
+    if (f.next < total && frame_instances >= kMaxFrameInstances) {
+      warn_once("ari: too many repeated widget instances this frame (cap " +
+                std::to_string(kMaxFrameInstances) + ") — the table's remaining rows skipped");
+      f.next = total;
+    }
+    if (f.open_item && (f.next % cols == 0 || f.next >= total)) { // the row before is done
+      f.open_item = false;
+      instance_path.pop_back();
+      backend->pop_id();
+    }
+    if (f.next >= total) {
+      walk_.pop_back();
+      return;
+    }
+    const std::size_t k = f.next % cols;
+    const int i = static_cast<int>(f.next / cols);
+    ++f.next;
+    if (k == 0) {
+      backend->push_id(std::to_string(i).c_str());
+      instance_path.push_back(i);
+      f.open_item = true;
+    }
+    emit_path.push_back(k);
+    backend->grid_next_cell();
+    if (k >= f.w->children.size())
+      return; // fewer cells than columns: this one is empty
+    ++frame_instances;
+    if (!f.inst)
+      f.inst = std::make_unique<std::optional<Widget>>();
+    Widget &made = f.inst->emplace(f.w->children[k]);
+    substitute_index_in(made, std::to_string(i));
+    made.repeat.clear();
+    if (!visible(made))
+      return; // hidden: its cell stays, empty
+    autofocus(made, i);
+    next_is_cell = true; // §5.26 a group's fill covers its cell
+    emit_node(made);
+    return;
+  }
   case Op::Container: {
     // Nothing here pushes to walk_, so the frame is popped once it is done with.
     if (f.grid) {
@@ -3472,6 +3569,10 @@ void Runtime::Impl::emit_container(const Widget &w) {
     if ((w.command_line || w.grants) && !is_mounts_app(sub_prefix) &&
         prepared_mounts_.insert(sub_prefix).second)
       publish_command_line(sub_prefix, w);
+    // ARIADNE_SHELL.md 4.3 its datasets at its sub-prefix, before its init: (which may read their
+    // status), as a document's are bound before its own.
+    if (w.mount_scene && !w.mount_scene->data.empty() && data_bound_.insert(sub_prefix).second)
+      bind_mount_data(sub_prefix, *w.mount_scene);
     // Run the fragment's init: once (after its holes exist, so init may seed through them), its
     // state: seeds (§5.3) just before. Kept in ran_inits, NOT cleared on reconcile — a one-shot
     // seed, never re-run per frame/rebuild.
@@ -3504,16 +3605,7 @@ void Runtime::Impl::emit_container(const Widget &w) {
   after.fns = static_cast<bool>(w.functions);
 
   if (w.layout.kind == LayoutKind::Grid || w.layout.kind == LayoutKind::Horizontal) {
-    // The grid's identity: its id:, else its label, else where it sits in the tree. Backends key
-    // their per-grid state by it (ImGui its table, whose column widths it keeps), and so does the
-    // persisted tree.<id>, so two unnamed grids in one window must not share it. The generated id
-    // is one state-path segment ("~0_2_1"), so tree.<id>.tracks stays one key.
-    std::string id = !w.id.empty() ? w.id : w.label;
-    if (id.empty()) {
-      id = "~";
-      for (std::size_t i = 0; i < emit_path.size(); ++i)
-        id += (i ? "_" : "") + std::to_string(emit_path[i]);
-    }
+    const std::string id = grid_id(w);
     // §11.4 two-way track edge: a resizable row-split grid persists its dragged pane sizes to
     // tree.<id>.tracks, and a resizable table its column widths to tree.<id>.columns. Seed the
     // backend from the persisted sizes before opening (apply-once on the backend side), then write
@@ -3522,21 +3614,15 @@ void Runtime::Impl::emit_container(const Widget &w) {
     const bool split = w.layout.is_row_split();
     const bool table = w.layout.resizable && !split;
     std::string tracks_path, columns_path;
-    // After forget_layout(), as for a window: the first frame takes no sizes the last document
-    // persisted.
-    const auto persisted = [&](const std::string &path) {
-      const bool fresh = windows_forgotten && laid_out.insert(path).second;
-      return fresh ? std::vector<float>{} : parse_tracks(read_string(app, path));
-    };
     if (split) {
       tracks_path = resolve("tree." + id + ".tracks");
-      const std::vector<float> seed = persisted(tracks_path);
+      const std::vector<float> seed = persisted_sizes(tracks_path);
       if (!seed.empty())
         b.seed_grid_tracks(seed);
     }
     if (table) {
       columns_path = resolve("tree." + id + ".columns");
-      const std::vector<float> seed = persisted(columns_path);
+      const std::vector<float> seed = persisted_sizes(columns_path);
       if (!seed.empty())
         b.seed_grid_columns(seed);
     }
@@ -3566,6 +3652,72 @@ void Runtime::Impl::emit_container(const Widget &w) {
     scope_stack.pop_back();
   if (after.fns)
     fn_stack.pop_back();
+}
+
+// The grid's identity: its id:, else its label, else where it sits in the tree. Backends key their
+// per-grid state by it (ImGui its table, whose column widths it keeps), and so does the persisted
+// tree.<id>, so two unnamed grids in one window must not share it. The generated id is one
+// state-path segment ("~0_2_1"), so tree.<id>.tracks stays one key.
+std::string Runtime::Impl::grid_id(const Widget &w) const {
+  std::string id = !w.id.empty() ? w.id : w.label;
+  if (id.empty()) {
+    id = "~";
+    for (std::size_t i = 0; i < emit_path.size(); ++i)
+      id += (i ? "_" : "") + std::to_string(emit_path[i]);
+  }
+  return id;
+}
+
+// After forget_layout(), as for a window: the first frame takes no sizes the last document
+// persisted.
+std::vector<float> Runtime::Impl::persisted_sizes(const std::string &path) {
+  const bool fresh = windows_forgotten && laid_out.insert(path).second;
+  return fresh ? std::vector<float>{} : parse_tracks(read_string(app, path));
+}
+
+// Kind::Table: one grid under the table's id, its column widths seeded and persisted as a resizable
+// grid's (tree.<id>.columns), the header row drawn here (emit_table_header), then on the walk the
+// rows (Op::TableRows), the grid's end and the widths written back (Op::Container), and the table's
+// own end (leave_node). The sort is at its bind, else tree.<id>.sort, as tabs keep tree.<id>.tab.
+CVC_ARI_NOINLINE bool Runtime::Impl::begin_table(const Widget &w, bool dis) {
+  if (!w.table || w.table->columns.empty())
+    return false;
+  Backend &b = *backend;
+  const std::string id = grid_id(w);
+  b.push_id(id.c_str());
+  std::string columns_path;
+  if (w.layout.resizable) {
+    columns_path = resolve("tree." + id + ".columns");
+    const std::vector<float> seed = persisted_sizes(columns_path);
+    if (!seed.empty())
+      b.seed_grid_columns(seed);
+  }
+  if (!b.begin_grid(w.layout, id.c_str())) {
+    b.pop_id();
+    return false;
+  }
+  const std::string sort_path = resolve(!w.bind.empty() ? w.bind : "tree." + id + ".sort");
+  TableHeaderContext header{app, b, sort_path, read_string(app, sort_path),
+                            [this](const std::string &event) { enqueue(event); }};
+  if (emit_table_header(header, w)) // a header's click is the table's, not a card's around it
+    ++clicks_fired;
+  WalkFrame leave; // last: pop_id and the table's tail (leave_node)
+  leave.op = WalkFrame::Op::Node;
+  leave.w = &w;
+  leave.dis = dis;
+  walk_.push_back(std::move(leave));
+  WalkFrame after; // then end_grid and the widths written back
+  after.op = WalkFrame::Op::Container;
+  after.w = &w;
+  after.grid = true;
+  after.path2 = std::move(columns_path);
+  walk_.push_back(std::move(after));
+  WalkFrame rows; // first: the rows
+  rows.op = WalkFrame::Op::TableRows;
+  rows.w = &w;
+  rows.count = w.table->rows.empty() ? 0 : eval_count(w.table->rows);
+  walk_.push_back(std::move(rows));
+  return true;
 }
 
 // A `repeat` template: the count and the outermost repeat's bookkeeping, then its instances, one a
@@ -4091,6 +4243,11 @@ void Runtime::Impl::emit_node(const Widget &w) {
     break;
   }
 
+  case Kind::Table: // the header row, then its rows on the walk; its end is leave_node's
+    if (begin_table(w, dis))
+      return;
+    break;
+
   case Kind::Settings: {
     if (!settings_watch) {
       settings_watch = std::make_shared<SettingsWatch>();
@@ -4611,8 +4768,9 @@ void Runtime::Impl::emit_node_tail(const Widget &w, bool dis, bool inner_click) 
   };
   // A group's click is the innermost taker's: a widget inside it with an on_click of its own (an
   // avatar opening a profile in a card opening a post), or a button, keeps it.
-  // A heatmap's on_click, on_hover and tooltip are per cell, its own (emit_heatmap).
-  const bool own_pointer = w.kind == Kind::Heatmap;
+  // A heatmap's on_click, on_hover and tooltip are per cell, its own (emit_heatmap). A table has
+  // none of its own: they go on its cells (the last item drawn is its last cell).
+  const bool own_pointer = w.kind == Kind::Heatmap || w.kind == Kind::Table;
   if (!own_pointer && !w.on_click.empty() && !inner_click && b.item_clicked()) {
     fire_pointer(w.on_click);
     ++clicks_fired;
@@ -4704,6 +4862,7 @@ void Runtime::Impl::leave_node(WalkFrame &f) {
       b.pop_id();
     break;
   case Kind::Tabs:
+  case Kind::Table: // its rows and its grid are done
     b.pop_id();
     break;
   default: // Kind::Custom, after its menu
@@ -5748,6 +5907,7 @@ void Runtime::Impl::render() {
     }
     planted_holes.clear();
     wired_mounts.clear();
+    data_bound_.clear(); // the new tree's load:s bind theirs as they first draw
     drop_mount_ticks(); // §12 the old tree's module ticks the new one does not keep
     // ARIADNE_SHELL.md 4.6 the new tree's load:s publish their command lines again as the walk
     // meets them (plan_windows_menu, above, found them and what they hold).
@@ -5857,6 +6017,10 @@ void Runtime::Impl::plan_windows_menu() {
   std::set<std::string> toggled;   // open-state paths a menu item of the document already toggles
   std::set<std::string> bar_menus; // the titles of the menus straight in a menubar
   std::vector<WindowsMenuPlan::Item> windows;
+  // ARIADNE_SHELL.md 4.3 the mounts with a scene or datasets (scene_plan_), and the open
+  // mounts: entries' wrappers among them (a load: met in the walk is any other mount).
+  std::vector<ScenePlan> scene_plan;
+  std::set<const Widget *> slot_wrappers;
   // Walk the tree with the scope each node resolves its binds in (a load: mount scopes its
   // children, §12). A repeated widget is made per frame: a repeated window's instances are listed
   // as the menu is drawn (repeated_windows).
@@ -5920,6 +6084,11 @@ void Runtime::Impl::plan_windows_menu() {
           p.repeated.emplace_back(&w, scope);
           p.any_closable = p.any_closable || w.closable;
         }
+        // ARIADNE_SHELL.md 4.3 its scene would need a SceneGraph per instance: not drawn.
+        if (!w.scope.empty() && w.mount_scene && w.mount_scene->has_scene())
+          warn_once("ari: a repeated load:'s scene is not drawn (" + resolve_bind(scope, w.scope) +
+                    "): its instances share one sub-prefix pattern, and each would need a scene "
+                    "of its own");
         // §5.25 a repeated mount with a menubar of its own: an application per instance.
         if (!w.scope.empty()) {
           if (const Widget *bar = first_bar(w)) {
@@ -5944,6 +6113,10 @@ void Runtime::Impl::plan_windows_menu() {
         // ARIADNE_SHELL.md 4.5 a load:'s mount and what it holds (a mounts: entry's is its slot's)
         if (!is_mounts_app(inner))
           loads[inner] = w.grants;
+        if (w.mount_scene && !slot_wrappers.count(&w)) // a load:'s (4.3)
+          scene_plan.push_back(
+              {inner, !w.app_name.empty() ? w.app_name : w.scope.substr(w.scope.rfind('.') + 1),
+               scope, w.mount_scene, std::string(), nullptr});
       }
       const Widget *const mount = v.mount;
       const std::string &mount_scope = v.mount_scope;
@@ -6016,6 +6189,12 @@ void Runtime::Impl::plan_windows_menu() {
           todo.push_back({nullptr, scope, false, nullptr, {}, {}, *e}); // then its application
           todo.push_back({(*e)->second.wrapper.get(), scope, false, nullptr, {}, {}});
         }
+        for (const auto *e : open) // 4.3 each one's scene and datasets
+          if (const Widget *wr = e->second.wrapper.get(); wr->mount_scene) {
+            slot_wrappers.insert(wr);
+            scene_plan.push_back({e->first, e->second.name, scope, wr->mount_scene,
+                                  key + cvc::state::SEPARATOR + e->second.as, w.mounts});
+          }
         break;
       }
       case Kind::Window: {
@@ -6023,6 +6202,8 @@ void Runtime::Impl::plan_windows_menu() {
         windows.push_back({w.label.empty() ? id : w.label,
                            resolve_bind(scope, "tree." + id + ".open"),
                            resolve_bind(scope, "tree." + id + ".raise")});
+        if (mount && id == kSceneWindowId) // the loader's scene window, shown as its scene is
+          windows.back().when_path = resolve_bind(scope, "ariadne.scene");
         p.any_closable = p.any_closable || w.closable;
         in_menubar = false;
         break;
@@ -6050,6 +6231,7 @@ void Runtime::Impl::plan_windows_menu() {
   windows_menu = std::move(p);
   mounts_widgets_ = std::move(mounts);
   load_grants_ = std::move(loads);
+  scene_plan_ = std::move(scene_plan);
 }
 
 std::vector<Runtime::Impl::RepeatedWindow> Runtime::Impl::repeated_windows() {
@@ -6080,9 +6262,14 @@ std::vector<Runtime::Impl::RepeatedWindow> Runtime::Impl::repeated_windows() {
   return out;
 }
 
+bool Runtime::Impl::windows_menu_listed(const WindowsMenuPlan::Item &it) {
+  return it.when_path.empty() || read_string(app, it.when_path) == "1";
+}
+
 bool Runtime::Impl::windows_menu_has_items() {
-  return !windows_menu.items.empty() || !frame_apps.empty() ||
-         (!windows_menu.repeated.empty() && !repeated_windows().empty());
+  return std::any_of(windows_menu.items.begin(), windows_menu.items.end(),
+                     [&](const WindowsMenuPlan::Item &it) { return windows_menu_listed(it); }) ||
+         !frame_apps.empty() || (!windows_menu.repeated.empty() && !repeated_windows().empty());
 }
 
 void Runtime::Impl::emit_windows_menu(const std::string &title) {
@@ -6109,8 +6296,9 @@ void Runtime::Impl::emit_windows_menu_items() {
     }
   };
   for (const WindowsMenuPlan::Item &it : windows_menu.items)
-    if (quit_apps.empty() || app_running(it.open_path)) // §5.25 a quit application's come back
-      item(it.title, it.open_path, it.raise_path);      // with it
+    if ((quit_apps.empty() || app_running(it.open_path)) && // §5.25 a quit application's come
+        windows_menu_listed(it))                            // back with it
+      item(it.title, it.open_path, it.raise_path);
   for (const RepeatedWindow &r : repeated_windows()) {
     b.push_id(r.id.c_str()); // two instances may share a title (the label, before their names)
     item(r.title, r.open_path, r.raise_path);
@@ -6881,6 +7069,8 @@ void Runtime::Impl::open_mount(MountSlot &slot, const Widget &w) {
     mount_functions[sub] = fns;
   const Widget &wrapper = *slot.wrapper;
   publish_command_line(sub, wrapper); // 4.6 its argv and args, before its init: reads them
+  if (wrapper.mount_scene && !wrapper.mount_scene->data.empty()) // before its init: (4.3)
+    bind_mount_data(sub, *wrapper.mount_scene);
   if ((!wrapper.state_seeds.empty() || !wrapper.init_script.empty()) &&
       ran_inits.insert(sub).second) {
     seed_state(app, sub, wrapper.state_seeds); // just before init:, which may override them
@@ -7113,6 +7303,8 @@ bool Runtime::Impl::reconcile_mounts_once() {
       s.tests = std::move(r.tests);
       publish_mount_status(s);
       publish_command_line(x.sub, *s.wrapper);
+      if (s.wrapper->mount_scene && !s.wrapper->mount_scene->data.empty())
+        bind_mount_data(x.sub, *s.wrapper->mount_scene); // its data: as it is now
       mount_instances_.clear();
       // Its on_tick: resident stays when its program is the same (drop_mount_ticks compares).
       drop_mount_ticks();
@@ -10562,6 +10754,50 @@ bool Runtime::reload_mounts_if_changed() {
       any = true;
     }
   return any;
+}
+
+void Runtime::Impl::bind_mount_data(const std::string &sub, const MountScene &ms) {
+  const std::shared_ptr<DataStore> store = DataStore::of(app);
+  for (const DataSpec &d : ms.data) {
+    try {
+      store->bind(sub, d);
+    } catch (const std::exception &e) {
+      warn_once("ari: mount '" + sub + "': data." + d.name + ": " + e.what());
+    }
+  }
+}
+
+bool Runtime::scene_mounts(std::vector<SceneMount> &out) const {
+  if (m_->has_pending)
+    return false; // the plan is the old tree's until the next frame swaps the new one in
+  out.clear();
+  for (const Impl::ScenePlan &p : m_->scene_plan_) {
+    if (!p.scene || !m_->app_running(p.scope))
+      continue; // §5.25 an application the user quit: its scene comes down until Restart
+    SceneMount s;
+    s.scope = p.scope;
+    s.name = p.name;
+    s.scene = p.scene;
+    // ARIADNE_SHELL.md 4.4: a load:'s in_background:; a mounts: entry's background, else its
+    // slot's in_background: (a value, or a key holding hold or a true value).
+    std::string bg = p.scene->background;
+    if (!p.entry.empty()) {
+      bg = read_string(m_->app, p.entry + cvc::state::SEPARATOR + "background");
+      if (bg != "run" && bg != "hold") {
+        bg.clear();
+        if (p.spec && !p.spec->background.empty()) {
+          bg = p.spec->background;
+        } else if (p.spec && !p.spec->background_bind.empty()) {
+          const std::string v =
+              read_string(m_->app, resolve_bind(p.parent_scope, p.spec->background_bind));
+          bg = v == "hold" || v == "1" || v == "true" ? "hold" : "run";
+        }
+      }
+    }
+    s.hold = bg == "hold";
+    out.push_back(std::move(s));
+  }
+  return true;
 }
 
 // A backend with no list draws the rows as stacked radio buttons (the first shown picked while

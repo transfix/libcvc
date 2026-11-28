@@ -1143,6 +1143,11 @@ add_test(NAME cvcgl_imgui_windows_menu COMMAND cvcgl_imgui_windows_menu)
 add_executable(cvcgl_imgui_tabs_list test/cvcgl_imgui_tabs_list.cpp)
 target_link_libraries(cvcgl_imgui_tabs_list PRIVATE cvcGL)
 add_test(NAME cvcgl_imgui_tabs_list COMMAND cvcgl_imgui_tabs_list)
+# ImGuiBackend's table (Kind::Table): its header row of TableHeaders, a click on one sorting (and
+# toggling), every row in the one table, through ImGui's own mouse input on a bare context (no GL).
+add_executable(cvcgl_imgui_table test/cvcgl_imgui_table.cpp)
+target_link_libraries(cvcgl_imgui_table PRIVATE cvcGL)
+add_test(NAME cvcgl_imgui_table COMMAND cvcgl_imgui_table)
 add_executable(cvcgl_imgui_radio test/cvcgl_imgui_radio.cpp)
 target_link_libraries(cvcgl_imgui_radio PRIVATE cvcGL)
 add_test(NAME cvcgl_imgui_radio COMMAND cvcgl_imgui_radio)
@@ -1334,6 +1339,12 @@ if(NOT EMSCRIPTEN)
                                PRIVATE CVC_VTK_HAS_LIGHTING_UNIFORMS_EVERY_RENDER=1)
   endif()
   add_test(NAME cvcgl_ariadne_view_stacking COMMAND cvcgl_ariadne_view_stacking)
+  # Scenes of mounted documents (docs/roadmap/ARIADNE_SHELL.md 4.3, 4.4): each mount's scene apart
+  # at its sub-prefix, its binds there, its scene window and a further view of it, its world on a
+  # clock of its own (its rate or the shell's), held in the background while its window is closed.
+  add_executable(cvcgl_ariadne_mount_scenes test/cvcgl_ariadne_mount_scenes.cpp)
+  target_link_libraries(cvcgl_ariadne_mount_scenes PRIVATE cvcGL)
+  add_test(NAME cvcgl_ariadne_mount_scenes COMMAND cvcgl_ariadne_mount_scenes)
   # Not a test: what a frame of a document costs offscreen, CPU and GPU, run by hand
   # (cvcgl_ari_frame_bench doc.ari ...).
   add_executable(cvcgl_ari_frame_bench test/cvcgl_ari_frame_bench.cpp)
@@ -1903,7 +1914,7 @@ endif()
 # (CMake/CvcHostStack.cmake). Names not built here are skipped.
 include("${CMAKE_CURRENT_LIST_DIR}/../../CMake/CvcHostStack.cmake")
 cvc_document_host_stack(cvcgl_ariadne_realize cvcgl_ari_switch cvcgl_ari_golden cvcgl_ariadne_views
-                        cvcgl_ariadne_view_stacking cvcgl_ari_frame_bench
+                        cvcgl_ariadne_view_stacking cvcgl_ariadne_mount_scenes cvcgl_ari_frame_bench
                         cvcgl_ariadne_scenes cvcgl_ariadne_repeat cvcgl_ariadne_animation
                         cvcgl_ariadne_clip
                         cvcgl_ariadne_prototypes cvcgl_ari_record

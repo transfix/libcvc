@@ -1,0 +1,20 @@
+# An application for the scene_windows golden: a few lit shapes on a gradient of its own.
+
+meta:
+  name: Shapes
+  min_libcvc: 4.0.6
+
+scene:
+  chrome: false
+  background: { top: [0.30, 0.36, 0.48], bottom: [0.08, 0.09, 0.12] }
+  cameras:
+    - camera: main
+      azimuth: 35
+      elevation: 25
+  nodes:
+    - { node: base, type: geometry, source: { box: { size: [6, 6, 0.3] } }, transform: { position: [0, 0, -0.15] }, material: { color: [0.55, 0.55, 0.58] } }
+    - { node: cube, type: geometry, source: { box: { size: [1.6, 1.6, 1.6] } }, transform: { position: [-1.4, -0.6, 0.8] }, material: { color: [0.90, 0.35, 0.20] } }
+    - { node: ball, type: geometry, source: { sphere: 0.9 }, transform: { position: [1.3, 0.8, 0.9] }, material: { color: [0.20, 0.55, 0.90] } }
+  lights:
+    - rig: three_point
+      key: { intensity: 1.3, azimuth: -40, elevation: 50 }

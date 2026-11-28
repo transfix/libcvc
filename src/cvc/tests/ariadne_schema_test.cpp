@@ -1,6 +1,7 @@
 // The .ari schema (docs/ARIADNE.md §14): the file the library carries, its shape (every built-in
 // widget type and top-level block in it, in the validator's subset), what validate_* and a load
-// find (with where), what they accept, and the shipped documents, which must all be valid.
+// find (with where), what they accept, and the shipped documents, which must all be valid. Also
+// that the spec (docs/ARIADNE_SPEC.md) gives each top-level block of the schema its entry.
 
 #include <algorithm>
 #include <cvc/ariadne/loader.h>
@@ -166,6 +167,31 @@ TEST(AriSchema, EveryBuiltinBlockIsInTheSchema) {
   for (const std::string &b : builtin_ari_blocks())
     EXPECT_TRUE(doc.contains(b)) << b;
 }
+
+// The schema is the spec's structural half (docs/ARIADNE_SPEC.md §1): the spec's §8 gives each
+// top-level key the schema allows one entry, a "#### `key:`" heading, and no other key one.
+TEST(AriSpec, EveryTopLevelBlockHasItsEntry) {
+  const njson s = schema();
+  std::set<std::string> keys;
+  for (const auto &kv : s["$defs"]["document"]["properties"].items())
+    keys.insert(kv.key());
+  ASSERT_FALSE(keys.empty());
+  const std::string spec = read_file(kSource / "docs" / "ARIADNE_SPEC.md");
+  const auto from = spec.find("\n## 8. ");
+  ASSERT_NE(from, std::string::npos) << "docs/ARIADNE_SPEC.md has no §8";
+  const auto to = spec.find("\n## 9. ", from);
+  std::istringstream in(spec.substr(from, to == std::string::npos ? std::string::npos : to - from));
+  std::multiset<std::string> entries;
+  for (std::string line; std::getline(in, line);)
+    if (line.rfind("#### `", 0) == 0 && line.size() > 8 &&
+        line.compare(line.size() - 2, 2, ":`") == 0)
+      entries.insert(line.substr(6, line.size() - 8));
+  for (const std::string &k : keys)
+    EXPECT_EQ(entries.count(k), 1u) << "ARIADNE_SPEC.md §8 needs one entry for " << k << ":";
+  for (const std::string &e : entries)
+    EXPECT_TRUE(keys.count(e)) << "ARIADNE_SPEC.md §8 has an entry for " << e
+                               << ":, which is not a top-level key of the schema";
+}
 #endif // CVC_SCHEMA_TEST_HAVE_JSON
 
 // ---- what a check finds -----------------------------------------------------------------------
@@ -224,6 +250,13 @@ const Mistake kMistakes[] = {
      8},
     {"a map in a state: list", "state:\n  a: [1, {b: 2}]\n", "/state/a/1",
      "a map is the wrong type here", 2, 10},
+    {"a misspelt key in a table's column",
+     "windows:\n  - window: W\n    children:\n      - type: table\n        columns:\n          "
+     "- {label: a, wdth: 9}\n",
+     "/windows/0/children/0/columns/0", "unknown key 'wdth'", 0, 0},
+    {"a table's cells: that is not a list",
+     "windows:\n  - window: W\n    children:\n      - type: table\n        cells: {text: a}\n",
+     "/windows/0/children/0/cells", "a map is the wrong type here", 5, 16},
 };
 
 const char *const kValid[] = {
@@ -264,6 +297,19 @@ const char *const kValid[] = {
     "root:\n  - load: cvc://components/conference.ari\n    as: site\n    name: (state-get "
     "\"site_name\")\n",
     "scene:\n  clock: {hz: 60, max_lag: 0.5}\n",
+    // a table: its columns (a map, or a label alone), cells, rows, sort bind and on:, resizable
+    // and borders; and its short form
+    "windows:\n  - window: W\n    children:\n      - type: table\n        id: results\n"
+    "        bind: search.sort\n        on: (state-set \"req.search\" \"1\")\n"
+    "        rows: (state-get \"search.count\")\n        resizable: true\n"
+    "        borders: { show: inner }\n        columns:\n          - { label: \"\", width: 64 }\n"
+    "          - { label: name, width: 232, sort: name }\n"
+    "          - { label: size, width: \"20%\" }\n          - plain\n        cells:\n"
+    "          - type: button\n            label: Open\n"
+    "            on: (state-set \"nav.open\" \"{i}\")\n          - text: \"\"\n"
+    "            bind: search.res.packages.{i}.name\n          - text: x\n          - text: y\n",
+    "root:\n  - table: T\n    rows: 3\n    columns: [a, b]\n    cells: [{text: \"{i}\"}, {text: "
+    "b}]\n",
     // state: (§5.3): nested and dotted keys, an app-root one, a list, nothing, a flag
     "state:\n  run: {crop: 600, paused: 0, name: x}\n  view.camera: follow\n  /app.theme: dark\n"
     "  pos: [1, 2, 3]\n  empty:\n  ready: true\n",

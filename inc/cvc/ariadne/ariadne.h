@@ -541,6 +541,20 @@ public:
   // Whether a mount's file changed since it was parsed; each one that did is parsed again at the
   // next frame, and keeps its on_tick: resident when its program did not change. Host thread.
   bool reload_mounts_if_changed();
+  // docs/roadmap/ARIADNE_SHELL.md 4.3 (SH3): the mounts that carry a scene or datasets
+  // (Widget::mount_scene), as they stand: every load: in the tree (not one under repeat:) and
+  // every open mounts: entry, less the applications the user quit. `hold` is whether its world
+  // holds while its scene is drawn nowhere: its load:'s in_background:, or its entry's
+  // `background` (run | hold), else its slot's in_background:. AppRuntime realizes each one's
+  // scene from this list and takes it down when it leaves the list. False (and `out` left alone)
+  // while a new tree waits for the next frame: the list would be the old tree's. Host thread.
+  struct SceneMount {
+    std::string scope; // its sub-prefix
+    std::string name;  // its application name
+    std::shared_ptr<const MountScene> scene;
+    bool hold = false;
+  };
+  bool scene_mounts(std::vector<SceneMount> &out) const;
 
 private:
   struct Impl;

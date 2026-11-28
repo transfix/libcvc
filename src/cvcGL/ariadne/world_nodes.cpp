@@ -49,6 +49,7 @@
 #include <cvc/ariadne/uri.h>
 #include <cvc/ariadne/value.h>
 #include <cvc/core/app.h>
+#include <cvc/core/scene_clocks.h> // a mounted scene's own clock (ARIADNE_SHELL.md 4.4)
 #include <cvc/core/sliced_task.h>
 #include <cvc/core/types.h> // CVC_VERSION_STRING
 #include <cvc/geometry/geometry.h>
@@ -485,7 +486,8 @@ void tick_foliage_wind(WorldRT &rt, vtkRenderer *ren) {
   if (on) {
     constexpr double kPi = 3.14159265358979323846, kSwayPeriod = 2.0 * kPi / 1.3;
     const double rad = sw->mean_dir() * kPi / 180.0, u = sw->mean_speed() / 9.0,
-                 t = ari::shown_time(app, rt.prefix, app.world_clock().t()); // shown_clock.h
+                 t = ari::shown_time(app, rt.prefix,
+                                     cvc::scene_clock(app, rt.prefix).t()); // shown_clock.h
     const double lean = std::min(0.03 * u * u * strength, 0.3);
     const double sway = std::min(0.02 * u * strength, 0.2);
     in.f3["uFwDir"] = {float(std::cos(rad)), float(std::sin(rad)), 0.0f};
@@ -505,7 +507,8 @@ void tick_foliage_wind(WorldRT &rt, vtkRenderer *ren) {
   {
     cvc::ocean::sea_fronts fronts;
     if (on)
-      ari::scene_fronts(rt.air.get(), ari::shown_time(app, rt.prefix, app.world_clock().t()),
+      ari::scene_fronts(rt.air.get(),
+                        ari::shown_time(app, rt.prefix, cvc::scene_clock(app, rt.prefix).t()),
                         fronts);
     for (const auto &[name, v] :
          cvc::gl::StormFrontGLSL::at(fronts.cells, fronts.ux, fronts.uy, fronts.ref).uniforms())

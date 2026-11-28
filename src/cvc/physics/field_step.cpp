@@ -663,6 +663,7 @@ void field_set::set(world_backend &be, field_id id, const field &f) {
   wake_in(be, it->second.scalar);
   wake_in(be, c.scalar);
   it->second = std::move(c);
+  _held.clear(); // what it held may be the old surface's (held_at)
 }
 
 field field_set::get(field_id id) const {
@@ -688,6 +689,7 @@ void field_set::snapshot(std::vector<field_snapshot> &out) const {
 
 void field_set::remove(field_id id) {
   need(_fields.erase(id.value) == 1, "unknown or removed field id " + std::to_string(id.value));
+  _held.clear(); // held_at keys on the field's address, which a later add may reuse
 }
 
 void field_set::body_added(const world_backend &be, body_id id, const body_desc &d) {
@@ -814,6 +816,30 @@ bool field_set::air_at(const vec3 &p, double t, double &rho, vec3 &wind) const {
   return false;
 }
 
+const fluid_surface *field_set::held_at(const compiled_field &cf, double t) const {
+  const fluid_surface *own = cf.desc.surface.get();
+  held_surface *slot = nullptr;
+  for (held_surface &h : _held)
+    if (h.field == &cf) {
+      // The time to the bit, as the sea's cache keys it, and the surface it was held from.
+      if (h.own == own && std::memcmp(&h.t, &t, sizeof t) == 0)
+        return h.at ? h.at.get() : own;
+      slot = &h;
+      break;
+    }
+  fluid_surface::parallel_run par; // the workers, once apply has made them; else this thread
+  if (field_workers *fw = _workers.get())
+    par = [fw](std::size_t n, const std::function<void(std::size_t)> &fn) { fw->run(n, fn); };
+  held_surface h{&cf, own, t, own->at(t, par)};
+  if (slot)
+    *slot = std::move(h); // the old time's let go
+  else {
+    _held.push_back(std::move(h));
+    slot = &_held.back();
+  }
+  return slot->at ? slot->at.get() : own;
+}
+
 bool field_set::water_at(const vec3 &p, double t, water_sample &out, const wake_read &wake) const {
   out = water_sample{};
   for (const auto &fe : _fields) {
@@ -822,7 +848,9 @@ bool field_set::water_at(const vec3 &p, double t, water_sample &out, const wake_
     if (cf.desc.kind != field_kind::fluid || !(p.x >= g.lo[0] && p.x <= g.hi[0]) ||
         !(p.y >= g.lo[1] && p.y <= g.hi[1]) || !(p.z >= g.lo[2]))
       continue;
-    const fluid_surface *surface = cf.desc.surface.get();
+    // The surface held at t, as the step reads it: the first read at a new time (often a boat
+    // plant's, before the step) holds it, its per-time work on the field workers.
+    const fluid_surface *surface = cf.desc.surface ? held_at(cf, t) : nullptr;
     // With a wake, as a body reads it in the step: the others' waves on the surface (all of them
     // for no body), their motion at the point's depth below that.
     const fluid_wake *fw = wake.on && surface ? cf.wake.get() : nullptr;
@@ -1398,28 +1426,22 @@ void field_set::apply(world_backend &be, const world_config &cfg, double t) {
     awake.push_back(pb);
   }
 
-  // Each field's surface held at t (fluid_surface::at: its per-time work done as tasks of the field
-  // workers), made once a step as first needed, by a wake or by the cells' reads below.
-  std::vector<std::pair<const compiled_field *, std::shared_ptr<const fluid_surface>>> held;
-  fluid_surface::parallel_run par; // the workers, once some read needs a surface
+  // Each field's surface held at t (held_at: fluid_surface::at, its per-time work done as tasks of
+  // the field workers), as first needed by a wake or by the reads below; made by this step's first
+  // read at t, or by a read before the step at the same time (water_at: a boat plant's).
+  std::vector<std::pair<const compiled_field *, const fluid_surface *>> held;
   const auto workers = [&]() -> field_workers & {
     if (!_workers || _workers->threads() != cfg.field_threads)
       _workers = std::make_unique<field_workers>(cfg.field_threads);
     return *_workers;
   };
   const auto held_of = [&](const compiled_field &cf) -> const fluid_surface * {
-    const fluid_surface *own = cf.desc.surface.get();
     for (const auto &h : held)
       if (h.first == &cf)
-        return h.second ? h.second.get() : own;
-    if (!par) {
-      workers();
-      par = [this](std::size_t n, const std::function<void(std::size_t)> &fn) {
-        _workers->run(n, fn);
-      };
-    }
-    held.emplace_back(&cf, own->at(t, par)); // its per-time work, as tasks for the workers
-    return held.back().second ? held.back().second.get() : own;
+        return h.second;
+    workers(); // made, so a surface not yet held at t does its per-time work on them
+    held.emplace_back(&cf, held_at(cf, t));
+    return held.back().second;
   };
 
   // The wakes (field::wake): their waves move on and the bodies' sources go in, before the reads.
@@ -1526,7 +1548,7 @@ void field_set::apply(world_backend &be, const world_config &cfg, double t) {
         return nullptr;
       for (const auto &h : held) // read only: every one was held above
         if (h.first == &cf)
-          return h.second ? h.second.get() : cf.desc.surface.get();
+          return h.second;
       return cf.desc.surface.get();
     };
     workers().run(hulls.size(), [&](std::size_t k) {

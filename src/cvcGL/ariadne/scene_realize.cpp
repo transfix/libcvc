@@ -17,6 +17,7 @@
 #include <cvc/ariadne/uri.h> // §13.4 resolve a node source: URI to a local path (temp-file bridge)
 #include <cvc/ariadne/world_vehicles.h> // its vehicles: their intents key
 #include <cvc/core/app.h>
+#include <cvc/core/scene_clocks.h> // a mounted scene's own clock (ARIADNE_SHELL.md 4.4)
 #include <cvc/core/world_clock.h> // §9 time: tick_scene drives app.world_clock() for a clock: scene
 #include <cvc/geometry/geometry.h>
 #include <cvc/geometry/geometry_file_io.h>
@@ -1827,9 +1828,11 @@ void realize_physics(SceneGraph &sg, const cvc::ariadne::Scene &scene,
       in.data_path = b.path;
       inputs.push_back(std::move(in));
     }
-  cvc::ariadne::SceneWorld::use_vehicle_clock(sg.appContext(), scene, warnings);
-  out.world = cvc::ariadne::SceneWorld::build(sg.appContext(), scene.physics, inputs,
-                                              out.height_fields, stats_key, warnings);
+  // On the scene's clock: a mounted document's own (ARIADNE_SHELL.md 4.4), else the app's.
+  cvc::ariadne::SceneWorld::use_vehicle_clock(out.scene_world_clock(), scene, warnings);
+  out.world =
+      cvc::ariadne::SceneWorld::build(sg.appContext(), scene.physics, inputs, out.height_fields,
+                                      stats_key, warnings, out.own_world_clock());
   if (!out.world)
     return;
   out.physics = &out.world->world();
@@ -2097,7 +2100,7 @@ void realize_animations(RealizedScene &out, const cvc::ariadne::Scene &scene,
     b->playing_path = cvc::ariadne::resolve_bind(bind_prefix, base + ".playing");
     b->speed_path = cvc::ariadne::resolve_bind(bind_prefix, base + ".speed");
     b->head.playing = a.autoplay;
-    b->last_world = out.app->world_clock().t(); // the first frame moves it by that frame's step
+    b->last_world = out.scene_world_clock().t(); // the first frame moves it by that frame's step
     b->targets.resize(a.tracks.size());
     double clips_end = 0.0;
     for (std::size_t i = 0; i < a.tracks.size(); ++i) {
@@ -2125,7 +2128,7 @@ void realize_animations(RealizedScene &out, const cvc::ariadne::Scene &scene,
 void tick_scene_animations(RealizedScene &r, const cvc::world_clock::step_result &step) {
   if (!r.app || r.animations.empty())
     return;
-  cvc::world_clock &wc = r.app->world_clock();
+  cvc::world_clock &wc = r.scene_world_clock();
   const double now = wc.t() + step.alpha * wc.fixed_dt(); // between quanta, as a body is posed
   for (const std::shared_ptr<SceneAnimationBinding> &bp : r.animations) {
     SceneAnimationBinding &b = *bp;
@@ -2658,6 +2661,17 @@ bool restart_scene_world(RealizedScene &realized, std::vector<std::string> *warn
   return true;
 }
 
+cvc::world_clock &RealizedScene::scene_world_clock() const {
+  return cvc::scene_clock(*app, bind_prefix);
+}
+
+cvc::world_clock *RealizedScene::own_world_clock() const {
+  if (!app)
+    return nullptr;
+  cvc::world_clock &c = cvc::scene_clock(*app, bind_prefix);
+  return &c == &app->world_clock() ? nullptr : &c;
+}
+
 cvc::world_clock::step_result tick_scene(RealizedScene &realized, vtkRenderer *renderer,
                                          double wall_dt) {
   { // a repeat: whose count changed adds or removes copies this frame, before they are drawn
@@ -2685,21 +2699,24 @@ cvc::world_clock::step_result tick_scene(RealizedScene &realized, vtkRenderer *r
   // an app — the one driver is the host that owns the clock: scene).
   if (realized.clock.present && realized.app) {
     if (!realized.clock_driver)
-      realized.clock_driver =
-          std::make_unique<cvc::ariadne::SceneClockDriver>(*realized.app, realized.clock);
+      realized.clock_driver = std::make_unique<cvc::ariadne::SceneClockDriver>(
+          *realized.app, realized.clock, realized.own_world_clock());
     // Wall delta: a caller-injected fixed dt (deterministic offscreen capture) when non-negative,
     // else real elapsed since the last tick (real-time animation, no crawl under a slow frame
     // rate). Pull, advance, push.
     // A world on a worker that has fallen behind holds the clock this frame: it runs slower than
     // its speed, as a world too heavy for this thread would, rather than further behind.
-    const bool held = realized.world_worker && wall_dt < 0.0 && realized.world_worker->behind();
+    // A mounted scene whose world the user holds in the background, drawn nowhere, holds too
+    // (ARIADNE_SHELL.md 4.4).
+    const bool held = realized.held ||
+                      (realized.world_worker && wall_dt < 0.0 && realized.world_worker->behind());
     clock_step = held ? realized.clock_driver->hold() : realized.clock_driver->drive(wall_dt);
   }
 
   // physics: step the world by the quanta the clock just ran, then pose the moving bodies' nodes
   // between the last two states, before the tickers (a custom tick may read a body's node).
   if (realized.physics_binding && realized.world && realized.app) {
-    cvc::world_clock &wc = realized.app->world_clock();
+    cvc::world_clock &wc = realized.scene_world_clock();
     try {
       cvc::gl::physics_scene_binding &view = *realized.physics_binding;
       if (realized.world_worker) {

@@ -28,6 +28,7 @@
 #include <cvc/ariadne/scene_swarm.h>
 #include <cvc/ariadne/world_vehicles.h> // vehicle_look_named, vehicle_desc_of
 #include <cvc/core/app.h>
+#include <cvc/core/scene_clocks.h> // a mounted scene's own clock (ARIADNE_SHELL.md 4.4)
 #include <cvc/core/world_clock.h>
 #include <cvc/geometry/geometry.h>
 #include <cvc/gl/GeometryNode.h>
@@ -580,7 +581,7 @@ struct swarm_view {
 
   void tick_swarm(vtkRenderer *r) {
     if (speed0 <= 0.0)
-      speed0 = std::max(1e-6, app.world_clock().scale());
+      speed0 = std::max(1e-6, cvc::scene_clock(app, prefix).scale());
     watch_city();
     const std::string restarts = ari::read_or<std::string>(app, restarts_key, "");
     if (restarts != restarts_seen) {
@@ -1104,7 +1105,7 @@ struct belief_layer : layer {
   }
   void tick(swarm_view &v, vtkRenderer *, bool) override {
     ari::SceneSwarm &s = *v.swarm;
-    const double phase = std::fmod(v.app.world_clock().t() / (5.0 * v.speed0), 1.0);
+    const double phase = std::fmod(cvc::scene_clock(v.app, v.prefix).t() / (5.0 * v.speed0), 1.0);
     if (s.coverage_revision() != seen) {
       seen = s.coverage_revision();
       const auto &walls = s.sensed_walls();

@@ -20,6 +20,7 @@
 // The refusals run on the null backend, everywhere.
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <cstdint>
@@ -1200,6 +1201,111 @@ TEST(PhysicsOceanSurface, TheHullsOnTheFieldWorkersChangeNoValue) {
       EXPECT_EQ(h, 0xe23ce116800e66c4ull) << std::hex << "state hash " << h;
     }
   }
+}
+
+namespace {
+
+// A surface that counts the times the world holds it at a time (fluid_surface::at), and those
+// with the field workers to do its per-time work on; its values are the one it wraps.
+class counted_at : public fluid_surface {
+public:
+  explicit counted_at(std::shared_ptr<const fluid_surface> s) : _s(std::move(s)) {}
+  double level(double x, double y) const override { return _s->level(x, y); }
+  double height(double x, double y, double t) const override { return _s->height(x, y, t); }
+  vec3 velocity(const vec3 &p, double t) const override { return _s->velocity(p, t); }
+  std::uint64_t digest() const override { return _s->digest(); }
+  double height_with(double x, double y, double t, surface_memo &m) const override {
+    return _s->height_with(x, y, t, m);
+  }
+  vec3 velocity_with(const vec3 &p, double t, surface_memo &m) const override {
+    return _s->velocity_with(p, t, m);
+  }
+  std::shared_ptr<const fluid_surface> at(double t, const parallel_run &run) const override {
+    ++calls; // from the world's calls, which come one at a time
+    if (run)
+      ++on_workers;
+    return _s->at(t, run);
+  }
+  mutable int calls = 0, on_workers = 0;
+
+private:
+  std::shared_ptr<const fluid_surface> _s;
+};
+
+std::uint64_t bits_of(double v) {
+  std::uint64_t b;
+  std::memcpy(&b, &v, sizeof b);
+  return b;
+}
+
+} // namespace
+
+// The first read of a fluid's surface at a field time holds it there (fluid_surface::at), and
+// every read at that time after it reads the one held: world::water_at's and the step's. A boat
+// plant reads the water before each step, so that read makes the sea's frame for the step's time,
+// on the field workers once a step has made them, and the step finds it held. One hold a field
+// time; water_at reads what a sea of its own (its frame made serially) reads, bit for bit; a field
+// given another surface, or removed and added again, at the same time reads the new one; and reads
+// between the steps change no state.
+TEST(PhysicsOceanSurface, TheFirstReadAtAFieldTimeHoldsTheSea) {
+  REQUIRE_JOLT();
+  const auto counted =
+      std::make_shared<counted_at>(std::make_shared<ocean_surface>(windy_sea(0.5)));
+  world_config c = jolt_config();
+  c.field_threads = 3;
+  world w(c);
+  const field_id water = w.add_field(ocean_water(counted));
+  w.add_body(slab(500.0, 0.0));
+  w.set_field_time(17.0);
+  const vec3 p{1.5, -2.0, -1.0};
+  w.water_at(p);
+  w.water_at({-3.0, 4.0, -0.5});
+  EXPECT_EQ(counted->calls, 1) << "one hold a field time";
+  EXPECT_EQ(counted->on_workers, 0) << "no step has made the workers yet: held on this thread";
+  w.step();
+  EXPECT_EQ(counted->calls, 1) << "the step reads the surface water_at held at its time";
+  for (int s = 0; s < 5; ++s) { // as a boat plant steps: its reads, then the world's step
+    w.water_at(p);
+    EXPECT_EQ(counted->calls, 2 + s);
+    EXPECT_EQ(counted->on_workers, 1 + s) << "held on the field workers";
+    w.step();
+    EXPECT_EQ(counted->calls, 2 + s) << "the step found it held";
+  }
+
+  const auto check = [&](const std::shared_ptr<const cvc::ocean::sea_surface> &own,
+                         const char *what) {
+    const double t = w.field_time();
+    const water_sample ws = w.water_at(p);
+    const std::array<double, 3> v = own->velocity(p.x, p.y, p.z, t);
+    EXPECT_TRUE(ws.wet) << what;
+    EXPECT_EQ(bits_of(ws.depth), bits_of(own->height(p.x, p.y, t) - p.z)) << what << ": depth";
+    EXPECT_EQ(bits_of(ws.velocity.x), bits_of(v[0])) << what << ": u";
+    EXPECT_EQ(bits_of(ws.velocity.y), bits_of(v[1])) << what << ": v";
+    EXPECT_EQ(bits_of(ws.velocity.z), bits_of(v[2])) << what << ": w";
+  };
+  check(windy_sea(0.5), "the held sea");
+  w.set_field(water, ocean_water(std::make_shared<ocean_surface>(open_sea(0.25, 0.5))));
+  check(open_sea(0.25, 0.5), "another sea set at the same time");
+  w.remove_field(water);
+  w.add_field(ocean_water(std::make_shared<ocean_surface>(open_sea(-0.25, 0.0))));
+  check(open_sea(-0.25, 0.0), "a sea added at the same time after the field was removed");
+
+  const auto run = [](bool reads) {
+    world_config rc = jolt_config();
+    rc.field_threads = 3;
+    world rw(rc);
+    rw.add_field(ocean_water(std::make_shared<ocean_surface>(windy_sea(0.5))));
+    rw.add_body(slab(500.0, 0.0));
+    rw.add_body(ball_at(2.5, -1.5, 0.3));
+    rw.set_field_time(17.0);
+    for (int s = 0; s < 60; ++s) {
+      if (reads)
+        rw.water_at({1.5, -2.0, -1.0});
+      rw.step();
+    }
+    return rw.state_hash();
+  };
+  EXPECT_EQ(run(true), run(false)) << "reads before the steps changed the run";
 }
 
 // --- wakes (field::wake; OCEAN-AND-WEATHER-ROADMAP.md C5, D6) ------------------------------------

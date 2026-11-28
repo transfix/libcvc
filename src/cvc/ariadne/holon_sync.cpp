@@ -540,18 +540,12 @@ void server_pump(holon &h, cvc::app &app, const std::string &room, double wall_d
   sync_rules(h, app, room);
   // The present participants, straight from the replicated room tree.
   const std::vector<conference::room_participant> roster = conference::room_roster(app, room);
-  // Add any newcomer -- spawned on a 4 m ring around the room's origin (where the seeded
-  // reference object stands), each at the next golden-angle step so joiners never stack
-  // -- then feed each one's latest proposed intent to the holon.
+  // Add any newcomer at a spawn point (holon::spawn_for: the world's avatar spawns, else the
+  // 4 m golden-angle ring round the origin, its feet on the ground there) -- then feed each
+  // one's latest proposed intent to the holon.
   for (const conference::room_participant &p : roster) {
-    if (!h.has_participant(p.pid)) {
-      constexpr double kSpawnRadius = 4.0;
-      constexpr double kGoldenAngle = 2.39996322972865332; // radians
-      const double a = kGoldenAngle * static_cast<double>(h.participants().size());
-      cvc::physics::body_state start;
-      start.position = {kSpawnRadius * std::cos(a), kSpawnRadius * std::sin(a), 0.0};
-      h.add_participant(p.pid, /*local=*/false, start);
-    }
+    if (!h.has_participant(p.pid))
+      h.add_participant(p.pid, /*local=*/false, h.spawn_for(p.pid));
     avatar_intent in;
     std::uint64_t stamp = 0;
     if (read_intent(app, room, p.pid, in, &stamp)) {
@@ -562,7 +556,7 @@ void server_pump(holon &h, cvc::app &app, const std::string &room, double wall_d
     }
   }
   // Drop anyone who left (room_leave): the holon stops integrating them, and a later rejoin under
-  // the same id respawns them on the ring rather than wherever a stale intent carried them.
+  // the same id respawns them at a spawn point rather than wherever a stale intent carried them.
   std::set<std::string> present;
   for (const conference::room_participant &p : roster)
     present.insert(p.pid);

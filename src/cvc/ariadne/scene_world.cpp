@@ -292,22 +292,24 @@ cvc::world_clock_keys scene_clock_keys(const SceneClock &clock) {
 // ── SceneClockDriver ─────────────────────────────────────────────────────────────────────────────
 
 struct SceneClockDriver::impl {
-  impl(cvc::app &a, const SceneClock &c) : app(a), clock(c) {}
+  impl(cvc::app &a, const SceneClock &c, cvc::world_clock *w) : app(a), clock(c), own(w) {}
   cvc::app &app;
   SceneClock clock;
+  cvc::world_clock *own;                             // the clock it drives; null: app.world_clock()
   std::unique_ptr<cvc::world_clock_binding> binding; // made by the first drive()
   std::chrono::steady_clock::time_point last{};
   bool primed = false;
 };
 
-SceneClockDriver::SceneClockDriver(cvc::app &app, const SceneClock &resolved)
-    : _impl(std::make_unique<impl>(app, resolved)) {}
+SceneClockDriver::SceneClockDriver(cvc::app &app, const SceneClock &resolved,
+                                   cvc::world_clock *clock)
+    : _impl(std::make_unique<impl>(app, resolved, clock)) {}
 SceneClockDriver::~SceneClockDriver() = default;
 
 cvc::world_clock::step_result SceneClockDriver::drive(double wall_dt) {
   impl &d = *_impl;
   if (!d.binding) {
-    cvc::world_clock &wc = d.app.world_clock();
+    cvc::world_clock &wc = d.own ? *d.own : d.app.world_clock();
     // The declared initial rate and pause go on the clock before the binding exists: the binding
     // seeds every still-unset key from the clock, so a sim_transport widget shows them on frame 0,
     // and they stand for good on a lane the scene left unbound (an empty key).
@@ -348,6 +350,7 @@ cvc::world_clock::step_result SceneClockDriver::hold() {
 
 struct SceneWorld::impl {
   cvc::app *app = nullptr;
+  cvc::world_clock *clock = nullptr; // the clock it steps on (build); null: app->world_clock()
   std::unique_ptr<ph::world> world;
   std::vector<SceneWorldBody> bodies;
   // A tracked node's fields (its colliders' volumes: a water node's water), swapped with its
@@ -781,11 +784,10 @@ ph::body_id SceneWorld::body(const std::string &id) const {
   return ph::body_id{};
 }
 
-std::unique_ptr<SceneWorld>
-SceneWorld::build(cvc::app &app, const ScenePhysics &spec,
-                  const std::vector<SceneBodyInput> &bodies,
-                  const std::map<std::string, std::shared_ptr<const cvc::height_field>> &fields,
-                  const std::string &stats_key, std::vector<std::string> *warnings) {
+std::unique_ptr<SceneWorld> SceneWorld::build(
+    cvc::app &app, const ScenePhysics &spec, const std::vector<SceneBodyInput> &bodies,
+    const std::map<std::string, std::shared_ptr<const cvc::height_field>> &fields,
+    const std::string &stats_key, std::vector<std::string> *warnings, cvc::world_clock *clock) {
   ph::world_config cfg;
   cfg.gravity = {spec.gravity[0], spec.gravity[1], spec.gravity[2]};
   const bool have_jolt = ph::backend_available(ph::backend::jolt);
@@ -802,7 +804,7 @@ SceneWorld::build(cvc::app &app, const ScenePhysics &spec,
                        "' is not auto, jolt or null; using " + ph::backend_name(cfg.backend));
   }
   // One physics step is a whole number of the clock's quanta (a clock follower needs that).
-  const double quantum = app.world_clock().fixed_dt();
+  const double quantum = (clock ? *clock : app.world_clock()).fixed_dt();
   double steps = 1.0;
   if (spec.fixed_dt > 0.0) {
     steps = std::max(1.0, std::round(spec.fixed_dt / quantum));
@@ -832,6 +834,7 @@ SceneWorld::build(cvc::app &app, const ScenePhysics &spec,
 
   std::unique_ptr<SceneWorld> out(new SceneWorld());
   out->_impl->app = &app;
+  out->_impl->clock = clock;
   if (!stats_key.empty()) {
     out->_impl->stats = stats_key + ".stats";
     out->_impl->enabled_key = stats_key + ".enabled";
@@ -1127,6 +1130,11 @@ void SceneWorld::restart(std::vector<std::string> *warnings) {
 
 void SceneWorld::use_vehicle_clock(cvc::app &app, const Scene &scene,
                                    std::vector<std::string> *warnings) {
+  use_vehicle_clock(app.world_clock(), scene, warnings);
+}
+
+void SceneWorld::use_vehicle_clock(cvc::world_clock &clock, const Scene &scene,
+                                   std::vector<std::string> *warnings) {
   // The simulation clock (the scene's rate, clock: { hz }, else cvc::kSimQuantum, the scenes' own
   // 1/120 s; with a real-time catch-up of cvc::kSimCatchup), of which the vehicles' tick
   // (cvc::sim_tick) is whole quanta. A clock that has ticked keeps its quantum, and the tick is
@@ -1135,10 +1143,9 @@ void SceneWorld::use_vehicle_clock(cvc::app &app, const Scene &scene,
   if (!rated && scene.vehicles.empty())
     return;
   const double quantum = rated ? cvc::sim_quantum(scene.clock.hz) : cvc::kSimQuantum;
-  if (!cvc::adopt_sim_clock(app.world_clock(), quantum))
+  if (!cvc::adopt_sim_clock(clock, quantum))
     warn(warnings, std::string(rated ? "ari: scene: clock: hz" : "ari: world: vehicles") +
-                       ": the clock has already run at " +
-                       std::to_string(app.world_clock().fixed_dt()) +
+                       ": the clock has already run at " + std::to_string(clock.fixed_dt()) +
                        " s quanta; the world keeps them, and the vehicles' tick is held to whole "
                        "physics steps of it");
 }
@@ -1389,7 +1396,9 @@ std::shared_ptr<const cvc::nav::world_grid> SceneWorld::grid(const std::string &
 }
 
 void SceneWorld::sync(std::vector<std::string> *warnings) {
-  if (_impl->app) {
+  if (_impl->clock) {
+    sync(*_impl->clock, warnings);
+  } else if (_impl->app) {
     sync(_impl->app->world_clock(), warnings);
   } else {
     const cvc::world_clock none;

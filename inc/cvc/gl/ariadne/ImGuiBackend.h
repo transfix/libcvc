@@ -102,6 +102,9 @@ public:
   // hovered cell outlined, and the legend, on the draw list over one item (the tooltip's).
   cvc::ariadne::HeatmapEvent heatmap(const char *label,
                                      const cvc::ariadne::HeatmapSpec &spec) override;
+  // Kind::Table: ImGui's own header cell (TableHeader: its background, lit under the pointer) in
+  // the table's header row (begin_grid's Layout::header_row); the text, a click on it.
+  bool table_header(const std::string &label, int dir, bool sortable) override;
   // Kind::Settings (settings_imgui.cpp): a collapsing header for each branch under the root and a
   // tree node for each deeper one, a reset on a header whose keys can be reset; each key a row of
   // its name, its editor (a checkbox, a slider by ratio over a wide range, a field, a combo, or a
@@ -312,6 +315,7 @@ private:
     bool split = false;     // split-pane mode vs table mode
     bool flow = false;      // a horizontal row with no col_widths: cells side by side
     bool resizable = false; // table mode: draggable columns, whose widths persist (§11.4)
+    bool header = false;    // table mode: its first row is a header row (Layout::header_row)
     int cols = 1;
     int cell = 0;              // cells emitted so far
     std::vector<float> row_px; // resolved row heights (px; 0 = auto/fit)

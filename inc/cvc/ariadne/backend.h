@@ -277,6 +277,10 @@ struct HeatmapEvent {
 // The ramp's colour at `v`: mixed between the two stops about it, the end stop's beyond them (a
 // mid grey with no stops). False (and `rgb` untouched) when `v` is not finite.
 bool heatmap_color(const std::vector<HeatmapStop> &ramp, double v, float rgb[3]);
+
+// A table's header text (Backend::table_header): `label`, and for the column the table is sorted
+// by (`dir` 1 ascending, -1 descending; 0 none) " ▲" or " ▼", or " ^" / " v" without `unicode`.
+std::string table_header_text(const std::string &label, int dir, bool unicode = true);
 // What the core hands a backend to draw a settings editor (Kind::Settings): the keys under its
 // root and the branches that hold them, in the order drawn, each key's editor chosen from its
 // metadata (settings_kind). A node's children follow it, one `depth` deeper.
@@ -800,6 +804,14 @@ public:
   // each cell's text (else its value) with `*` after a marked one, `.` for a cell with no value,
   // then the legend's stops, so every backend has one. Defined in heatmap_emit.cpp.
   virtual HeatmapEvent heatmap(const char *label, const HeatmapSpec &spec);
+  // A table's header cell (Kind::Table), in the cell grid_next_cell just opened: its column's
+  // `label`, with the sort's arrow on the column the table is sorted by (`dir` 1 ascending, -1
+  // descending, 0 not this column; table_header_text), and whether a click on it sorts
+  // (`sortable`). Returns whether it was clicked this frame; the core then changes the sort, and
+  // ignores a click on a column that does not sort. By default a text leaf of table_header_text
+  // (its arrow ASCII where unicode_glyphs() is false) and item_clicked(), so every backend has one.
+  // Defined in table_emit.cpp.
+  virtual bool table_header(const std::string &label, int dir, bool sortable);
   // A settings editor (Kind::Settings) titled `label` ("" none), `id` its identity; see
   // SettingsSpec. By default a flat list from this backend's own widgets, so every backend has
   // one: the search box, then each group as a "[title]" line (and a reset when it has keys to

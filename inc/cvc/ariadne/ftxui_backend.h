@@ -205,6 +205,9 @@ public:
   // with a pick or an on_click it takes focus, the arrows move a cursor cell and Enter or Space
   // clicks it.
   HeatmapEvent heatmap(const char *label, const HeatmapSpec &spec) override;
+  // Kind::Table: a header in bold. A sortable one is a stop in Tab order: a click, or Enter or
+  // Space while it has focus (it is inverted then), sorts by it.
+  bool table_header(const std::string &label, int dir, bool sortable) override;
   // §5.20 a paragraph laid out at its box's width; each link a stop in Tab order (Enter / Space or
   // a click activates it), underlined, inverted while it has focus.
   RichTextEvent rich_text(const std::vector<TextRun> &runs, const RichTextOptions &opts) override;

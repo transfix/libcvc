@@ -1719,6 +1719,99 @@ TEST(AriadneFtxui, DraggedTableColumnsPersistAndSeedTheNextLoad) {
   EXPECT_EQ(val(app, "tree.tbl.columns"), "112,48,0") << "and reports them back unchanged";
 }
 
+namespace {
+// type: table "t": two 80 px (10-cell) sortable columns over two rows, inner borders.
+Widget sort_table() {
+  Widget t = table("t",
+                   {TableColumn{"name", Track{Unit::Px, 80.0f}, "name"},
+                    TableColumn{"size", Track{Unit::Px, 80.0f}, "size"}},
+                   "2", {text("n{i}"), text("s{i}")});
+  t.layout.borders = BorderShow::Inner;
+  return t;
+}
+} // namespace
+
+// The header shows the sort: the sorted column's label with ▲ (ascending) or ▼ (descending).
+TEST(AriadneFtxui, ATableHeaderShowsTheSort) {
+  REQUIRE_FTXUI();
+  Term t(group({sort_table()}));
+  EXPECT_TRUE(t.shows("name")) << t.screen;
+  EXPECT_FALSE(t.shows("\xE2\x96\xB2")) << "no sort yet\n" << t.screen;
+  cvc::state::instance(t.app)("tree.t.sort").value(std::string("name"));
+  t.draw();
+  EXPECT_TRUE(t.shows("name \xE2\x96\xB2")) << t.screen;
+  cvc::state::instance(t.app)("tree.t.sort").value(std::string("-name"));
+  t.draw();
+  EXPECT_TRUE(t.shows("name \xE2\x96\xBC")) << t.screen;
+  EXPECT_FALSE(t.shows("size \xE2\x96")) << t.screen;
+  // Every row is a row of the one grid: the cells are under their headers.
+  int hx = 0, hy = 0, x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+  ASSERT_TRUE(find_cell(t.screen, "size", hx, hy)) << t.screen;
+  ASSERT_TRUE(find_cell(t.screen, "s0", x0, y0)) << t.screen;
+  ASSERT_TRUE(find_cell(t.screen, "s1", x1, y1)) << t.screen;
+  EXPECT_EQ(x0, hx) << t.screen;
+  EXPECT_EQ(x1, hx) << t.screen;
+  EXPECT_EQ(y0, hy + 2) << "under the header, past the rule\n" << t.screen;
+  EXPECT_EQ(y1, y0 + 2) << t.screen;
+}
+
+// A click on a header sorts by it, and toggles the way; so does Enter on a header with focus.
+TEST(AriadneFtxui, AClickOnATableHeaderTogglesTheSort) {
+  REQUIRE_FTXUI();
+  Term t(group({sort_table()}));
+  // The keyboard: the headers are stops in Tab order, and Enter sorts by the one with focus.
+  t.key("Tab");
+  t.draw();
+  t.key("Return");
+  t.draw();
+  EXPECT_EQ(val(t.app, "tree.t.sort"), "name") << "Enter on the first header\n" << t.screen;
+  ASSERT_TRUE(t.click("name")) << t.screen;
+  EXPECT_EQ(val(t.app, "tree.t.sort"), "-name");
+  EXPECT_TRUE(t.shows("name \xE2\x96\xBC")) << t.screen;
+  ASSERT_TRUE(t.click("name"));
+  EXPECT_EQ(val(t.app, "tree.t.sort"), "name");
+  ASSERT_TRUE(t.click("size"));
+  EXPECT_EQ(val(t.app, "tree.t.sort"), "size") << "another column: it, ascending";
+  t.key("Return"); // the click left the focus on it
+  t.draw();
+  EXPECT_EQ(val(t.app, "tree.t.sort"), "-size") << t.screen;
+}
+
+// A seam drag on a body row moves that column in every row, the header's too, and the widths
+// persist to tree.<id>.columns and seed the next load.
+TEST(AriadneFtxui, ATableColumnDraggedOnAnyRowMovesInEveryRowAndPersists) {
+  REQUIRE_FTXUI();
+  Term t(group({sort_table()}));
+  EXPECT_EQ(val(t.app, "tree.t.columns"), "80,80") << "authored px as written";
+  int ax = 0, ay = 0, bx = 0, by = 0;
+  ASSERT_TRUE(find_cell(t.screen, "n1", ax, ay)) << t.screen;
+  ASSERT_TRUE(find_cell(t.screen, "s1", bx, by)) << t.screen;
+  ASSERT_EQ(bx, ax + 11) << t.screen;
+  t.mouse(TermEvent::Mouse::Press, bx - 1, by); // the seam on the last row
+  t.mouse(TermEvent::Mouse::Move, bx + 3, by);
+  t.mouse(TermEvent::Mouse::Release, bx + 3, by);
+  t.draw();
+  for (const char *cell : {"size", "s0", "s1"}) {
+    int x = 0, y = 0;
+    ASSERT_TRUE(find_cell(t.screen, cell, x, y)) << cell << "\n" << t.screen;
+    EXPECT_EQ(x, bx + 4) << cell << "\n" << t.screen;
+  }
+  EXPECT_EQ(val(t.app, "tree.t.columns"), "112,48") << "14 and 6 cells, in px";
+
+  cvc::app app;
+  FtxuiBackend be;
+  Runtime rt(app, "");
+  rt.set_backend(&be);
+  cvc::state::instance(app)("tree.t.columns").value("112,48");
+  rt.set_root(group({sort_table()}));
+  const std::string s = be.render_to_string(rt, 80, 12);
+  int nx = 0, ny = 0, sx = 0, sy = 0;
+  ASSERT_TRUE(find_cell(s, "name", nx, ny)) << s;
+  ASSERT_TRUE(find_cell(s, "size", sx, sy)) << s;
+  EXPECT_EQ(sx, nx + 15) << "seeded: 14 cells and the seam\n" << s;
+  EXPECT_EQ(val(app, "tree.t.columns"), "112,48");
+}
+
 TEST(AriadneFtxui, ResizableTableWithoutBordersStillHasAGrabbableSeam) {
   REQUIRE_FTXUI();
   Widget g = group({text("a1"), text("b1")});

@@ -189,7 +189,9 @@ public:
   // The water at `p` at field time `t`: the first fluid field, in id order, whose box holds `p`
   // in x and y and reaches below it. False if none does; `out` is then dry and still. With
   // `wake.on` its wake's waves too: their height in the top, their motion at p's depth below it
-  // in the velocity (one caller at a time then: it makes the wake's depths when they are due).
+  // in the velocity. It reads the surface held at t (held_at), as the step does. One caller at a
+  // time (world calls are, under the world's lock): it may hold the surface at a new time, and
+  // with a wake it makes the wake's depths when they are due.
   bool water_at(const vec3 &p, double t, physics::water_sample &out,
                 const wake_read &wake = {}) const;
 
@@ -249,11 +251,27 @@ private:
   void advance_wakes(world_backend &be, const world_config &cfg, double t, double gravity,
                      const std::function<const fluid_surface *(const compiled_field &)> &held);
   const immersion_body *outline_of(field_body &fb);
+  // Field `cf`'s surface (which it must have) held at field time t: fluid_surface::at's, its
+  // per-time work (the sea's frame) done as tasks of the field workers once apply has made them,
+  // or the field's own surface for one with no per-time work. Made by the first read at t, which
+  // is often not the step's (a boat plant reads the water before it), and kept for the reads after
+  // it until one at another time or the field changes. Not for several threads at once.
+  const fluid_surface *held_at(const compiled_field &cf, double t) const;
 
   std::map<std::uint32_t, compiled_field> _fields;
   std::map<std::uint32_t, field_body> _bodies;
   std::uint32_t _next = 0;
   std::unique_ptr<field_workers> _workers; // world_config::field_threads, made on first use
+  // Each surface field's surface held at one field time (held_at), in the order first held. The
+  // const reads fill it (water_at): world calls come one at a time, under the world's lock. set
+  // and remove empty it.
+  struct held_surface {
+    const compiled_field *field = nullptr;
+    const fluid_surface *own = nullptr; // the field's surface it was held from
+    double t = 0.0;
+    std::shared_ptr<const fluid_surface> at; // null: the surface has no per-time work
+  };
+  mutable std::vector<held_surface> _held;
 };
 
 } // namespace detail

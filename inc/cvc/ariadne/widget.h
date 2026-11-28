@@ -68,6 +68,8 @@ enum class Kind {
                   // an optional text, corner mark and tooltip; hover and click report the cell
   Mounts,         // on-demand mounts (docs/roadmap/ARIADNE_SHELL.md 4.2): one isolated mount per
                   // child of the state key at `bind`, loaded when it appears, freed when it goes
+  Table,          // a header row of columns (a click on a sortable one sorts by it) over rows of
+                  // cells, one per column from its `children` with {i} the row, all in one grid
 };
 
 // How a Kind::Image fills its box (`fit:`) and the box's shape (`shape:`); media.h fits a picture
@@ -195,6 +197,9 @@ struct Layout {
   BorderShow borders = BorderShow::Off;
   bool has_border_color = false;
   float border_color[4] = {0.3f, 0.3f, 0.35f, 1.0f};
+  // The first row of cells is a header (a Kind::Table's column headers): a backend that has a
+  // header row draws it as one (ImGui's), the others as any row.
+  bool header_row = false;
   bool is_set() const {
     return kind != LayoutKind::Vertical || !col_widths.empty() || !row_heights.empty() ||
            resizable || borders != BorderShow::Off;
@@ -271,6 +276,24 @@ struct TextRunSpec {
 };
 
 struct MountsSpec; // Kind::Mounts's slot, below
+struct MountScene; // a mount's scene and datasets (mount_scene.h)
+
+// Kind::Table: one of its `columns:`: the header's text, the column's track (`width:`, as a
+// col_widths entry takes it) and the key a click on the header sorts by (`sort:`; "": the column
+// does not sort).
+struct TableColumn {
+  std::string label;
+  Track width;
+  std::string sort;
+};
+// Kind::Table's slot (Widget::table): its columns, and `rows`, how many rows of cells it has (a
+// count in repeat:'s grammar, worked out each frame). The cells are the widget's children, one per
+// column, `{i}` the row; `bind` holds the sort ("name", "-name" descending, "" none; default
+// tree.<id>.sort) and `on` runs after the user changes it; `layout` is the grid its columns make.
+struct TableSpec {
+  std::vector<TableColumn> columns;
+  std::string rows;
+};
 
 // §5.3 a `state:` block's seeds, in document order: each a path (relative to the prefix it is
 // written under, or app-root-absolute with a leading '/') and the text written there.
@@ -651,10 +674,20 @@ struct WidgetNode {
   // a mount wrapper; empty otherwise.
   std::string tick_script;
 
+  // docs/roadmap/ARIADNE_SHELL.md 4.3 (SH3): the mounted fragment's scene:, scenes:, data:,
+  // assets: and keys:, and the load:'s view: and background: (mount_scene.h). The Runtime binds its
+  // datasets at the sub-prefix as it opens, and a host with a scene realizes its scene there. Only
+  // on a mount wrapper whose fragment has any of them; null otherwise.
+  std::shared_ptr<const MountScene> mount_scene;
+
   // Kind::Mounts (docs/roadmap/ARIADNE_SHELL.md 4.2): `bind` is the state key whose children are
   // the mounts (<bind>.<as>.uri, .args.<name>, ...), and this the rest of the slot (MountsSpec,
   // below). Out of line, so every other widget stays the size it was. Null for every other kind.
   std::shared_ptr<const MountsSpec> mounts;
+
+  // Kind::Table: its columns and its row count (TableSpec, above), out of line as `mounts` is. Null
+  // for every other kind.
+  std::shared_ptr<const TableSpec> table;
 
   // §6.6 functions: set on the document's root and on every mount wrapper, null elsewhere. The
   // programs started inside this subtree (on: actions, the mount's init:) run with these
@@ -761,7 +794,9 @@ inline Widget::~Widget() {
 // `allow_bind` names a state key holding them (a list, or one per child); both empty: any.
 // `catalog` / `catalog_bind` likewise list the catalog's documents, which run as the `local`
 // principal. `base` is the directory of the document that holds the slot: its entries' relative
-// URIs resolve against it.
+// URIs resolve against it. `background` (run | hold) or `background_bind` (a state key holding one)
+// is whether its applications' worlds keep stepping while their scenes are drawn nowhere, where an
+// entry's own `background` says nothing (ARIADNE_SHELL.md 4.4); both empty: run.
 struct GrantSet; // grants.h
 struct MountsSpec {
   std::vector<std::string> allow;
@@ -769,6 +804,8 @@ struct MountsSpec {
   std::vector<std::string> catalog;
   std::string catalog_bind;
   std::string base;
+  std::string background;
+  std::string background_bind;
   // ARIADNE_SHELL.md 4.5 its `grants:` with its `deny:` applied: the most any of its applications
   // may get, an entry's own `grants` picking from it. Null: the defaults.
   std::shared_ptr<const GrantSet> grants;
@@ -949,6 +986,31 @@ inline Widget heatmap(std::string label, std::string bind, std::vector<HeatmapSt
   w.label = std::move(label);
   w.bind = std::move(bind);
   w.heatmap.ramp = std::move(ramp);
+  return w;
+}
+
+// A table (Kind::Table) named `id`: a header row of `columns` over `rows` rows (a count, a state
+// key or an expression) of `cells`, one per column, `{i}` in them the row. Its sort is at `bind`
+// ("" : tree.<id>.sort), `on` runs after the user changes it, and the columns' seams drag unless
+// `resizable` is false. Set the layout's borders on the result.
+inline Widget table(std::string id, std::vector<TableColumn> columns, std::string rows,
+                    std::vector<Widget> cells, std::string bind = std::string(),
+                    std::string on = std::string(), bool resizable = true) {
+  Widget w;
+  w.kind = Kind::Table;
+  w.id = std::move(id);
+  w.bind = std::move(bind);
+  w.on = std::move(on);
+  w.layout.kind = LayoutKind::Grid;
+  for (const TableColumn &c : columns)
+    w.layout.col_widths.push_back(c.width);
+  w.layout.resizable = resizable;
+  w.layout.header_row = true;
+  auto spec = std::make_shared<TableSpec>();
+  spec->columns = std::move(columns);
+  spec->rows = std::move(rows);
+  w.table = std::move(spec);
+  w.children = std::move(cells);
   return w;
 }
 

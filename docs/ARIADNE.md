@@ -4,10 +4,12 @@
 Runtime, its two evaluation lanes, the per-frame contract, document structure,
 `include`/`import`/`load` composition, and state + channel scoping.*
 
-This is the authoring and architecture guide. The normative spec is
-[`docs/roadmap/CVCGL-UI-DSL-ROADMAP.md`](roadmap/CVCGL-UI-DSL-ROADMAP.md); where a
-number here differs from the roadmap, **the code is authoritative** and this guide
-cites `file:line` so you can confirm it. Ariadne builds on `cvc::state` and the
+This is the authoring and architecture guide. The normative specification is
+[`ARIADNE_SPEC.md`](ARIADNE_SPEC.md), with the `.ari` schema (§14) as its structural half;
+where this guide and the spec differ, the spec is right, and where libcvc does not yet do
+what the spec says, the spec's §9 lists it. This guide cites `file:line` so you can confirm
+what it says in the code. [`roadmap/CVCGL-UI-DSL-ROADMAP.md`](roadmap/CVCGL-UI-DSL-ROADMAP.md)
+is the design history. Ariadne builds on `cvc::state` and the
 `state_exec` DSL — read [`STATE_API.md`](STATE_API.md) and
 [`STATE_EXEC_DEVELOPER_GUIDE.md`](STATE_EXEC_DEVELOPER_GUIDE.md) first if those are
 unfamiliar; every binding, computed field, and handler in an `.ari` document is a
@@ -867,7 +869,8 @@ Three backends ship:
   once), a text field commits on Enter or when focus leaves it. Authored px convert to cells by a nominal cell
   size (`Options::cell_px_w/h`, 8 × 16), and reported geometry converts back, so a layout
   persisted under one backend holds under the other. Grid seams drag: a row split's
-  panes and a `resizable` table's columns resize with the mouse; a row split persists
+  panes and a `resizable` table's columns resize with the mouse (a `type: table`'s too,
+  whose sortable headers are Tab stops: Enter or Space sorts); a row split persists
   its pane sizes to `tree.<id>.tracks` and a resizable table its column widths to
   `tree.<id>.columns` (§11.4; *Grid sizes* in §7.1). What a terminal cannot do it
   degrades: no GLSL, no `view_embed`, no scene (`AppRuntime` drops a `scene:` with a
@@ -979,6 +982,7 @@ The structure a document may have, every key and the values it takes, is the `.a
 ([`src/cvc/ariadne/schema/ari.v1.schema.json`](../src/cvc/ariadne/schema/ari.v1.schema.json)).
 The loader stays lenient, loading what it understands, but a build with the validator checks
 every document against the schema as it loads and warns about each place that breaks it (§14).
+What each block means, and when it acts, is [`ARIADNE_SPEC.md`](ARIADNE_SPEC.md) §8.
 
 ### 5.1 Top-level keys
 
@@ -1015,7 +1019,9 @@ and the relay read (`python:`, `wasm:`, `server:`, `relay:`, `world:`) are in th
 than `min_libcvc`, the load **fails with no tree** (major.minor.patch compare, ignoring
 `-pre` / `+build` suffixes; `version_at_least`,
 [`loader.cpp`](../src/cvc/ariadne/loader.cpp)). A missing `min_libcvc` only warns. A
-fragment pulled in by `load:` carries its own `meta` and is gated independently.
+document opened in a `mounts:` slot (§6.8) carries its own `meta` and is gated independently
+when it opens. A static `load:` fragment is meant to be gated the same way, but libcvc does
+not gate it yet ([`ARIADNE_SPEC.md`](ARIADNE_SPEC.md) §3, §9).
 
 ```yaml
 meta:
@@ -1253,6 +1259,94 @@ after an edit, `rows:` (6) is how many rows show at once.
 A backend with no tab bar draws `tabs:` as a row of radio buttons, and one with no list draws a
 `list:` as stacked radio buttons with the two buttons under them, so a terminal host shows both.
 (`tabs_list_test`, `cvcgl_imgui_tabs_list`.)
+
+**Tables.** A `type: table` is one grid: a header row of `columns:` over `rows:` rows of `cells:`.
+A click on a column's header sorts by that column, and the columns' seams drag. Every row is a
+row of the same grid (one ImGui table, one FTXUI gridbox), so a column dragged on any row moves
+in every row, the header's too, where a header grid over a `repeat:` of grid rows is a grid a
+row, and a drag resizes one of them.
+
+```yaml
+      - type: table
+        id: results                       # the table's id: its widths persist in tree.results.columns
+        bind: search.sort                 # where the sort is kept; default tree.<id>.sort
+        on: (state-set "req.search" "1")  # runs after the user changes the sort (not on load)
+        rows: (state-get "search.count")  # how many rows: a count, as repeat: takes one
+        resizable: true                   # the default: the columns' seams drag
+        borders: { show: inner }          # optional, as a grid layout's borders:
+        columns:                          # one entry per column
+          - { label: "", width: 64 }                # no sort: key: its header does not sort
+          - { label: name, width: 232, sort: name }
+          - { label: version, width: 144, sort: version }
+          - { label: size, width: 80, sort: size }
+        cells:                            # the row template: one widget per column, {i} the row
+          - type: button
+            label: Open
+            on: (state-set "nav.open" (state-get "search.res.packages.{i}.name"))
+          - text: ""
+            bind: search.res.packages.{i}.name
+          - text: ""
+            bind: search.res.packages.{i}.version
+          - text: ""
+            bind: search.res.packages.{i}.size_text
+```
+
+- **Columns.** `label:` is the header's text. `width:` takes what a `col_widths` entry takes:
+  px, `"N%"` (a share of the spare width), or nothing for the width of the content. `sort:` is
+  the key a click on the header sorts by; a column without one does not sort, and a click on its
+  header does nothing. A column may be its label alone (`columns: [name, size]`).
+- **Cells.** `cells:` has one widget per column, the template of every row: `{i}` in it is the
+  row, from 0, as in a `repeat:`'s copies, and each row is drawn under its own id. A cell whose
+  `visible_when:` is false is drawn empty and keeps its place, so the cells after it stay under
+  their headers (a grid's hidden child takes no cell, and the cells after it move up one). With
+  fewer cells than columns, the rest of each row is empty; extra cells are dropped. Both are a
+  load warning. A cell has no `repeat:` of its own: `rows:` repeats them. A table's own
+  `on_click:`, `on_hover:` and `tooltip:` do nothing: put them on its cells.
+- **The sort** is a string at `bind:` (else at `tree.<id>.sort`, as tabs keep `tree.<id>.tab`):
+  `""` for none, `"name"` for ascending by `name`, `"-name"` for descending. A click on a
+  sortable header makes it that column ascending, or descending when it was already that column
+  ascending. The click writes the key and then runs `on:`, so `on:` sees the new sort; a write
+  from anywhere else changes what the header shows, and runs no `on:`. The sorted column's
+  header shows ` ▲` (ascending) or ` ▼` (descending) after its label (` ^` / ` v` on a terminal
+  with no such glyphs).
+- **Where it sorts.** The format is the one cvcpkg's `/v1/search` takes as `sort=`, so a table
+  over paged results passes the key straight through: `on:` asks for the first page again, and
+  the request sends `sort=` + `(state-get "search.sort")`. A table over rows a document holds
+  whole sorts them itself, with `collections.sort-by` (docs/STATE_EXEC_DEVELOPER_GUIDE.md, the
+  stdlib), in `on:` and wherever the rows arrive:
+
+  ```yaml
+  - type: table
+    id: builds
+    bind: pkg.builds_sort
+    rows: (state-get "pkg.view")          # the sorted rows' count
+    on: (let ((s (state-get "pkg.builds_sort")))
+          (let ((desc (string.starts-with s "-")))
+            (state-set-tree "pkg.view"
+              (collections.sort-by (json-parse (state-get "pkg.builds_json"))
+                                   (if desc (string.substring s 1) s) desc))))
+    columns: [{ label: version, sort: version }, { label: built, sort: built }]
+    cells:
+      - { text: "", bind: pkg.view.{i}.version }
+      - { text: "", bind: pkg.view.{i}.built }
+  ```
+
+  With no sort (`""`) the key names no field, every key is missing, and the rows keep their
+  order.
+- **Its id.** A table's widths persist as a resizable grid's do (*Grid sizes* in §7.1), under
+  its id: its `id:`, else its label (`table: Results`), else one made from where it sits in the
+  document, which moves when the document above it changes. Give a table an `id:`.
+- **Inside a `repeat:`**, the outer index reaches the table's own keys (`id:`, `bind:`, `rows:`,
+  its headers), not its cells: their `{i}` is the row.
+- **Rows don't resize.** Only the columns have seams. ImGui's tables size a row to its tallest
+  cell and have no drag for a row's height, and a terminal's rows are lines of text, one cell
+  high, so a row's height is what its cells need on every backend. (A row split,
+  `layout: { row_heights, resizable }`, is a stack of panes, not a table's rows.)
+- **Backends.** The ImGui backend draws the header as ImGui's own header row (`TableHeader`:
+  lit under the pointer). The FTXUI and tvision backends draw a header in bold; a sortable one
+  is a stop in Tab order, and a click on it, or Enter or Space while it has focus, sorts by it.
+  Any other backend draws each header as a line of text (`Backend::table_header`'s default).
+  (`ariadne_runtime_test` `AriadneTable.*`, `ariadne_ftxui_test` `*Table*`.)
 
 ### 5.4 `scene:` sources and custom node types
 
@@ -2853,6 +2947,17 @@ scene:
     `nearest_free` the first no vehicle is near. A point a vehicle sits on moves the new vehicle
     aside along the point's normal. With no point to take, a vehicle starts at a free point of
     the grid, on its medium.
+  - **Avatars** (ARISRV_SCENES SC1). `archetype: avatar`, or an avatar archetype's id, makes a
+    point an avatar's only, and an untagged point serves avatars too; a point tagged with a
+    vehicle is never an avatar's. The relay's holon (`holon::set_avatar_spawns`, which arisrv
+    calls with the document's spawns: the room itself carries none) starts each joiner at one by
+    the same policies (`nearest_free`: no other avatar within 1.5 m), facing its heading; with
+    none, on the 4 m ring round the origin. Either way its feet go on the first static surface
+    straight down (`holon::ground_at`: a terrain, a building, a floor, never something that
+    moves), so a joiner on a generated world or a city stands on it. One with no ground beneath
+    it comes back once `respawn_depth` (10 m) below where it last stood, or below
+    `respawn_below_z` (-10 m): at a spawn point, or where it joined when the world has none. One
+    over ground never respawns, however low the ground.
   - **Suggestions.** `spawns.suggest.request` samples points along the world's roads (a generated
     world's road mesh; a terrain or a flat ground has none): one per `suggest.spacing` metres
     square, at most `suggest.count`, free in the grid and out of water deeper than a ford, each
@@ -5284,6 +5389,27 @@ stale maps. A document may have only `scenes:`, and then the main view is empty.
 `examples/ariadne/documents/viewer_scenes.ari` has three scenes (day, night, a studio) built from
 the same assets.
 
+**Scenes of mounted documents.** A document mounted with `load:` (§6.3) or in a `mounts:` slot
+(§6.8) keeps its scene ([ARIADNE_SHELL.md](roadmap/ARIADNE_SHELL.md) 4.3). The host realizes it as
+a SceneGraph of its own at the mount's sub-prefix: its nodes at
+`<sub>.graphics.root.children.<node>`, its physics at `<sub>.physics`, its `scenes:` at
+`<sub>.scenes.<id>`, its camera at `<sub>.viewers.main.camera`, every bind in it resolved under the
+sub-prefix, as when it runs alone. Its own viewports (in its own windows) show its scene and its
+`scenes:`, as alone. Its scene window shows it: a window in the mount's tree, titled by its name,
+in which the scene's own renderer (its lights, its background, its shadows, its `volren` nodes)
+draws into the window's texture. A viewport anywhere else shows it with
+`scene: { mount: <as> }`, the document mounted as `<as>` in the viewport's scope: a further view,
+which mirrors the scene's own viewport, its camera `<sub>.viewers.<view>.camera`. Views of a
+mounted scene are named after the mount, so two documents' views of one name never meet.
+`fill: true` makes a viewport as wide and as tall as the rest of its window (the scene window's
+does).
+
+Only cvcGL's windowed host draws a mounted document's scene. `ari` on FTXUI or tvision has no scene
+adapter (no `gl.scene`): a `mounts:` slot there refuses a document with a scene, and a `load:` runs
+without its scene, with a warning. arigl's terminal scene (TerminalScene) draws only the document's
+own scene, and ignores a mounted one with a warning. Either way the mount's scene window stays
+hidden (`<sub>.ariadne.scene` stays 0), and the Windows menu does not list it.
+
 **Groups in one scene.** Where the "scenes" should share the lights and the shadows, make them
 tagged groups of one scene. `main_view: { show: [...], hide: [...] }` in `scene:` picks the groups
 the main view draws, as a viewport's `show:` / `hide:` do, and the main camera is framed on them.
@@ -6480,6 +6606,29 @@ A module with a `menubar:` of its own is an application: its bar becomes one men
 bar, with Restart and Quit, and its tray icons join the outer tray (§5.25). The loader names it
 by the fragment's `meta.name` (`Widget::app_name`), else by the mount id.
 
+A module keeps its scene ([ARIADNE_SHELL.md](roadmap/ARIADNE_SHELL.md) 4.3, 4.4). The loader
+carries its `scene:`, `scenes:`, `data:` and `assets:` on the mount (`Widget::mount_scene`,
+[`mount_scene.h`](../inc/cvc/ariadne/mount_scene.h)); its `keys:` are its grants' (above):
+
+- **Its datasets** are bound at its sub-prefix (`<sub>.data.<name>`, relative to its own
+  directory) as it is first drawn, just before its `state:` and `init:`, so `init:` reads their
+  status as a document's does. A dataset whose URI is an argument is not loaded: only the
+  outermost document takes arguments.
+- **Its scene** is realized at its sub-prefix by a host with a scene (§5.18, *Scenes of mounted
+  documents*) and shown in its scene window, a window the loader adds to the module's tree
+  (`tree.ariadne_scene`, titled by its name), shown once the scene is realized
+  (`<sub>.ariadne.scene` is `1`). `view: window` on the `load:` says so; the main view is SH6's. A
+  host with no scene warns that it ignores it. A repeated `load:`'s scene is not drawn (each
+  instance would need a scene of its own), with a warning.
+- **Its world** steps on a world clock of its own, at its `clock: hz`, else at the rate of the
+  clock above it (the document's). The clock is the app's, kept by the sub-prefix
+  ([`scene_clocks.h`](../inc/cvc/core/scene_clocks.h): `cvc::scene_clock(app, prefix)` is the
+  clock of the scene at a prefix or the nearest one above it), so its physics, animations and
+  `sim.*` keys (at `<sub>.sim.*`) are its own. It keeps stepping while its scene is drawn nowhere,
+  unless `in_background: hold`: then it stops while its scene window is closed or collapsed and no
+  other view of it is drawn, and goes on when one is. Its `on_tick:` and actions run either way.
+- **Its keys** are carried for when it is granted the keyboard (SH7); they are not bound yet.
+
 To mount documents while the document runs, picked by the user or a program, use a `mounts:`
 slot (§6.8).
 
@@ -6737,7 +6886,8 @@ Two parts of a load go down a level of YAML at a time rather than a widget or a 
   is level 1). That is ten times the deepest shipped document's 13. A document, library, fragment
   or `include:` expansion whose YAML goes deeper is not checked. Instead it gets one schema
   issue, at its first value past the limit: `nested more than 128 levels of YAML deep, the most
-  the schema check goes (docs/ARIADNE.md §6.7): this document is not checked`. The load goes on,
+  the schema check goes (docs/ARIADNE.md §6.7): this document is not checked` (for an `include:`
+  expansion, `this widget is not checked`). The load goes on,
   as it does for any schema issue, and `ari validate` fails the document. The deepest check that
   runs takes 320 to 384 KiB.
 
@@ -6758,6 +6908,7 @@ root:
   - mounts: shell.apps                 # one mount per child of shell.apps
     allow: { bind: shell.allow }       # the URI prefixes that may be mounted; empty: any
     catalog: { bind: shell.catalog_uris }   # the documents that run as the local principal
+    in_background: { bind: shell.settings.hold_background }   # run, hold, or a key holding one
 ```
 
 Each child of the key is an entry:
@@ -6769,6 +6920,7 @@ shell.apps.<id>.catalog           1: one of the document's catalog, run as `loca
 shell.apps.<id>.budget.steps      its budget, when not its principal's default (below)
 shell.apps.<id>.budget.time
 shell.apps.<id>.budget.memory
+shell.apps.<id>.background        run or hold: its world while its scene is drawn nowhere
 shell.apps.<id>.grants            the grant tokens it gets, picked from the slot's (below)
 shell.apps.<id>.argv              its command line (§5.6)
 shell.apps.<id>.net_policy        a local application's own network (§10.3 "Per principal"):
@@ -6779,9 +6931,10 @@ shell.apps.<id>.e2ee_store          --e2ee-store SPEC, read as it opens
 and the Runtime writes back `status` (`open`, `refused`, `closed`), `error` (why it was
 refused), `principal`, `name`, `holds` (the grant tokens it holds) and `net_origins` (the
 origins it reaches beyond its principal's), the last two comma-separated. `<id>` is a state key
-segment (`[A-Za-z0-9_]`, not starting with a digit). `view` and `background` are SH3 and SH6's.
-`grants` and `argv` are each a value split at spaces (and, for `grants`, commas) or a child per
-item (`argv.0`, `argv.1`, ...).
+segment (`[A-Za-z0-9_]`, not starting with a digit). `background` is the slot's `in_background:`
+when the entry says neither run nor hold (that a value, or a key holding `hold` or a true value;
+else run). `view` is SH6's. `grants` and `argv` are each a value split at spaces (and, for
+`grants`, commas) or a child per item (`argv.0`, `argv.1`, ...).
 
 - **Mounting.** When an entry with a `uri` appears, the Runtime asks its host's loader for the
   document. The loader resolves and parses it as `load: <uri>` with `as: <id>` and its `args:`
@@ -6817,7 +6970,7 @@ item (`argv.0`, `argv.1`, ...).
   naming what is missing: a `requires:` entry this host lacks, a function a program calls that it
   does not provide, or `gl.scene` for a document with a `scene:` on a host that draws none. An
   optional entry this host lacks is not refused: the document said it copes. A mount's scene is
-  not drawn yet (SH3).
+  drawn as a `load:` module's is (§6.3): realized as it opens, taken down as it closes.
 - **Limits.** At most 256 open mounts and 32 levels of them, as a document's `load:`s.
 - **Grants** (§5.7, ARIADNE_SHELL.md 4.5). The slot's `grants:` (and `deny:`), written as a
   `load:`'s are (§6.3), is the most any of its applications may get; without one, `extend.tray`
@@ -6954,7 +7107,8 @@ Widgets and scene binds use the same rule, which is why a widget `bind:` and a s
 
 **Grid sizes (§11.4).** A grid the user can resize keeps its sizes under its id, the way a
 window keeps `tree.<id>.geometry`: a row split's pane heights in `tree.<id>.tracks`, a
-resizable table's column widths in `tree.<id>.columns`. A grid's id is its `id:`, else its
+resizable table's column widths in `tree.<id>.columns`. A `type: table` (*Tables* in §5.3) is
+such a grid: its columns' widths persist the same way, under the table's id. A grid's id is its `id:`, else its
 `label:`, else one the walk makes from where the grid sits in the document (`~0_2_1`, the child
 index at each level), so two unnamed grids in one window never share a backend table or a key.
 That id moves when the document's structure above the grid changes, so give a grid whose sizes
@@ -6998,7 +7152,7 @@ A mounted module is sandboxed to its sub-prefix. Access to the parent's state is
 - scalar `name: target` grants read-write;
 - map `name: {to:, mode: ro|rw}` **fails closed** — only an exact `"rw"` mode is
   writable (`expand_load`, [`loader.cpp`](../src/cvc/ariadne/loader.cpp)); anything else is
-  read-only. A hole whose name starts with `/` is rejected.
+  read-only, a missing mode too. A hole whose name starts with `/` is rejected.
 
 At reconcile, `wire_holes` ([`ariadne.cpp`](../src/cvc/ariadne/ariadne.cpp)) plants a
 transparent link at `resolve_bind(sub_prefix, name)` pointing to
@@ -9581,10 +9735,14 @@ below (G17–G21 in the internal gap report) are tracked for reconciliation.
   scene needs a cvcGL build and a GL that works offscreen (X, EGL or OSMesa). On a Kitty terminal a
   scene that keeps moving sends a frame per change (up to `max_image_pixels`), and on a Sixel one
   every frame, so a remote session is better off with half-blocks (`--graphics color`).
-- **`load:` `prefix:` / `reload:` and §12.2 sub-scene mounting are not yet parsed** at the
-  loader; only sub-UI `load:` is landed ([`loader.cpp`](../src/cvc/ariadne/loader.cpp)). A
-  loaded document's `scene:`, `scenes:`, `data:`, `assets:` and `keys:` are dropped. The shell
-  design ([ARIADNE_SHELL.md](roadmap/ARIADNE_SHELL.md)) proposes keeping them.
+- **`load:` `prefix:` / `reload:` are not yet parsed** at the loader
+  ([`loader.cpp`](../src/cvc/ariadne/loader.cpp)). A loaded document keeps its scene, datasets and
+  keys (§6.3), but its `keys:` are not bound (SH7), its `world:` block (vehicles) is not read,
+  and its scene is drawn only by a host with a scene adapter (arigl and the other cvcGL hosts); a
+  host without one runs no world for it. A node type that reads `app.world_clock()` itself rather
+  than `cvc::scene_clock(app, its prefix)` times a mounted scene by the document's clock: cvcGL's
+  water, weather, L-system, world, swarm and vehicle nodes look theirs up, while a `nav_swarm`
+  node's own navigator (`scene_swarm.cpp`) still steps on the app's clock.
 - **No DSL-visible future from the pycvc async layer.** Both `register_async_fn` and
   `register_async_coro` self-park; there is no gather/join to launch *N* Python async
   calls concurrently from one process (the net verbs' `-async` futures do offer this).
@@ -9669,8 +9827,10 @@ Measured in CI (2026-10-20):
   their edges differently, and the volume grids' texel edges land a pixel apart. On
   volume_grid_quad the Probe tab's Min/Max text differs too: the bunny SDF's range is one float32
   ulp apart on the arm64 runner (`-26.27533721923828` against llvmpipe's `-26.275339126586914`).
-- So `widgets`, `scene`, `grid`, `orthoslicer`, `view_stacking` and those eight have
-  `<name>.macos.png` goldens, and macOS compares them against its own renderer.
+- scene_windows (2026-11-27) had 759 pixels beyond 40, at the edges of the shapes and of the
+  volren in its two windows.
+- So `widgets`, `scene`, `grid`, `orthoslicer`, `view_stacking`, those eight and `scene_windows`
+  have `<name>.macos.png` goldens, and macOS compares them against its own renderer.
 
 To make or refresh a macOS golden, take `<name>.actual.png` from the failing macOS job's
 `ari-golden-macOS-<lane>` artifact, look at it, and commit it as `<name>.macos.png`.
@@ -9856,7 +10016,8 @@ The `.ari` schema is a JSON Schema
 ([`src/cvc/ariadne/schema/ari.v1.schema.json`](../src/cvc/ariadne/schema/ari.v1.schema.json)):
 every top-level block, every built-in widget type and scene node, and the keys and values each
 takes, each described. It is the definition of a document's structure; where this guide and the
-schema disagree, the schema (with the loader beside it) is right. The library carries it
+schema disagree, the schema (with the loader beside it) is right. Its other half, what each block
+means and when it acts, is [`ARIADNE_SPEC.md`](ARIADNE_SPEC.md). The library carries it
 compiled in (`cvc::ariadne::ari_schema_json()`; `ari schema` prints it), and an install puts it
 at `share/libcvc/ariadne/schema/ari.v1.schema.json`, so an editor can check a document as it is
 written. With the YAML language server (VS Code's YAML extension), a modeline does it:
@@ -9893,7 +10054,9 @@ loader reads them, not by their quotes.
 A build with the validator (json-schema-validator over nlohmann-json; `have_jsonschema()`,
 `ari info`'s *json_schema*) checks every document it loads:
 
-- the document itself, before anything else reads it;
+- the document itself, right after the `min_libcvc` gate (§5.2) and before anything else reads
+  it. A document too new for this build is refused unchecked, since it may use keys this
+  build's schema does not know;
 - each library it `import:`s, and each fragment it `load:`s (after the mount's `args:`);
 - each `include:` expansion, as a widget, after its args are substituted and its slots filled.
   A problem there is reported in the unit's own file and line, with the context
@@ -9972,3 +10135,5 @@ A widget type's schema, `w_<type>`, lists its own
 keys and takes the shared ones by the one pattern every type carries
 (`EveryWidgetTakesTheSharedKeys`); a new widget type also needs its link in `short_widget`, in
 the loader's order, and its entry in `typed_widget` (`EveryBuiltinWidgetTypeHasItsSchema`).
+A new top-level block also needs its entry in [`ARIADNE_SPEC.md`](ARIADNE_SPEC.md) §8, saying
+what it means and when it acts (`AriSpec.EveryTopLevelBlockHasItsEntry`).
