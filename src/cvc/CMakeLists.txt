@@ -179,7 +179,9 @@ set(INCLUDE_FILES
   ../../inc/cvc/geometry/contours.h
   ../../inc/cvc/geometry/contour_intrinsics.h
   ../../inc/cvc/mol/blur.h
+  ../../inc/cvc/mol/groups.h
   ../../inc/cvc/mol/molecule.h
+  ../../inc/cvc/mol/torsions.h
   ../../inc/cvc/mol/view.h
   ../../inc/cvc/volume/point_classes.h
   ../../inc/cvc/volume/point_class_intrinsics.h
@@ -363,7 +365,9 @@ set(SOURCE_FILES
   geometry/contour_intrinsics.cpp
   utility/xml_lite.cpp
   mol/blur.cpp
+  mol/groups.cpp
   mol/molecule.cpp
+  mol/torsions.cpp
   mol/view.cpp
   volume/point_classes.cpp
   volume/point_class_intrinsics.cpp
