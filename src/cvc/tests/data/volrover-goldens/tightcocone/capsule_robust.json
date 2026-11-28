@@ -1,0 +1,39 @@
+{
+  "library": "TightCocone",
+  "volrover": "1cf0fbd72c7539e415a4f0fbc58c6bfce3d3caf8",
+  "case": "capsule_robust",
+  "input": "tools/volrover-goldens/inputs/skeleton/capsule.pts",
+  "input_sha256": "af9dcb685fa050167e34a622c9d3c2fbe7c3137489c7a1c1e6655ef0fe841574",
+  "points": 941,
+  "parameters": {
+    "robust": 1
+  },
+  "counts": {
+    "vertices": 941,
+    "triangles": 1878,
+    "distinct_triangles": 1878,
+    "debug_files": []
+  },
+  "tc_sha256": "e955a4d421b9d36e5dac8825dd38462c9c9de6122e8909e82e0881180707b144",
+  "made_by": "tools/volrover-goldens/make_goldens.py",
+  "platform": "Windows AMD64, Windows-11, Python 3.13.3",
+  "reset_box": {
+    "surface_changes": false,
+    "box": [
+      -10.966296672821045,
+      18.964882135391235,
+      -2.9999995827674866,
+      2.999999701976776,
+      -2.999996066093445,
+      2.999997854232788
+    ],
+    "box_reset": [
+      -10.966296672821045,
+      18.964882135391235,
+      -2.9999995827674866,
+      2.999999701976776,
+      -2.999996066093445,
+      2.999997854232788
+    ]
+  }
+}

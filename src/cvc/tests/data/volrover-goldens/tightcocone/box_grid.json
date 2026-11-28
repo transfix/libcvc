@@ -1,0 +1,18 @@
+{
+  "library": "TightCocone",
+  "volrover": "1cf0fbd72c7539e415a4f0fbc58c6bfce3d3caf8",
+  "case": "box_grid",
+  "input": "tools/volrover-goldens/inputs/skeleton/box_grid.pts",
+  "input_sha256": "06e69e9eff1f88400ef12ca1b574a22a16e98283e7802d46baf22b96b3864edd",
+  "points": 154,
+  "parameters": {},
+  "counts": {
+    "vertices": 154,
+    "triangles": 300,
+    "distinct_triangles": 300,
+    "debug_files": []
+  },
+  "tc_sha256": "6ac618beedfc3a948b9579c529b0e2fe0a4492150d1aa5c3c33b2b532e64c23c",
+  "made_by": "tools/volrover-goldens/make_goldens.py",
+  "platform": "Windows AMD64, Windows-11, Python 3.13.3"
+}

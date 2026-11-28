@@ -1,0 +1,22 @@
+# component_run.ari — tight_cocone_intrinsics_test's document: the tight_cocone component
+# (cvc://components/mesh/tight_cocone.ari) over a dataset the app makes (the test's generator, a
+# sampled sphere), its job under `tc`. The test clicks Run once the points are ready; on_tick puts
+# the surface in the dataset as its output `surface`.
+
+meta:
+  name: tight cocone component test
+  min_libcvc: 4.0.0
+
+import:
+  - cvc://components/mesh/tight_cocone.ari
+
+data:
+  points:
+    generate: tight_cocone_test_sphere
+    params: { n: 500 }
+
+on_tick: (tight-cocone-step "tc" "points")
+
+windows:
+  - include: tight_cocone
+    args: { job: tc, title: Surface }

@@ -10,12 +10,13 @@
 // least 500 px on its short side, so the small-screen rule never closes them), ImGui's frame delta
 // pinned, and several frames at a fixed dt before the capture, so new windows have finished
 // appearing; where a custom node has work in flight (RealizedScene::pending_work: a contour_lab's
-// tile, a mesh_lab skeleton, a colour job), more frames until it is done, then those again for the
-// UI to show what it published; where the scene has volren nodes, more frames until each shows a
-// finished raycast (they raycast on a worker thread). The test then renders one frame more and
-// requires it to be identical to the capture. When ImGui drew exactly the same UI in both and only
-// the rasterizer moved (the Apple Software Renderer, in a process's first frames), it renders up
-// to kRasterSettleFrames more until two agree.
+// tile, a mesh_lab skeleton, a colour job), or the document says it has (its golden.wait key is 1:
+// a DSL job it started, such as volume_filters' filter), more frames until it is done, then those
+// again for the UI to show what it published; where the scene has volren nodes, more frames until
+// each shows a finished raycast (they raycast on a worker thread). The test then renders one frame
+// more and requires it to be identical to the capture. When ImGui drew exactly the same UI in both
+// and only the rasterizer moved (the Apple Software Renderer, in a process's first frames), it
+// renders up to kRasterSettleFrames more until two agree.
 //
 // Goldens are made under Mesa llvmpipe, the rasterizer of the Linux and Windows CI jobs. Other
 // rasterizers, and other Mesa versions, draw anti-aliased edges and shading a little differently,
@@ -39,6 +40,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cvc/ariadne/app_runtime.h>
 #include <cvc/core/app.h>
 #include <cvc/gl/CameraController.h>
 #include <cvc/gl/ImGuiOverlay.h>
@@ -321,13 +323,21 @@ bool runDocument(const fs::path &doc, const fs::path &goldenDir, const fs::path 
   // the one it went idle on, so the windows show the keys it published; a probe busy again (a
   // request a finished job left) starts the count over. A slow machine only takes more frames
   // here; a document whose nodes register no probe takes none. The ceiling is a hang guard.
+  // Work no node knows of (a DSL job a document started with a -start form, a dataset loading
+  // before it) is the document's to declare: while its golden.wait key is 1, it is in flight too.
   int workFrames = 0;
   const cvc::gl::ariadne::RealizedScene *realized = rt.realized();
-  if (realized && !realized->pending_work.empty()) {
+  cvc::state &docWait = rt.app_runtime().app().root()(
+      rt.prefix().empty() ? std::string("golden.wait") : rt.prefix() + ".golden.wait");
+  const auto docBusy = [&] { return docWait.value() == "1"; };
+  if ((realized && !realized->pending_work.empty()) || docBusy()) {
     const auto busy = [&] {
-      for (const auto &probe : realized->pending_work)
-        if (probe && probe())
-          return true;
+      if (docBusy())
+        return true;
+      if (realized)
+        for (const auto &probe : realized->pending_work)
+          if (probe && probe())
+            return true;
       return false;
     };
     const auto start = std::chrono::steady_clock::now();

@@ -1,0 +1,9 @@
+{
+  "library": "TightCocone",
+  "input": "tightcocone/outlier_sphere.pts",
+  "points": 1975,
+  "parameters": {
+    "robust": 1
+  },
+  "made_by": "tools/volrover-goldens/make_inputs.py"
+}

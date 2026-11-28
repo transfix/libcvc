@@ -13,7 +13,7 @@ those outputs reproducibly:
    tests read them.
 
 GPL code may be built here, and only here. The libraries that need CGAL (Skeletonization,
-SecondaryStructures, ContourTiler, PocketTunnel) build against a CGAL where CMake finds it (cvcpkg's, in CI). Nothing built here is linked into
+SecondaryStructures, ContourTiler, PocketTunnel, TightCocone) build against a CGAL where CMake finds it (cvcpkg's, in CI). Nothing built here is linked into
 libcvc, cvcGL or pycvc, and nothing here is installed or packaged.
 
 ```bash
@@ -398,3 +398,72 @@ settled (2026-11-17):
 
 **Platforms:** the tiler goldens were made on Windows with clang-cl 19 and CGAL 6.0.1, and
 `--check` there makes the same files. GCC 16 compiles the same sources.
+
+## TightCocone
+
+TightCocone is `src/TightCocone`, a watertight surface through a point cloud (VolumeRover2's Tools >
+Tight Cocone; docs/roadmap/VOLROVER-TEXMOL-APPS-ROADMAP.md §2.4, V1). It needs CGAL, as
+Skeletonization does (`--libs tightcocone` builds it alone). volrover's own CI configures with
+`-DDISABLE_CGAL=ON`, so this is the only build of it.
+
+- **What is built:** the point-cloud entry, `surfaceReconstruction(const cvcgeom_t &, const
+  Parameters &)`, with the files it calls (`init`, `util`, `tcocone`, `rcocone`, `robust_cc`,
+  `medax`, `op`), from patched copies in the build tree (a patch that does not apply fails the
+  configure):
+  - **`tcocone.cpp`** is Skeletonization's, with the same two `CGAL_assertion()`s whose
+    `has_vertex()` calls fill the indices the code then uses: plain calls, as the port makes them;
+  - **`tight_cocone_points.cpp`** is that one function of `tight_cocone.cpp`, with the globals it
+    reads. The volume entries (boundary points through GVF and `segment.cpp`, on VolMagick) are left
+    out: the port's volume path comes later. In the robust branch, the min-max span is reset before
+    the second triangulation when the driver asks (`reset_box=1`).
+- **What is shimmed:** `shim/cvcraw_geometry/cvcgeom.h`, the legacy `cvcgeom_t`, and
+  `shim/VolMagick/VolMagick.h`, which declares the `Volume` the header names.
+- **Inputs:** `inputs/tightcocone/<case>.json` names the points (`input`: another library's committed
+  `.pts`, so the clouds are not stored twice, or `tightcocone/<case>.pts`) and the parameters, the
+  legacy names. `make_inputs.py --only tightcocone` wrote them, and the two clouds of its own.
+- **Goldens:** for each case, in `src/cvc/tests/data/volrover-goldens/tightcocone/`:
+  - `<case>.tc.txt`, in `tightcocone_driver.cpp`'s format: the input's size, the legacy global
+    bounding box, and the returned surface (its points, every finite vertex, and its triangles by
+    index, in the order and orientation returned). `--check` compares it by content: the triangles
+    by their corners' coordinates, as a set;
+  - `<case>.json`: the counts, the volrover commit, the platform and the SHA-256. A robust case runs
+    again with `reset_box=1`, and records both boxes and whether the surface changed.
+
+| Case | Points | What it covers |
+|---|---|---|
+| `capsule`, `torus`, `dumbbell` | 941, 768, 1,236 | the skeleton's clouds: genus 0, 1 and 0 |
+| `box_grid` | 154 | a box's surface on a lattice, exactly cospherical everywhere |
+| `pocket` | 1,923 | PocketTunnel's chambered ball with one neck |
+| `1grl` | 2,609 | PDB 1GRL's surface at a 3 Å map's resolution (PocketTunnel's input): one non-manifold edge |
+| `helices_and_sheet` | 2,920 | SecondaryStructures' tubes and slab: four closed parts |
+| `dumbbell_narrow` | 1,236 | the dumbbell with other parameters (cocone φ 0.3, flat φ 0.9, flatness 2) |
+| `capsule_robust` | 941 | Robust Cocone on a clean sample: it keeps every point |
+| `noisy_sphere` | 2,023 | a sphere 1% off its radius with 60 points inside it, with Robust Cocone: 1,745 kept |
+| `outlier_sphere` | 1,975 | a sphere with 12 points well outside it, with Robust Cocone |
+
+**The robust mode's bounding box.** The legacy never resets its min-max span between Robust Cocone's
+two triangulations (`tight_cocone.cpp:602-700`), and the box is a global the first call fills. It
+makes no difference, twice over:
+- nothing on the surface path reads the box (its one reader is the medial-axis writer `write_axis`,
+  which `surfaceReconstruction` never calls);
+- Robust Cocone keeps every vertex of the convex hull (`rc_walk` marks a hull facet's corners from
+  the finite cell beside it, inside or out), so the points it keeps span the same box as the input.
+
+On all three robust cases the two runs give the same surface and the same box. The port keeps no box.
+
+`tight_cocone_test` (`MatchesTheLegacyLibrary`) compares the port with these goldens:
+- **exactly** on `capsule`, `dumbbell`, `box_grid`, `pocket`, `helices_and_sheet`,
+  `dumbbell_narrow` and `capsule_robust`: every triangle, facing the same way;
+- **by topology and share** on the other four. The triangulation is CGAL's cell for cell, and the
+  port's Tight Cocone is the legacy code, but where its peeling meets close choices it takes them in
+  the cells' order: CGAL's memory order in the legacy, tet_complex's insertion order in the port
+  (PocketTunnel found the same). Both surfaces have the same Euler characteristic and open and
+  non-manifold edges, no triangle faces the other way, and they share 98% of the torus's triangles,
+  99% of 1GRL's, and 95% or more of the two noisy spheres' (Robust Cocone keeps the same number
+  of points on both sides).
+
+**Platforms:** the goldens were made on Windows with MSVC 2022 and CGAL 6.0.1. There the legacy's
+robust cases change from run to run: its heap orders the cells differently each time, and five runs
+on `noisy_sphere` gave two surfaces 162 triangles apart (the port is within 8 triangles of one of
+them). The non-robust cases came out the same every run. CI's check on ubuntu-24.04 decides which
+goldens are committed, as for the other CGAL libraries.

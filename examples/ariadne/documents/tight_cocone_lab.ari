@@ -1,0 +1,98 @@
+# tight_cocone_lab.ari — a watertight surface through a point cloud, declared in Ariadne:
+# cvc::tight_cocone (the VolumeRover TightCocone port, docs/roadmap/VOLROVER-TEXMOL-APPS-ROADMAP.md
+# §2.4, V1) through its component, cvc://components/mesh/tight_cocone.ari.
+#
+# The app holds the points: a dataset of the embedded Stanford bunny decimated to 16,000 triangles
+# (cvcGL's `mesh` generator), of which only the 8,000-odd vertices are read. The component never
+# loads a file; it views the dataset. When the points are ready the document starts a run, as the
+# component's Run button does: Tight Cocone triangulates them, peels the outside off, and keeps the
+# Delaunay facets between inside and outside, a slice at a time on the app's scheduler, so the frame
+# never waits (the bar names the stage and Stop ends it). The surface goes back into the dataset as
+# its output `surface`, and the scene draws it; each run replaces it. Robust Cocone first leaves out
+# the points off a smooth surface, for a noisy scan. View > Input shows the bunny the points came
+# from, see-through, behind the surface. No host C++ (docs/ARIADNE.md §5.4).
+#
+# Run from the repository root:
+#   arigl run --component-path src/cvc/ariadne examples/ariadne/documents/tight_cocone_lab.ari
+
+meta:
+  name: Tight Cocone lab (Ariadne + cvc::tight_cocone)
+  author: cvc
+  min_libcvc: 4.0.0
+
+requires:
+  - gl.scene                       # a scene renderer realizes the scene: block (arigl; not ari)
+
+import:
+  - cvc://components/mesh/tight_cocone.ari
+  - cvc://components/stage_lighting.ari
+  - cvc://components/camera_controls.ari
+
+data:
+  points:
+    generate: mesh
+    params: { mesh: stanford.bunny, triangles: 16000, fit: { height: 100, up: y } }
+
+state:
+  view.input: 0
+
+# The first run once the points are ready; the surface into the dataset whenever a run is done;
+# and, once, the main view a little further out than the bunny (100 high, standing on z), right of
+# the panel.
+on_tick: |
+  (if (and (= (state-get "data.points.status") "ready") (!= (state-get "lab.started") "1"))
+      (begin (state-set "lab.started" "1")
+             (tight-cocone-run "tight_cocone" "points" "geometry"))
+      #f)
+  (tight-cocone-step "tight_cocone" "points")
+  (if (and (!= (state-get "lab.framed") "1")
+           (!= (or (state-get "tight_cocone.info.triangles") "") ""))
+      (begin (state-set "viewers.main.camera.frame" "-170 -70 -5 80 70 110")
+             (state-set "lab.framed" "1"))
+      #f)
+
+menubar:
+  - menu: File
+    items:
+      - menu_item: Quit
+        on: quit
+  - menu: View
+    items:
+      - menu_item: Input
+        bind: view.input
+
+windows:
+  - include: tight_cocone
+    pos: [12, 30]
+    size: [380, 600]
+  - include: stage_lighting
+    pos: [960, 470]
+    size: [420, 160]
+  - include: camera_controls
+    pos: [960, 640]
+    size: [420, 120]
+
+scene:
+  shadows: { enabled: true, resolution: 2048 }   # soft shadows (softness 2), on in every demo
+  chrome: false
+  background: { top: [0.10, 0.12, 0.16], bottom: [0.02, 0.02, 0.03] }
+  nodes:
+    # The surface through the points, once a run has put it in the dataset.
+    - node: surface
+      source: { data: points, item: surface }
+      material: { color: [0.72, 0.70, 0.78], ambient: 0.22, diffuse: 0.9, specular: 0.25, specular_power: 24 }
+    # The mesh the points came from (View > Input).
+    - node: input
+      source: { data: points, item: geometry }
+      visible: view.input
+      material: { color: [0.35, 0.6, 0.95], opacity: 0.25 }
+  lights:
+    - light: studio
+      rig: three_point
+      stage: { center: [0, 0, 50], radius: 62 }
+      key: { intensity: 1.3, azimuth: -38, elevation: 52, cone: 34 }
+      fill: 0.85
+      back: 0.6
+      warmth: 0.3
+      environment: 0.4
+      ambient: 0.25

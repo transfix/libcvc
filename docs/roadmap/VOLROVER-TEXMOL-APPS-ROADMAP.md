@@ -216,7 +216,8 @@ continues from that plan's P11.
   `volume/volume_filters.ari` component drives all four. VolumeRover2's defaults (anisotropic 20
   iterations; bilateral 200, 1.5, 2; contrast 0.95; GDTV exponent 2, λ 1e-4, one iteration) are the
   parameter tables' defaults.
-- **V1 Tight Cocone (S–M).** The core is in libcvc; what is missing:
+- **V1 Tight Cocone (S–M). Built in transfix/libcvc#1625**, apart from the volume path. The core was
+  in libcvc; what was missing:
   - a public `cvc::tight_cocone` with a parameter table (robust, big-ball ratio, the two angles,
     cocone φ, flat φ, flatness). The skeleton's defaults already match (`cvc/geometry/skeleton.h:69-79`);
   - the surface extraction, a port of `wt_to_geometry` (`src/TightCocone/op.cpp:306-397`): the facets
@@ -229,6 +230,13 @@ continues from that plan's P11.
   comes second, on libcvc's `gradient_vector_diffusion` and segmentation code. The legacy robust
   mode never resets its bounding box between its two triangulations (`tight_cocone.cpp:602-700`);
   the A/B records whether that changes results and the port resets it.
+
+  What #1625 found: the port's surface is the legacy's, triangle for triangle, on 7 of the 11 A/B
+  cases, and of the same topology on the rest (95-99% of the triangles shared; Tight Cocone's
+  peeling takes close choices in the cells' order, CGAL's memory order in the legacy). The box
+  changes nothing: no reader on the surface path, and Robust Cocone keeps every convex-hull vertex,
+  so its points span the input's box anyway; the port keeps none (tools/volrover-goldens/README.md).
+  The volume path is the follow-up.
 - **V2 Surface curation (S),** on V1 and PocketTunnel's stable manifolds:
   - the merge-ratio clubbing (`smax.cpp:139-170`), `curate_tr`, and the count of pockets and
     tunnels to keep;
@@ -631,7 +639,7 @@ Sizes as in the VolumeRover plan: S is a PR or two, M a few, L a short series.
 | SDK-3, SDK-5 | M | Toolbar, status bar, shortcuts, icons; `input_float`, editable `combo` | — |
 | DT1 Dev tools | M | §7.3's state inspector and exec console in `dev/` | SDK-7, SDK-8, SDK-9 |
 | V0 Filter jobs | S | §2.4 | — |
-| V1 Tight Cocone | S–M | §2.4 | — |
+| V1 Tight Cocone | S–M | §2.4; built in #1625 (the volume path follows) | — |
 | V2 Curation | S | §2.4 | V1 |
 | V3 Super-secondary structures | S | §2.4 | V1, §9 item 3 |
 | V4 HLS surface | M | §2.4; also TexMol's T2 HLevelSet | — |

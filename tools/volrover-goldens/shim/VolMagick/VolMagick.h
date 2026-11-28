@@ -14,6 +14,10 @@
 
 namespace VolMagick {
 
+// Named, never defined: legacy TightCocone's header declares its volume entries with it, which
+// the goldens leave out (CMakeLists.txt builds its point-cloud entry alone).
+class Volume;
+
 class VolumeFileInfo {
 public:
   // A rawiv file's header (big-endian): min[3], max[3] (floats), nverts, ncells (ints), dim[3]

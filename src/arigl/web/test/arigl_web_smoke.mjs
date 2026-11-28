@@ -607,6 +607,17 @@ console.log = function(...a) { window.__out.push(a.join(' ')); return log.apply(
     check: v => v.state === 'running' && v.warnings.length === 0 &&
                 v.out.some(l => /molecule skeleton: [1-9]\d* strands, \d+ sheets \(done: /.test(l)),
   });
+  // The tight_cocone component (V1): the app makes a dataset of the embedded bunny, decimated; the
+  // component runs cocone.tight on its points a slice at a time on the single-threaded page and
+  // puts the surface back in the dataset, where the scene draws it; the document prints one line
+  // once it is in (or the error, which fails the case).
+  cases.push({
+    name: 'the tight_cocone component makes a surface through a point set the app holds (Tight Cocone)',
+    url: `${ORIGIN}/apps/app/?src=tight_cocone.ari`,
+    inject: LOGGED,
+    check: v => v.state === 'running' && v.warnings.length === 0 &&
+                v.out.some(l => /tight_cocone: [1-9]\d* triangles over [1-9]\d* points \(done: /.test(l)),
+  });
   // The contour tiler (arigl only, as the orthoslicer): a contour_lab node reads a Reconstruct
   // series the page config preloads and tiles it as a sliced task on the page's scheduler; the
   // document prints one line once its three surfaces are up.

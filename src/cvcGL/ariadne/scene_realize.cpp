@@ -22,6 +22,7 @@
 #include <cvc/geometry/geometry_file_io.h>
 #include <cvc/geometry/height_field.h> // a heightfield source is the world's own cvc::height_field
 #include <cvc/geometry/mesh_ops.h>     // mesh_ops_available() — source.sdf.algorithm: igl
+#include <cvc/geometry/simplify.h>     // generate: mesh decimates with it
 #include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/GraphicsNode.h>
 #include <cvc/gl/LabelLayer.h> // label: and entity_labels: (scene_labels.h)
@@ -1751,6 +1752,54 @@ void register_sdf_data_generator(cvc::app &app) {
   });
 }
 
+void register_mesh_data_generator(cvc::app &app) {
+  cvc::ariadne::register_data_generator(app, "mesh", [](cvc::ariadne::DataDecode &d) {
+    namespace pt = boost::property_tree;
+    pt::ptree j;
+    try {
+      std::istringstream in(d.spec.params.empty() ? std::string("{}") : d.spec.params);
+      pt::read_json(in, j);
+    } catch (const std::exception &e) {
+      throw std::runtime_error(std::string("generate: mesh: params are not a JSON object: ") +
+                               e.what());
+    }
+    std::string mesh = j.get<std::string>("mesh", "");
+    if (mesh.empty())
+      throw std::runtime_error("generate: mesh: params need a mesh (a mesh URI or a file)");
+    if (!d.spec.base.empty() && d.spec.base.find("://") == std::string::npos) {
+      std::error_code ec; // a file beside the document; an embedded mesh's name stays as it is
+      const std::filesystem::path beside = std::filesystem::path(d.spec.base) / mesh;
+      if (std::filesystem::path(mesh).is_relative() && std::filesystem::exists(beside, ec))
+        mesh = beside.string();
+    }
+    const long triangles = j.get<long>("triangles", 0);
+    if (triangles < 0)
+      throw std::runtime_error("generate: mesh: triangles " + std::to_string(triangles) +
+                               " is negative");
+    cvc::geometry g = cvc::read_geometry(d.app, mesh);
+    if (triangles > 0 && g.const_tris().size() > std::size_t(triangles)) {
+      cvc::simplify_params sp;
+      sp.target_tris = std::uint64_t(triangles);
+      g = cvc::simplify(g, sp);
+    }
+    if (const boost::optional<pt::ptree &> fit = j.get_child_optional("fit")) {
+      const std::string up = fit->get<std::string>("up", "z");
+      const bool flip = fit->get<std::string>("flip", "false") == "true" ||
+                        fit->get<std::string>("flip", "0") == "1";
+      g = fit_to_ground(g,
+                        up == "y"   ? 'y'
+                        : up == "x" ? 'x'
+                                    : 'z',
+                        flip, fit->get<float>("height", 1.0f));
+    }
+    d.out("geometry").value(std::string("geometry"));
+    d.out("geometry")
+        .data(boost::any(std::shared_ptr<const cvc::geometry>(
+            std::make_shared<const cvc::geometry>(std::move(g)))));
+    return std::vector<cvc::archive::file>(); // its output written: no files to decode
+  });
+}
+
 // The volume a volren/volslice (or custom) node draws: loaded from `source: { file }`, or computed
 // as the SDF of a mesh (`source: { sdf: { mesh:, dim:, algorithm: } }`). Throws on failure — the
 // caller's try/catch warns and skips the node.
@@ -2536,11 +2585,18 @@ bool draw_dataset(RealizedScene &r, SceneDataBinding &b, const std::string &stor
     has_bounds = true;
   } else if (const volume_ptr *v = boost::any_cast<volume_ptr>(&obj)) {
     b.drawn.push_back(group->createChild<VolumeNode>(n.id + "_" + key, **v));
-  } else {
+  } else if (n.source_item.empty() || !obj.empty()) {
     warn(warnings,
          "ari: scene node '" + n.id + "': the dataset " + store + " has " +
              (n.source_item.empty() ? "nothing to draw (a world, geometry, terrain or volume)"
-                                    : "no " + n.source_item + " to draw"));
+                                    : "a " + n.source_item +
+                                          " that is not a world, geometry, "
+                                          "terrain or volume"));
+    return false;
+  } else {
+    // An output the dataset does not hold yet, which a program puts there later (data-put: a
+    // component's result, such as tight_cocone's surface): nothing drawn until it is in, and no
+    // warning, since the put raises the rev and draws it.
     return false;
   }
   // Its bodies are the scene world's to make (SceneWorld::sync, as a headless host's are).

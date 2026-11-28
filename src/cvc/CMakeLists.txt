@@ -33,6 +33,9 @@ set(INCLUDE_FILES
   ../../inc/cvc/geometry/pocket_tunnel_params.h
   ../../inc/cvc/geometry/secondary_structures.h
   ../../inc/cvc/geometry/secondary_structures_params.h
+  ../../inc/cvc/geometry/tight_cocone.h
+  ../../inc/cvc/geometry/tight_cocone_params.h
+  ../../inc/cvc/geometry/tight_cocone_intrinsics.h
   ../../inc/cvc/geometry/tiler.h
   ../../inc/cvc/geometry/tiler_params.h
   ../../inc/cvc/geometry/tiler_intrinsics.h
@@ -344,6 +347,7 @@ set(SOURCE_FILES
   geometry/cocone/util.cpp
   geometry/cocone/tcocone.cpp
   geometry/cocone/rcocone.cpp
+  geometry/cocone/surface.cpp
   geometry/skeleton/medax.cpp
   geometry/skeleton/u2.cpp
   geometry/skeleton/skel.cpp
@@ -353,6 +357,8 @@ set(SOURCE_FILES
   geometry/secondary/secondary_axis.cpp
   geometry/secondary/secondary_select.cpp
   geometry/secondary/secondary_structures.cpp
+  geometry/tight_cocone/tight_cocone.cpp
+  geometry/tight_cocone/tight_cocone_intrinsics.cpp
   geometry/tiler/tile_contours.cpp
   geometry/tiler/tiler_intrinsics.cpp
   geometry/sliced_ldlt.cpp

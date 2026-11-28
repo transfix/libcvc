@@ -4770,8 +4770,11 @@ A host adds its own with `register_data_decoder`.
 **Generators.** `generate: NAME` with `params:` makes a dataset instead of fetching it:
 `generated_world` (core: a world, as a version 2 city bundle) and, in cvcGL hosts, `sdf` (a mesh's
 signed distance field, as `volume`: `params: { mesh: stanford.bunny, dim: 64, algorithm: v2,
-fit: { height: 100, up: y } }`, `mesh` a mesh URI or a file beside the document). A generator that
-writes its outputs itself and makes no files runs no decoder. A host adds its own with
+fit: { height: 100, up: y } }`, `mesh` a mesh URI or a file beside the document) and `mesh` (a mesh
+as `geometry`: `params: { mesh: stanford.bunny, triangles: 4000, fit: { height: 100, up: y } }`,
+`triangles` decimating it with `cvc::simplify`, so a document has a mesh, or a point set, on the
+state tree without a file of its own). A generator that writes its outputs itself and makes no files
+runs no decoder. A host adds its own with
 `register_data_generator`.
 
 **Saving.** The app saves data as it loads them: `(data-save PATH FILE [AS])` (below), or a host's
@@ -4802,7 +4805,9 @@ a `volume_grid` shows the volume the app loaded, and the app saves the points th
 
 **Scene nodes.** A `source: { data: NAME }` node is an empty group at load. Once its dataset is
 ready, the scene draws into it the first of the dataset's `world`, `geometry`, `terrain` or
-`volume` that it has (`item:` picks one). It draws again whenever the dataset's `rev` changes, or
+`volume` that it has (`item:` picks one). An `item:` the dataset does not hold yet draws nothing, and
+says nothing, until a program puts it there (`data-put`: a component's result, such as
+`tight_cocone`'s `surface`, §6.5). It draws again whenever the dataset's `rev` changes, or
 the document's link points at another dataset. What it drew before goes, and so do its bodies:
 - a world's items become the node's children, its terrain becomes the node's height field (for
   `ground:`) and wears the dataset's `satellite` image (north at the image's top), and with
@@ -6497,6 +6502,7 @@ copy (a libcvc checkout's `src/cvc/ariadne`). Each binds state keys a C++ object
 | `mesh_tools` | a `mesh_lab` node (§5.4; arg `node`, default `mesh`) |
 | `fe_controls` | an `fe_lab` node (§5.4; arg `node`, default `domain`) |
 | `contour_tiler` | a `contour_lab` node (§5.4; args `node`, default `contours`, `title`, `id` and `slices`, the slice range's slider end): the component picker, the slice range, the tiler's parameters, Tile, Stop and Load, and a progress bar naming the slice pair |
+| `tight_cocone` (`cvc://components/mesh/tight_cocone.ari`) | no node: a point set the app holds, a dataset's geometry (args `source`, default `points`, and `item`, default `geometry`), and Tight Cocone's surface through it ([`tight_cocone.h`](../inc/cvc/geometry/tight_cocone.h), VolumeRover's TightCocone). Run starts `cocone.tight-start` on `data.<source>.<item>` with the parameters at `<job>.params.*` (arg `job`, default `tight_cocone`; the table's fields, [PORT_PARAMETERS.md](PORT_PARAMETERS.md)), its progress and Stop in the window. Call `(tight-cocone-step JOB RESULT)` from `on_tick`: it seeds the parameters, and once a run is done puts its surface in the dataset RESULT (arg `result`, default the source) as the output `surface` (`data-put`, §5.17), its counts under `<job>.info.*`; a node with `source: { data: <result>, item: surface }` draws it. `examples/ariadne/documents/tight_cocone_lab.ari` is the demo |
 | `scene_view` | a window holding a view of the scene (the `viewport` widget, §5.18), from a camera of its own or a named one (args `view`, `scene`, `show`, `hide`, `mode`, `camera`, `chrome`, `shadows`, `caption`, `width`, `height`, `title`, `id`) |
 | `card` | a card in a list: avatar / title / subtitle / timestamp header, body, `media` and `actions` slots; its args are state keys, so a `repeat:` includes one per item (not a window: embed it) |
 | `transfer_function`, `transfer_function_editor` | any node's `transfer_function` model (args `node`, `id`): the ColorTable2 editor with histogram / contour spectrum / contour tree layers — see [`TRANSFER_FUNCTIONS.md`](TRANSFER_FUNCTIONS.md) |

@@ -498,6 +498,18 @@ cvc::volume sdf_volume_of_mesh(cvc::app &app, const cvc::geometry &mesh, int dim
 // CVC_ENABLE_SDF build (the load fails saying so without one). register_cvcgl_extensions calls it.
 void register_sdf_data_generator(cvc::app &app);
 
+// The data generator `mesh` on `app`: a mesh made as a dataset, so a document has a mesh (or its
+// points) on the state tree without a file of its own, for the components that view one
+// (cvc://components/mesh/tight_cocone.ari):
+//   data:
+//     bunny:
+//       generate: mesh
+//       params: { mesh: stanford.bunny, triangles: 4000, fit: { height: 100, up: y } }
+// mesh (a mesh URI such as the embedded stanford.bunny, or a file relative to the document),
+// triangles (decimated to about this many with cvc::simplify; 0 or absent: as read) and fit (as
+// sdf's). The mesh is the dataset's `geometry`. register_cvcgl_extensions calls it.
+void register_mesh_data_generator(cvc::app &app);
+
 // The volume a node's `source:` declares: `{ file }`, or `{ sdf: { mesh, dim, algorithm } }`
 // (algorithm v1 | v2 | igl; igl falls back to v2 with a warning when cvc::mesh_ops_available() is
 // false). Throws on failure.
