@@ -1,0 +1,195 @@
+# molecule_view.ari — a REUSABLE Ariadne component: the window for a `type: molecule` node
+# (cvc/gl/ariadne/molecule_nodes.h; TexMol's M0 part 2). The node draws a molecule the app put on the
+# state tree (a data: entry, decoded `as: molecule`); this window picks how: the style
+# (ball-and-stick, space-filling spheres, sticks or a secondary-structure cartoon), the colouring
+# (element, chain, residue, B-factor or secondary structure), which atoms (all, the polymer's, or
+# the hetero groups: ligands, ions, water; hydrogens and water each on or off), the sizes the style
+# uses, and which chains are drawn. It never loads a file: opening one is the app's job.
+#
+# A change rebuilds the node's view as a sliced task (the progress bar), and the node keeps drawing
+# what it drew until the new view is ready. The spheres are impostors where the GL can build their
+# shader, else tessellated (Spheres: Automatic), or either on purpose.
+#
+# Binds the keys the cvcGL molecule realizer owns, at "<scene>.graphics.root.children.<node>.*":
+# the view's parameters (cvc::mol::view_params' table), `spheres`, `chains.<i>.visible`, and the
+# read-only `info.*`, `chains.<i>.id` / `.atoms`, `status`, `progress` and `phase`.
+#
+# Args (every one has a default, so a bare include works):
+#   node    the molecule node's id (default molecule)
+#   title   the window's title (default Molecule)
+#   id      the instance id: the window's geometry persists under tree.<id> (default
+#           molecule_view); give each include its own when a document drives several nodes
+#   pick    the `pick:` key of an `input: pick` viewport of the scene (default molecule_pick): the
+#           Picked section shows the atom that view's last pick landed on, while it landed on
+#           this node
+#
+# Use it:
+#     import: cvc://components/mol/molecule_view.ari
+#     data:
+#       grl: 1grl.pdb
+#     windows:
+#       - include: molecule_view
+#         args: { node: protein }
+#     scene:
+#       nodes:
+#         - { node: protein, type: molecule, source: { data: grl }, style: cartoon }
+
+units:
+  molecule_view:
+    args: { node: molecule, title: Molecule, id: molecule_view, pick: molecule_pick }
+    window: "{title}"
+    id: "{id}"
+    children:
+      - text: "entry"
+        bind: graphics.root.children.{node}.info.id
+      - text: "title"
+        bind: graphics.root.children.{node}.info.title
+        visible_when: (!= (state-get "graphics.root.children.{node}.info.title") "")
+      - text: "source"
+        bind: graphics.root.children.{node}.source.status
+        visible_when: (!= (state-get "graphics.root.children.{node}.source.status") "")
+        tooltip: "what the node waits for, or why it shows nothing"
+      - type: group
+        layout: { kind: grid, col_widths: [130, 130] }
+        children:
+          - text: "atoms"
+            bind: graphics.root.children.{node}.info.atoms
+          - text: "drawn"
+            bind: graphics.root.children.{node}.info.drawn
+          - text: "bonds"
+            bind: graphics.root.children.{node}.info.bonds
+          - text: "residues"
+            bind: graphics.root.children.{node}.info.residues
+          - text: "helices"
+            bind: graphics.root.children.{node}.info.helices
+          - text: "sheets"
+            bind: graphics.root.children.{node}.info.sheets
+      # The view's build: its phase, and what it drew or why it failed.
+      - progress: progress
+        bind: graphics.root.children.{node}.progress
+        hi: 100
+        overlay: graphics.root.children.{node}.phase
+      - text: "status"
+        bind: graphics.root.children.{node}.status
+      - separator
+      - text: "Style"
+      - combo: Style
+        bind: graphics.root.children.{node}.style
+        options: [Ball and stick, Space filling, Sticks, Cartoon]
+        values: [ball_and_stick, spacefill, sticks, cartoon]
+        tooltip: "ball and stick: atoms and bonds; space filling: each atom its radius; sticks: the bonds; cartoon: the chains' traces, helices and strands from the file's HELIX and SHEET records"
+      - combo: Colour by
+        bind: graphics.root.children.{node}.color_by
+        options: [Element, Chain, Residue, B-factor, Secondary structure]
+        values: [element, chain, residue, b_factor, structure]
+      - input_text: B-factor range
+        bind: graphics.root.children.{node}.b_range
+        visible_when: (= (state-get "graphics.root.children.{node}.color_by") "b_factor")
+        tooltip: "[blue, red] in Å²; [] for the drawn atoms' range"
+      - combo: Atoms
+        bind: graphics.root.children.{node}.atoms
+        options: [All, Polymer (ATOM), Hetero groups (HETATM)]
+        values: [all, polymer, hetero]
+        tooltip: "which atoms: all, the polymer's, or the ligands, ions and water"
+      - checkbox: Hydrogens
+        bind: graphics.root.children.{node}.hydrogens
+      - checkbox: Water
+        bind: graphics.root.children.{node}.water
+      - combo: Spheres
+        bind: graphics.root.children.{node}.spheres
+        options: [Automatic, Impostors, Tessellated]
+        values: [auto, impostor, mesh]
+        visible_when: (!= (state-get "graphics.root.children.{node}.style") "cartoon")
+        tooltip: "impostors: one point an atom, shaded as a sphere; tessellated: triangles; automatic: impostors where the GL can build their shader"
+      - text: "spheres drawn as"
+        bind: graphics.root.children.{node}.info.spheres
+        visible_when: (!= (state-get "graphics.root.children.{node}.style") "cartoon")
+      - separator
+      - text: "Sizes"
+      - slider_float: Atom scale
+        bind: graphics.root.children.{node}.atom_scale
+        lo: 0.05
+        hi: 1.0
+        fmt: "%.2f"
+        visible_when: (= (state-get "graphics.root.children.{node}.style") "ball_and_stick")
+        tooltip: "a sphere's radius as a fraction of the atom's"
+      - slider_float: Bond radius
+        bind: graphics.root.children.{node}.bond_radius
+        lo: 0.02
+        hi: 0.6
+        fmt: "%.2f Å"
+        visible_when: (or (= (state-get "graphics.root.children.{node}.style") "ball_and_stick") (= (state-get "graphics.root.children.{node}.style") "sticks"))
+      - slider_float: Helix width
+        bind: graphics.root.children.{node}.helix_width
+        lo: 0.5
+        hi: 5.0
+        fmt: "%.1f Å"
+        visible_when: (= (state-get "graphics.root.children.{node}.style") "cartoon")
+      - slider_float: Strand width
+        bind: graphics.root.children.{node}.sheet_width
+        lo: 0.5
+        hi: 5.0
+        fmt: "%.1f Å"
+        visible_when: (= (state-get "graphics.root.children.{node}.style") "cartoon")
+        tooltip: "a strand's width; its arrow is 1.6 times it"
+      - slider_float: Ribbon thickness
+        bind: graphics.root.children.{node}.ribbon_thickness
+        lo: 0.1
+        hi: 2.0
+        fmt: "%.2f Å"
+        visible_when: (= (state-get "graphics.root.children.{node}.style") "cartoon")
+      - slider_float: Coil radius
+        bind: graphics.root.children.{node}.coil_radius
+        lo: 0.05
+        hi: 1.5
+        fmt: "%.2f Å"
+        visible_when: (= (state-get "graphics.root.children.{node}.style") "cartoon")
+      - slider_int: Smoothness
+        bind: graphics.root.children.{node}.subdivisions
+        lo: 1
+        hi: 16
+        visible_when: (= (state-get "graphics.root.children.{node}.style") "cartoon")
+        tooltip: "samples between two residues"
+      - separator
+      - text: "Chains"
+      - type: group
+        layout: { kind: grid, col_widths: [44, 60, 80] }
+        children:
+          - text: "show"
+          - text: "chain"
+          - text: "atoms"
+      # One row per chain (chains.<i>), in the order the file gives them.
+      - type: group
+        repeat: (state-get "graphics.root.children.{node}.chains")
+        layout: { kind: grid, col_widths: [44, 60, 80] }
+        children:
+          - type: checkbox
+            label: "##show"
+            bind: graphics.root.children.{node}.chains.{i}.visible
+            tooltip: "draw this chain"
+          - text: ""
+            bind: graphics.root.children.{node}.chains.{i}.label
+          - text: ""
+            bind: graphics.root.children.{node}.chains.{i}.atoms
+      # The atom a view's last pick landed on, when it landed on this node (args: pick).
+      - type: group
+        visible_when: (= (state-get "{pick}.node") "{node}")
+        children:
+          - separator
+          - text: "Picked"
+          - text: "atom"
+            bind: "{pick}.serial"
+          - text: "name"
+            bind: "{pick}.name"
+          - text: "element"
+            bind: "{pick}.element"
+          - text: "residue"
+            bind: "{pick}.residue"
+          - text: "number"
+            bind: "{pick}.residue_seq"
+          - text: "chain"
+            bind: "{pick}.chain"
+          - text: "B-factor"
+            bind: "{pick}.b_factor"
+          - text: "structure"
+            bind: "{pick}.structure"

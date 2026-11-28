@@ -56,7 +56,7 @@ the fonts the ImGui overlay falls back on, [DejaVu Sans Mono](#dejavu-sans-mono-
 
 Example data, in `examples/data` and preloaded into the browser gallery:
 [the Kuwajima 2019 Reconstruct series](#kuwajima-2019-reconstruct-series) (CC0) and
-[PDB entry 1GRL](#pdb-entry-1grl) (CC0).
+[PDB entries 1GRL](#pdb-entry-1grl) and [4HVP](#pdb-entry-4hvp) (CC0).
 
 In the build scripts only: [CMake modules](#cmake-modules-build-scripts-only).
 
@@ -1350,6 +1350,21 @@ https://creativecommons.org/publicdomain/zero/1.0/. The repository asks that the
 Source: the Protein Data Bank, https://www.rcsb.org/structure/1GRL. Described in Braig K,
 Otwinowski Z, Hegde R, Boisvert DC, Joachimiak A, Horwich AL, Sigler PB (1994), "The crystal
 structure of the bacterial chaperonin GroEL at 2.8 Å", Nature 371: 578-586.
+
+License: the PDB archive's files are free of copyright restrictions, under CC0 1.0 Universal
+(public domain dedication), https://creativecommons.org/publicdomain/zero/1.0/. The wwPDB asks
+that users cite the structure's authors.
+
+## PDB entry 4HVP
+
+- `examples/data/molecules/4hvp.pdb` -- the Protein Data Bank entry 4HVP, the HIV-1 protease (two
+  chains) with the peptide inhibitor MVT-101 (a third), 1,640 atoms, as distributed in 1992. The
+  molecule_view demo and golden draw it.
+
+Source: the Protein Data Bank, https://www.rcsb.org/structure/4HVP. Described in Miller M,
+Schneider J, Sathyanarayana BK, Toth MV, Marshall GR, Clawson L, Selk L, Kent SBH, Wlodawer A
+(1989), "Structure of complex of synthetic HIV-1 protease with a substrate-based inhibitor at 2.3 Å
+resolution", Science 246: 1149-1152.
 
 License: the PDB archive's files are free of copyright restrictions, under CC0 1.0 Universal
 (public domain dedication), https://creativecommons.org/publicdomain/zero/1.0/. The wwPDB asks

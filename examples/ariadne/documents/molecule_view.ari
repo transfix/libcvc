@@ -1,0 +1,108 @@
+# molecule_view.ari — a molecule the app holds, drawn by the `molecule` node type and set up in the
+# molecule_view component's window (TexMol's M0 part 2; docs/ARIADNE.md §5.4).
+#
+# The document loads two PDB entries as app data (data:, decoded as molecules): 1GRL, a subunit of
+# the chaperonin GroEL (one chain, 19 helices, 11 sheet strands), and 4HVP, the HIV-1 protease, a
+# dimer of two chains, holding a peptide inhibitor in a third. Two nodes draw the same molecule, one
+# copy of it: `protein` as a cartoon coloured by secondary structure, and `hetero` the hetero groups
+# (ligands and modified residues) as ball-and-stick. The Molecule menu points both at the other
+# entry, and the main view frames it once drawn.
+#
+# Each node has its window (the molecule_view component): style, colouring, atoms, sizes, and a
+# row per chain to show or hide it. The Pick window looks through the main camera; click an atom
+# there and both windows' Picked sections name it.
+#
+#   arigl run --component-path src/cvc/ariadne examples/ariadne/documents/molecule_view.ari
+
+meta:
+  name: Molecule view (Ariadne)
+  author: cvc
+  min_libcvc: 4.0.11
+
+requires:
+  - gl.scene                       # a scene renderer realizes the scene: block (arigl; not ari)
+
+customs:
+  - node: molecule
+    required: true
+
+import:
+  - cvc://components/mol/molecule_view.ari
+
+# The molecules, held by the app; the nodes name them, and read no file themselves.
+data:
+  grl: ../../data/molecules/1grl.pdb
+  hvp: ../../data/molecules/4hvp.pdb
+
+# Once the protein's new view is drawn after a switch, frame the main view on it.
+on_tick: |
+  (if (and (= (state-get "mol.reframe") "1")
+           (= (state-get "graphics.root.children.protein.busy") "0")
+           (!= (state-get "graphics.root.children.protein.info.bounds") "")
+           (= (state-get "graphics.root.children.protein.info.id") (state-get "mol.entry")))
+      (begin (state-set "viewers.main.camera.frame"
+                        (state-get "graphics.root.children.protein.info.bounds"))
+             (state-set "mol.reframe" "0")))
+
+functions: |
+  (defun show-entry (name entry)
+    (begin
+      (state-set "graphics.root.children.protein.source.molecule" (str-concat "data." name ".molecule"))
+      (state-set "graphics.root.children.hetero.source.molecule" (str-concat "data." name ".molecule"))
+      (state-set "mol.entry" entry)
+      (state-set "mol.reframe" "1")))
+
+menubar:
+  - menu: File
+    items:
+      - menu_item: Quit
+        on: quit
+  - menu: Molecule
+    items:
+      - menu_item: 1GRL, a GroEL subunit
+        on: (show-entry "grl" "1GRL")
+      - menu_item: 4HVP, HIV-1 protease and an inhibitor
+        on: (show-entry "hvp" "4HVP")
+
+# The entry shown, and whether the main view still has to be framed on it.
+state:
+  mol:
+    entry: 1GRL
+    reframe: 1
+
+windows:
+  - include: molecule_view
+    args: { node: protein, title: Protein, id: protein_view, pick: mol.pick }
+  - include: molecule_view
+    args: { node: hetero, title: Hetero groups, id: hetero_view, pick: mol.pick }
+  - window: Pick
+    id: pick
+    size: [380, 330]
+    children:
+      - text: "click an atom"
+      - type: viewport
+        view: picker
+        input: pick
+        pick: mol.pick
+        camera: main
+        width: 360
+        height: 280
+
+scene:
+  background: { top: [0.10, 0.12, 0.16], bottom: [0.02, 0.02, 0.03] }
+  nodes:
+    - node: protein
+      type: molecule
+      source: { data: grl }
+      style: cartoon
+      color_by: structure
+    - node: hetero
+      type: molecule
+      source: { data: grl }
+      style: ball_and_stick
+      atoms: hetero
+      water: false
+      color_by: element
+  lights:
+    - rig: three_point
+      key: { intensity: 1.4, azimuth: -38, elevation: 52 }

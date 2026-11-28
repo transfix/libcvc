@@ -15,6 +15,7 @@
     "volume_grid_segment_ari",
     "volume_grid_contours_ari",
     "skeleton_lab_ari",
+    "molecule_view_ari",
     "contour_tiler_ari",
     "fem_gallery_ari",
     "viewer_grid_ari",
@@ -239,6 +240,15 @@
       "blurb":
           "The VolumeRover skeletonization, ported to libcvc, on a mesh_lab node and a real protein: PDB entry 1GRL, a subunit of the chaperonin GroEL. Its heavy atoms are blurred into a density (TexMol's blur maps, ported too) like a low-resolution map, where a helix reads as a rod, and the density's isosurface is decimated to 4,000 triangles and skeletonized a slice at a time on the page's scheduler, so the page keeps drawing while it runs. The strands (green, with blue stars) run along the helices, and the sheets are drawn inside the see-through surface; a second view shows the skeleton alone. The Molecule window changes the blur and makes the surface again; the Mesh tools panel's Skeleton section sets the parameters, runs it again with a progress bar and a Stop button, and shows or hides each part.",
       "thumb": "img/skeleton_lab_ari.jpg"
+    },
+    "molecule_view_ari": {
+      "app": "arigl",
+      "doc": "molecule_view",
+      "title": "molecule view",
+      "desc": "proteins from PDB files as cartoons, ball-and-stick and spheres, with a window for each",
+      "blurb":
+          "TexMol's molecule rendering, rebuilt for libcvc: the document loads two PDB entries as app data, 1GRL (a subunit of the chaperonin GroEL) and 4HVP (the HIV-1 protease, two chains holding a peptide inhibitor in a third), and two molecule nodes draw the same molecule, one as a cartoon of its helices and strands, the other its hetero groups as ball-and-stick. Each has its window: switch the style (ball-and-stick, space filling, sticks, cartoon), colour by element, chain, residue, B-factor or secondary structure, show or hide each chain, and change the sizes; the view is rebuilt a slice at a time while the page keeps drawing. The spheres are impostors, one point an atom shaded as a sphere, so a whole protein stays fast. Click an atom in the Pick window to name it; the Molecule menu switches entry.",
+      "thumb": "img/molecule_view_ari.jpg"
     },
     "contour_tiler_ari": {
       "app": "arigl",

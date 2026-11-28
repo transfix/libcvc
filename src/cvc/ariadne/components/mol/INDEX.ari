@@ -1,0 +1,29 @@
+# mol/INDEX.ari — the molecule collection of the Ariadne component library (docs/ARIADNE.md §6.5):
+# arimol's windows (docs/roadmap/VOLROVER-TEXMOL-APPS-ROADMAP.md §6), starting with the molecule
+# view. TexMol's later phases add their windows here (surfaces, pockets, characteristics, docking).
+#
+# Import a component by its path in the collection and include its unit:
+#
+#     import: cvc://components/mol/<file>.ari
+#     windows:
+#       - include: <unit>            # or, parametrized:  { include: <unit>, args: { node: myNode } }
+#
+# This file is in the top INDEX.ari's shape, and data-only like it: each catalog: entry's file: is
+# relative to this directory, and `nodes:` lists the scene node types the component can drive (any
+# one of them; [] for none). The top INDEX.ari's collections: lists this collection.
+
+meta:
+  name: "Ariadne components: mol"
+  description: Molecule components shipped with libcvc (import via cvc://components/mol/…).
+  min_libcvc: 4.0.11
+
+catalog:
+  - component: molecule_view
+    file: molecule_view.ari
+    unit: molecule_view
+    nodes: [molecule]
+    binds: "<prefix>.graphics.root.children.{node}.{style,color_by,atoms,hydrogens,water,spheres,atom_scale,bond_radius,helix_width,sheet_width,ribbon_thickness,coil_radius,subdivisions,b_range,chains.<i>.visible} and the read-only info.*, chains.<i>.{id,atoms}, status, progress, phase; {pick}.* (a viewport's pick: key)"
+    for: "a `type: molecule` node: its style (ball-and-stick, space filling, sticks, cartoon), colouring (element, chain, residue, B-factor, structure), atoms, sizes, chains, and the atom a pick landed on"
+    args: { node: molecule, title: Molecule, id: molecule_view, pick: molecule_pick }   # defaults
+    note: "never loads a file: the document loads the molecule as app data (data: entries decode .pdb, .ent, .pqr and .xyzr as: molecule)"
+    demos: [molecule_view.ari]

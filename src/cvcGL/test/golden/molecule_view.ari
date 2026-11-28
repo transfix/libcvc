@@ -1,0 +1,54 @@
+# molecule_view.ari — golden: the molecule_view component (components/mol) on PDB entry 4HVP, the
+# HIV-1 protease (chains A and B) with a peptide inhibitor (chain I), loaded as app data. The main
+# view draws its cartoon coloured by chain and its hetero groups as ball-and-stick; the component's
+# window shows the protein node's style, colouring, counts and a row per chain, the inhibitor's
+# chain hidden. The harness waits for both builds (RealizedScene::pending_work) before the capture.
+
+meta:
+  name: golden molecule view
+  min_libcvc: 4.0.11
+
+customs:
+  - node: molecule
+    required: true
+
+import:
+  - cvc://components/mol/molecule_view.ari
+
+data:
+  hvp: ../../../../examples/data/molecules/4hvp.pdb
+
+# The main view on 4HVP with a margin (its atoms span -22..35, -17..19, -2..38 Å), on the first
+# tick; the inhibitor's chain (I, the third: A, B, I, then the waters with none) hidden once the
+# chains are listed.
+on_tick: |
+  (if (!= (state-get "mv.opened") "1")
+      (begin (state-set "viewers.main.camera.frame" "-36 -30 -16 49 32 52")
+             (state-set "mv.opened" "1")))
+  (if (and (!= (state-get "mv.hidden") "1")
+           (= (state-get "graphics.root.children.protein.chains.2.id") "I"))
+      (begin (state-set "graphics.root.children.protein.chains.2.visible" "0")
+             (state-set "mv.hidden" "1")))
+
+windows:
+  - include: molecule_view
+    args: { node: protein, title: Protein, id: protein_view }
+
+scene:
+  chrome: false
+  background: { top: [0.10, 0.12, 0.16], bottom: [0.02, 0.02, 0.03] }
+  nodes:
+    - node: protein
+      type: molecule
+      source: { data: hvp }
+      style: cartoon
+      color_by: chain
+    - node: hetero
+      type: molecule
+      source: { data: hvp }
+      style: ball_and_stick
+      atoms: hetero
+      water: false
+  lights:
+    - rig: three_point
+      key: { intensity: 1.4, azimuth: -38, elevation: 52 }

@@ -5315,6 +5315,53 @@ TEST(AriadneComponents, ShippedComponentsLoadClean) {
   fs::remove_all(decoy, ec);
 }
 
+// The molecule collection (components/mol, arimol's windows): every component it ships resolves at
+// cvc://components/mol/<file> to the source file, its unit loads clean as a window (bare, and with
+// args), and mol/INDEX.ari lists it with the node types it drives.
+TEST(AriadneComponents, TheMoleculeCollectionLoadsClean) {
+  SKIP_WITHOUT_YAML();
+  cvc::app app;
+  namespace fs = std::filesystem;
+  const fs::path ariadne_dir = fs::path(__FILE__).parent_path().parent_path() / "ariadne";
+  const fs::path mol = ariadne_dir / "components" / "mol";
+  if (!fs::is_directory(mol))
+    GTEST_SKIP() << "component sources not found at " << mol.string();
+  {
+    ScopedEnv hermetic("CVC_ARIADNE_PATH", nullptr); // the source tree only
+    register_cvc_uri_handler(app, {ariadne_dir.string()});
+  }
+  std::ifstream idx(mol / "INDEX.ari", std::ios::binary);
+  ASSERT_TRUE(idx.good()) << "mol/INDEX.ari is missing";
+  const std::string index((std::istreambuf_iterator<char>(idx)), std::istreambuf_iterator<char>());
+  int checked = 0;
+  for (const fs::directory_entry &e : fs::directory_iterator(mol)) {
+    const std::string file = e.path().filename().string();
+    if (!e.is_regular_file() || e.path().extension() != ".ari" || file == "INDEX.ari")
+      continue;
+    const std::string unit = e.path().stem().string();
+    SCOPED_TRACE(file);
+    const UriResult src = resolve(app, "cvc://components/mol/" + file);
+    std::error_code eq_ec;
+    EXPECT_TRUE(src.ok && fs::equivalent(fs::path(src.canonical), e.path(), eq_ec))
+        << "cvc://components/mol/" << file << " resolved to '" << src.canonical << "'";
+    for (const std::string args : {std::string(), std::string("\n    args: { node: protein }")}) {
+      LoadResult r =
+          load_string(app, "meta: { min_libcvc: \"0.0.0\" }\nimport: cvc://components/mol/" + file +
+                               "\nwindows:\n  - include: " + unit + args + "\n");
+      ASSERT_TRUE(r.ok) << r.error;
+      EXPECT_NE(find(r.root, Kind::Window), nullptr) << "unit '" << unit << "' is not a window";
+      for (const std::string &w : r.warnings)
+        ADD_FAILURE() << file << ": " << w;
+    }
+    const std::size_t entry = index.find("file: " + file);
+    ASSERT_NE(entry, std::string::npos) << "mol/INDEX.ari does not list " << file;
+    EXPECT_NE(index.find("nodes: [molecule]", entry), std::string::npos)
+        << file << "'s entry names no node types";
+    ++checked;
+  }
+  EXPECT_GE(checked, 1); // molecule_view
+}
+
 // The baseline conference app (examples/ariadne/documents/conference_roster.ari) is the shipped
 // conference library's windows (components/conference.ari, with room_users.ari, chat.ari and
 // audio_buffers.ari) placed in a document, and its tick is the library's conference-step: an app
@@ -7897,6 +7944,32 @@ TEST(AriadneComponents, VolumeSharedDemoLoadsClean) {
   EXPECT_EQ(r.scene.nodes[1].source_data, "bunny");
   EXPECT_NE(find(r.root, Kind::Window, "Filter"), nullptr);
   EXPECT_NE(find(r.root, Kind::Window, "Volume grid"), nullptr);
+}
+
+// The molecule_view demo: two molecule nodes on one data: entry (a PDB file, decoded as a
+// molecule), a molecule_view window for each, and the Pick window's viewport.
+TEST(AriadneComponents, MoleculeViewDemoLoadsClean) {
+  SKIP_WITHOUT_YAML();
+  namespace fs = std::filesystem;
+  const fs::path doc = fs::path(__FILE__).parent_path().parent_path().parent_path().parent_path() /
+                       "examples" / "ariadne" / "documents" / "molecule_view.ari";
+  if (!fs::exists(doc))
+    GTEST_SKIP() << "demo not found at " << doc.string();
+  cvc::app app;
+  if (!register_source_components(app))
+    GTEST_SKIP() << "component sources not found";
+  LoadResult r = load_file(app, doc.string());
+  ASSERT_TRUE(r.ok) << r.error;
+  for (const std::string &w : r.warnings)
+    EXPECT_NE(w.find("'viewport' has no registered handler"), std::string::npos) << w;
+  ASSERT_EQ(r.scene.nodes.size(), 2u);
+  for (const auto &n : r.scene.nodes) {
+    EXPECT_EQ(n.type, "molecule");
+    EXPECT_EQ(n.source_data, "grl");
+  }
+  EXPECT_NE(find(r.root, Kind::Window, "Protein"), nullptr);
+  EXPECT_NE(find(r.root, Kind::Window, "Hetero groups"), nullptr);
+  EXPECT_NE(find(r.root, Kind::Window, "Pick"), nullptr);
 }
 
 // The volume_render demo: one volume_render node on a data: entry, a Renderer combo bound to its

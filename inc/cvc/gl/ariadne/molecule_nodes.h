@@ -45,9 +45,11 @@
 //                     those names; a change rebuilds the view
 //   spheres           auto (impostors, tessellated spheres where impostors can't run), impostor
 //                     or mesh
-//   chains            how many chains; chains.<i>.id, .visible (1 drawn, 0 hidden), .atoms and
-//                     .color (its chain colour, "r,g,b" in 0..1), as a list: or repeat: binds them
+//   chains            how many chains; chains.<i>.id ("" for atoms with none), .label (the id, or
+//                     "(none)"), .visible (1 drawn, 0 hidden), .atoms and .color (its chain
+//                     colour, "r,g,b" in 0..1), as a list: or repeat: binds them
 //   info.atoms info.drawn info.bonds info.residues info.helices info.sheets info.id info.title
+//                     (info.bonds is "-" for a style that finds no bonds: spacefill, cartoon)
 //   info.spheres      what draws the spheres now: impostor, mesh, or "" for none
 //   info.bounds       what it draws, "min_x min_y min_z max_x max_y max_z" (a camera's frame
 //                     request, so a program can frame any view on it), "" for nothing
