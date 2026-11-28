@@ -275,6 +275,16 @@
           "items": {"type": "object"},
           "description": "Tooling data (the component library's INDEX.ari); not a widget tree."
         },
+        "collections": {
+          "type": "array",
+          "items": {"type": "object"},
+          "description": "Tooling data (the component library's top INDEX.ari): its collections, each a subdirectory with an INDEX.ari of its own."
+        },
+        "moved": {
+          "type": "array",
+          "items": {"type": "object"},
+          "description": "Tooling data (the component library's top INDEX.ari): the forwarders left at the old paths of components that moved into a collection."
+        },
         "python": {"type": ["object", "string"], "description": "Python for a scripting host (arix, ariglx)."},
         "wasm": {
           "type": ["object", "string"],

@@ -7,37 +7,37 @@
 
 @@@ script bindings/pycvc/demo.ari:windows[0].children[5].bind
 (if (> (int (state-get "demo.agents")) 256) "many" "few")
-@@@ script src/cvc/ariadne/components/fe_controls.ari:units.fe_controls.children[9].on
+@@@ script src/cvc/ariadne/components/mesh/fe_controls.ari:units.fe_controls.children[9].on
 (state-set "graphics.root.children.domain.fe.request" "mesh")
-@@@ script src/cvc/ariadne/components/fe_controls.ari:units.fe_controls.children[9].disabled_when
+@@@ script src/cvc/ariadne/components/mesh/fe_controls.ari:units.fe_controls.children[9].disabled_when
 (= (state-get "graphics.root.children.domain.fe.busy") "1")
-@@@ script src/cvc/ariadne/components/fe_controls.ari:units.fe_controls.children[13].visible_when
+@@@ script src/cvc/ariadne/components/mesh/fe_controls.ari:units.fe_controls.children[13].visible_when
 (= (state-get "graphics.root.children.domain.fe.problem") "poisson")
-@@@ script src/cvc/ariadne/components/fe_controls.ari:units.fe_controls.children[14].visible_when
+@@@ script src/cvc/ariadne/components/mesh/fe_controls.ari:units.fe_controls.children[14].visible_when
 (= (state-get "graphics.root.children.domain.fe.problem") "heat")
-@@@ script src/cvc/ariadne/components/fe_controls.ari:units.fe_controls.children[17].on
+@@@ script src/cvc/ariadne/components/mesh/fe_controls.ari:units.fe_controls.children[17].on
 (state-set "graphics.root.children.domain.fe.request" "solve")
-@@@ script src/cvc/ariadne/components/fe_controls.ari:units.fe_controls.children[17].disabled_when
+@@@ script src/cvc/ariadne/components/mesh/fe_controls.ari:units.fe_controls.children[17].disabled_when
 (or (= (state-get "graphics.root.children.domain.fe.busy") "1") (= (state-get "graphics.root.children.domain.fe.stats.tets") "0"))
-@@@ script src/cvc/ariadne/components/fe_controls.ari:units.fe_controls.children[18].on
+@@@ script src/cvc/ariadne/components/mesh/fe_controls.ari:units.fe_controls.children[18].on
 (state-set "graphics.root.children.domain.fe.request" "stop")
-@@@ script src/cvc/ariadne/components/fe_controls.ari:units.fe_controls.children[18].enabled_when
+@@@ script src/cvc/ariadne/components/mesh/fe_controls.ari:units.fe_controls.children[18].enabled_when
 (= (state-get "graphics.root.children.domain.fe.stoppable") "1")
-@@@ script src/cvc/ariadne/components/mesh_tools.ari:units.mesh_tools.children[10].on
+@@@ script src/cvc/ariadne/components/mesh/mesh_tools.ari:units.mesh_tools.children[10].on
 (state-set "graphics.root.children.mesh.mesh_ops.request" "smooth")
-@@@ script src/cvc/ariadne/components/mesh_tools.ari:units.mesh_tools.children[10].disabled_when
+@@@ script src/cvc/ariadne/components/mesh/mesh_tools.ari:units.mesh_tools.children[10].disabled_when
 (= (state-get "graphics.root.children.mesh.mesh_ops.busy") "1")
-@@@ script src/cvc/ariadne/components/mesh_tools.ari:units.mesh_tools.children[14].on
+@@@ script src/cvc/ariadne/components/mesh/mesh_tools.ari:units.mesh_tools.children[14].on
 (state-set "graphics.root.children.mesh.mesh_ops.request" "decimate")
-@@@ script src/cvc/ariadne/components/mesh_tools.ari:units.mesh_tools.children[21].on
+@@@ script src/cvc/ariadne/components/mesh/mesh_tools.ari:units.mesh_tools.children[21].on
 (state-set "graphics.root.children.mesh.mesh_ops.request" "repair")
-@@@ script src/cvc/ariadne/components/mesh_tools.ari:units.mesh_tools.children[22].on
+@@@ script src/cvc/ariadne/components/mesh/mesh_tools.ari:units.mesh_tools.children[22].on
 (state-set "graphics.root.children.mesh.mesh_ops.request" "orient")
-@@@ script src/cvc/ariadne/components/mesh_tools.ari:units.mesh_tools.children[23].on
+@@@ script src/cvc/ariadne/components/mesh/mesh_tools.ari:units.mesh_tools.children[23].on
 (state-set "graphics.root.children.mesh.mesh_ops.request" "reset")
-@@@ script src/cvc/ariadne/components/mesh_tools.ari:units.mesh_tools.children[28].visible_when
+@@@ script src/cvc/ariadne/components/mesh/mesh_tools.ari:units.mesh_tools.children[28].visible_when
 (= (state-get "graphics.root.children.mesh.mesh_ops.color.mode") "geodesic")
-@@@ script src/cvc/ariadne/components/mesh_tools.ari:units.mesh_tools.children[29].on
+@@@ script src/cvc/ariadne/components/mesh/mesh_tools.ari:units.mesh_tools.children[29].on
 (state-set "graphics.root.children.mesh.mesh_ops.request" "curvature")
 @@@ script src/cvc/ariadne/components/sim_transport.ari:units.sim_transport.children[3].enabled_when
 (= (state-get "sim.paused") "1")

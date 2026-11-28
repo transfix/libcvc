@@ -42,7 +42,7 @@ args:
 data:
   catalog: { uri: { arg: catalog }, as: json }
 
-import: cvc://components/processes.ari
+import: cvc://components/dev/processes.ari
 
 functions: |
   ; V as text: "" for nothing, a string as it is, anything else printed ((str) quotes a string).

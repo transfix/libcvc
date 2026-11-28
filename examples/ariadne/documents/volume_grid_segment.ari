@@ -25,7 +25,7 @@ requires:
   - gl.scene                       # a scene renderer realizes the scene: block (arigl; not ari)
 
 import:
-  - cvc://components/volume_grid.ari
+  - cvc://components/volume/volume_grid.ari
 
 # The app holds the data: the CT and the seeds. The grid reads no file; it shows those.
 data:

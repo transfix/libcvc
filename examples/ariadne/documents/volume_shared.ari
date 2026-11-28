@@ -24,7 +24,7 @@ requires:
   - gl.scene                       # a scene renderer realizes the scene: block (arigl; not ari)
 
 import:
-  - cvc://components/volume_grid.ari
+  - cvc://components/volume/volume_grid.ari
 
 # A filter job's result goes back where both views look, once the job is done: the dataset's
 # volume. filtering.pid names the last job started; filtering.stored the last one taken in.

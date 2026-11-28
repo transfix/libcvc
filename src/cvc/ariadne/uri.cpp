@@ -370,6 +370,27 @@ std::string installed_data_dir() {
       fs::weakly_canonical(module.parent_path() / ".." / "share" / "libcvc" / "ariadne", ec);
   return !ec && fs::is_directory(dir, ec) ? dir.string() : std::string();
 }
+
+// Why `rel`, the path after cvc://, could name a file outside the search directory it is joined
+// to, or "" when it can't. A cvc:// path is relative and stays below the directory: no leading
+// separator, no drive or stream (':'), and no `..` segment, with '/' or '\' as the separator on
+// every platform so a document is refused the same way everywhere. Collections make documents
+// that import across directories common (docs/ARIADNE.md §6.5); this keeps
+// cvc://components/../../x from reaching past the component library.
+std::string cvc_path_escapes(const std::string &rel) {
+  if (rel.front() == '/' || rel.front() == '\\')
+    return "it is absolute";
+  if (rel.find(':') != std::string::npos)
+    return "it names a drive or a stream (':')";
+  for (std::size_t at = 0; at <= rel.size();) {
+    const std::size_t end = rel.find_first_of("/\\", at);
+    const std::size_t stop = end == std::string::npos ? rel.size() : end;
+    if (rel.compare(at, stop - at, "..") == 0)
+      return "it has a '..' segment";
+    at = stop + 1;
+  }
+  return std::string();
+}
 } // namespace
 
 std::vector<std::string> cvc_uri_search_dirs(const std::vector<std::string> &extra_search_dirs) {
@@ -397,6 +418,11 @@ void register_cvc_uri_handler(cvc::app &app, const std::vector<std::string> &ext
         if (rel.empty())
           return {false, std::string(), std::string(),
                   "ari: cvc:// requires a path (e.g. cvc://components/stage_lighting.ari)"};
+        if (const std::string why = cvc_path_escapes(rel); !why.empty())
+          return {false, std::string(), std::string(),
+                  "ari: cvc://" + rel + " is refused: " + why +
+                      " (a cvc:// path is relative to the component search path and stays "
+                      "inside it)"};
         std::string tried;
         for (const std::string &d : dirs) {
           std::error_code ec;

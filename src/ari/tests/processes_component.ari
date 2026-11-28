@@ -1,4 +1,4 @@
-# processes_component.ari — `ari test` for components/processes.ari: its rows name each process's
+# processes_component.ari — `ari test` for components/dev/processes.ari: its rows name each process's
 # application from its (ps) scope and the ariadne.apps mirror, the document's own by its
 # meta.name, and it keeps to its row cap. ctest: ari_processes_component. (Kill, which the Runtime
 # reports as a warning and `ari test` counts as a failure, is ariadne_runtime_test's.)
@@ -7,7 +7,7 @@
 
 meta: { name: Process monitor test, min_libcvc: 4.0.6 }
 
-import: cvc://components/processes.ari
+import: cvc://components/dev/processes.ari
 
 init: |
   (state-set "processes.every" "0")       ; a poll every tick, not twice a second

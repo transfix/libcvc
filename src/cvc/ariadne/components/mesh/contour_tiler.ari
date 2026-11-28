@@ -1,0 +1,160 @@
+# contour_tiler.ari — a REUSABLE Ariadne component: the contour tiler on a `type: contour_lab` node
+# (contour_lab_nodes.h; the VolumeRover port's ContourTiler, cvc::tile_contours). The node holds a
+# stack of planar contours (a Reconstruct series, a Tao Ju .contour file, another node's contours)
+# and draws them as polylines; Tile builds a surface through each component's contours, slice pair
+# by slice pair, as a sliced task on the app's scheduler, so the frame loop keeps drawing (on
+# single-threaded wasm too). The progress bar names the slice pair being tiled; Stop ends the
+# tile at its next step and keeps the surfaces the node had.
+#
+# The component picker lists the node's components: tick the ones to tile (the others are left out
+# of the next tile), show or hide each, and pick its colour. The slice range limits the tile
+# (-1: from the stack's first, or to its last); with "Close the ends" each component is capped
+# beyond the range. The parameters are the tiler's (tile_params): the least distance kept between
+# contours of one slice (less than the slice spacing), the removal of intersections between
+# components (needs a curation distance), the collinear area under which a vertex is dropped, and
+# the overlap two crossing contours of consecutive slices need to correspond (negative: any).
+# Binds the keys the cvcGL contour_lab realizer owns, at
+# "<scene>.graphics.root.children.<node>.tiler.*"; commands go through tiler.request.
+#
+# Args (every one has a default, so a bare include works):
+#   node    the contour_lab node's id (default contours)
+#   title   the window's title (default Contour tiler)
+#   id      the instance id: the window's geometry persists under tree.<id> (default
+#           contour_tiler); give each include its own when a document drives several nodes
+#   slices  the slice range sliders' top (default 200): the stack's last slice index or more
+#
+# Use it:
+#     import: cvc://components/mesh/contour_tiler.ari
+#     windows:
+#       - include: contour_tiler
+#         args: { node: axons, slices: 72 }
+#     scene:
+#       nodes:
+#         - node: axons
+#           type: contour_lab
+#           source: { file: series.ser }
+#           auto_tile: true
+
+units:
+  contour_tiler:
+    args: { node: contours, title: Contour tiler, id: contour_tiler, slices: 200 }
+    window: "{title}"
+    id: "{id}"
+    children:
+      - text: "status"
+        bind: graphics.root.children.{node}.tiler.status
+      # The tile's progress, labelled with its phase and the slice pair it is on.
+      - progress: progress
+        bind: graphics.root.children.{node}.tiler.progress
+        hi: 100
+        overlay: graphics.root.children.{node}.tiler.phase
+      - text: "slices"
+        bind: graphics.root.children.{node}.tiler.info.slices
+      - text: "first slice"
+        bind: graphics.root.children.{node}.tiler.info.first
+      - text: "last slice"
+        bind: graphics.root.children.{node}.tiler.info.last
+      - text: "contours"
+        bind: graphics.root.children.{node}.tiler.info.contours
+      - text: "triangles"
+        bind: graphics.root.children.{node}.tiler.info.triangles
+      - text: "warnings"
+        bind: graphics.root.children.{node}.tiler.warnings
+        tooltip: "what the last tile skipped or could not do (tiler.warnings.<i>)"
+      - separator
+      - text: "Components"
+      - type: group
+        layout: { kind: grid, col_widths: [36, 40, 150, 120, 64] }
+        children:
+          - text: "tile"
+          - text: "show"
+          - text: "colour"
+          - text: "name"
+          - text: "triangles"
+      # One row per component (tiler.components.<i>), as the node lists them.
+      - type: group
+        repeat: (state-get "graphics.root.children.{node}.tiler.components")
+        layout: { kind: grid, col_widths: [36, 40, 150, 120, 64] }
+        children:
+          - type: checkbox
+            label: "##tile"
+            bind: graphics.root.children.{node}.tiler.components.{i}.tile
+            tooltip: "tile this component (unticked: left out of the next tile)"
+          - type: checkbox
+            label: "##show"
+            bind: graphics.root.children.{node}.tiler.components.{i}.visible
+            tooltip: "show its contours and surface"
+          - color: "##colour"
+            bind: graphics.root.children.{node}.tiler.components.{i}.color
+          - text: ""
+            bind: graphics.root.children.{node}.tiler.components.{i}.name
+          - text: ""
+            bind: graphics.root.children.{node}.tiler.components.{i}.triangles
+      - separator
+      - text: "Slice range"
+      - slider_int: First slice
+        bind: graphics.root.children.{node}.tiler.z_first
+        lo: -1
+        hi: "{slices}"
+        tooltip: "the first slice index tiled (-1: the stack's first)"
+      - slider_int: Last slice
+        bind: graphics.root.children.{node}.tiler.z_last
+        lo: -1
+        hi: "{slices}"
+        tooltip: "the last slice index tiled (-1: the stack's last)"
+      - checkbox: Close the ends
+        bind: graphics.root.children.{node}.tiler.cap_ends
+        tooltip: "cap every component beyond each end of the range"
+      - separator
+      - text: "Parameters"
+      - slider_float: Curation distance
+        bind: graphics.root.children.{node}.tiler.curation_delta
+        lo: 0.0
+        hi: 0.05
+        fmt: "%.4f"
+        tooltip: "the least distance kept between contours of one slice, in world units (0: no curation); less than the slice spacing; ctrl-click to type"
+      - checkbox: Remove intersections
+        bind: graphics.root.children.{node}.tiler.remove_intersections
+        tooltip: "remove the intersections between different components' surfaces (needs a curation distance)"
+      - slider_float: Collinear area
+        bind: graphics.root.children.{node}.tiler.collinear_epsilon
+        lo: 0.0
+        hi: 0.001
+        fmt: "%.2e"
+        tooltip: "a vertex whose triangle with its neighbours has at most this area is dropped (world units^2)"
+      - slider_float: Correspondence overlap
+        bind: graphics.root.children.{node}.tiler.correspondence_overlap
+        lo: -1.0
+        hi: 1.0
+        fmt: "%.3f"
+        tooltip: "crossing contours of consecutive slices correspond only above this overlap area (negative: any)"
+      - checkbox: Tile after loading
+        bind: graphics.root.children.{node}.tiler.auto
+      - button: Tile
+        on: (state-set "graphics.root.children.{node}.tiler.request" "tile")
+        disabled_when: (= (state-get "graphics.root.children.{node}.tiler.busy") "1")
+        tooltip: "tile the ticked components with these parameters"
+      - button: Stop
+        on: (state-set "graphics.root.children.{node}.tiler.request" "stop")
+        enabled_when: (= (state-get "graphics.root.children.{node}.tiler.stoppable") "1")
+        tooltip: "end the tile at its next step, keeping the surfaces the node had"
+      - button: Load
+        on: (state-set "graphics.root.children.{node}.tiler.request" "load")
+        disabled_when: (= (state-get "graphics.root.children.{node}.tiler.busy") "1")
+        tooltip: "read the source again (tiler.source.*), and tile it when Tile after loading is ticked"
+      - separator
+      - text: "View"
+      - checkbox: Contours
+        bind: graphics.root.children.{node}.tiler.view.contours
+      - checkbox: Surfaces
+        bind: graphics.root.children.{node}.tiler.view.tiles
+      - slider_float: Surface opacity
+        bind: graphics.root.children.{node}.tiler.view.opacity
+        lo: 0.0
+        hi: 1.0
+        fmt: "%.2f"
+      - slider_float: Line width
+        bind: graphics.root.children.{node}.tiler.view.line_width
+        lo: 0.5
+        hi: 6.0
+        fmt: "%.1f"

@@ -39,7 +39,7 @@ customs:
 import:
   - cvc://components/stage_lighting.ari
   - cvc://components/camera_controls.ari
-  - cvc://components/mesh_tools.ari
+  - cvc://components/mesh/mesh_tools.ari
 
 # Decimate the surface, then take the skeleton of what is left (the request key runs its commands
 # in order, each after the job before it).

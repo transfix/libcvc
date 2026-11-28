@@ -13276,10 +13276,10 @@ TEST(AriadneRichText, AnEmptyListInStateIsNoRuns) {
   EXPECT_TRUE(mb.runs[0].empty()) << "not a run of text \"0\"";
 }
 
-// The Processes window (components/processes.ari, docs/roadmap/ARIADNE_SHELL.md 4.10): its step,
-// called from on_tick:, lists the document's processes by application (the document's own by its
-// meta.name, a loaded document's by its name in ariadne.apps), and a row's Kill kills that row's
-// process, here the loaded document's sleeping action, and leaves the rest running.
+// The Processes window (components/dev/processes.ari, docs/roadmap/ARIADNE_SHELL.md 4.10): its
+// step, called from on_tick:, lists the document's processes by application (the document's own by
+// its meta.name, a loaded document's by its name in ariadne.apps), and a row's Kill kills that
+// row's process, here the loaded document's sleeping action, and leaves the rest running.
 TEST(AriadneComponents, ProcessesListsByApplicationAndKillsARow) {
   namespace se = cvc::state_exec;
   struct KillBackend : TrayBackend {
@@ -13295,8 +13295,8 @@ TEST(AriadneComponents, ProcessesListsByApplicationAndKillsARow) {
     }
   };
   namespace fs = std::filesystem;
-  const fs::path file =
-      fs::path(__FILE__).parent_path().parent_path() / "ariadne" / "components" / "processes.ari";
+  const fs::path file = fs::path(__FILE__).parent_path().parent_path() / "ariadne" / "components" /
+                        "dev" / "processes.ari";
   if (!fs::exists(file))
     GTEST_SKIP() << "component sources not found at " << file.string();
   cvc::app app;

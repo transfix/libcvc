@@ -33,7 +33,7 @@ function at `<node>.transfer_function`, so a document only has to include the sh
 
 ```yaml
 meta: { min_libcvc: 3.7.0 }
-import: cvc://components/transfer_function.ari
+import: cvc://components/volume/transfer_function.ari
 scene:
   nodes:
     - node: skull
@@ -429,7 +429,7 @@ is meshed.
 
 ## 7. The shipped component
 
-[`src/cvc/ariadne/components/transfer_function.ari`](../src/cvc/ariadne/components/transfer_function.ari):
+[`src/cvc/ariadne/components/volume/transfer_function.ari`](../src/cvc/ariadne/components/volume/transfer_function.ari):
 
 | unit | what | args (defaults) |
 |---|---|---|
@@ -437,7 +437,7 @@ is meshed.
 | `transfer_function_editor` | just the editor, to embed in your own window | `node` (`volume`), `label`, `id` |
 
 ```yaml
-import: cvc://components/transfer_function.ari
+import: cvc://components/volume/transfer_function.ari
 windows:
   - include: transfer_function
     args: { node: skull }

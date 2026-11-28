@@ -19,7 +19,7 @@ requires:
 # The transfer-function editor (the ColorTable2 port), on the z plane's model: the x and y planes
 # colour through the same key (volume_of: slice_z).
 import:
-  - cvc://components/transfer_function.ari
+  - cvc://components/volume/transfer_function.ari
 
 # The main view opens on the volume from further out than the scene's own bounds (which the host
 # frames tightly once the scene is realized, after init:), so the planes and the bunny show beside

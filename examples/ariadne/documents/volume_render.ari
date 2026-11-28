@@ -18,7 +18,7 @@ requires:
   - gl.scene                       # a scene renderer realizes the scene: block (arigl; not ari)
 
 import:
-  - cvc://components/transfer_function.ari
+  - cvc://components/volume/transfer_function.ari
 
 menubar:
   - menu: Sim

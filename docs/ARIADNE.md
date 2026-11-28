@@ -5797,7 +5797,7 @@ gives the bar `File  FE Lab  Windows`, where *FE Lab* holds FE Lab's menus as su
   document's prefix, so `(ps)` and `(inspect)` give it a `scope` from the document's prefix: `""`
   for the document's own `on_tick:`, actions and tests, `includes.fe_lab` for the application's,
   the children they spawn included (STATE_EXEC_DEVELOPER_GUIDE.md, "Whose a process is").
-  `components/processes.ari` lists them by application (§6.5). With its chroot recorded, an
+  `components/dev/processes.ari` lists them by application (§6.5). With its chroot recorded, an
   action's async calls post their progress under its chroot, as
   [STATE_EXEC_EXCEPTIONS.md](STATE_EXEC_EXCEPTIONS.md) 3.10 says they do.
 - `ariadne_runtime_test`'s `ALoadedDocumentsMenubarIsOneMenuOfTheOuterBar`,
@@ -6456,12 +6456,48 @@ relative bases in nested composition.
 
 ### 6.5 The shipped component library
 
-`src/cvc/ariadne/components/*.ari` (installed to `<prefix>/share/libcvc/ariadne/components`
-and embedded in the wasm demos) are reusable windows a document imports by `cvc://` and
-includes. The `libcvc` cvcpkg bundles and the release tarballs carry the directory from 3.7.10.
+`src/cvc/ariadne/components/` (installed to `<prefix>/share/libcvc/ariadne/components`
+and embedded in the wasm demos) holds reusable windows a document imports by `cvc://` and
+includes, at the top of the directory and in its collections (below). The `libcvc` cvcpkg bundles
+and the release tarballs carry the directory from 3.7.10.
 Earlier native bundles left it out, so with those a host needs `CVC_ARIADNE_PATH` pointing at a
-copy (a libcvc checkout's `src/cvc/ariadne`). Each binds state keys a C++ object owns, so it needs no host code;
-[`INDEX.ari`](../src/cvc/ariadne/components/INDEX.ari) catalogs them:
+copy (a libcvc checkout's `src/cvc/ariadne`). Each binds state keys a C++ object owns, so it needs no host code.
+
+**Collections.** A domain's components sit in a subdirectory of the library, a collection, and a
+document imports one by its path there: `cvc://components/<collection>/<file>.ari`.
+
+| collection | holds |
+|---|---|
+| `volume/` | `volume_grid`, `volume_grid_segmentation`, `volren_controls`, `volslice_controls`, `transfer_function` |
+| `mesh/` | `mesh_tools`, `fe_controls`, `contour_tiler` |
+| `dev/` | `processes`, `py_console` |
+
+- **The indexes.** The top [`INDEX.ari`](../src/cvc/ariadne/components/INDEX.ari) lists the
+  collections (`collections:`) and the components still at the top (`catalog:`). Each collection
+  has an `INDEX.ari` of its own in the same shape, its entries' `file:` relative to the collection.
+- **Node types.** Every catalog entry names the scene node types its component can drive in
+  `nodes:` (`[]` for none). A document that can't run without a registered type names it in
+  `customs:` (`- node: volume_grid` with `required: true`, §5.4), which arigl and the other cvcGL
+  hosts check before they build the scene.
+- **Old paths.** A component that moved into a collection left a forwarder at its old path, a
+  document with one `import:` of the new path. An import brings the imported document's units and
+  functions, the ones it imports included, so `import: cvc://components/volume_grid.ari` gets what
+  it got before. The top index's `moved:` lists the forwarders. They go in a later major release,
+  so a new document names the new path.
+- **Unit names** are one namespace across every import (§6.1). Units keep their names when their
+  file moves, and a new unit in a collection starts with the collection's name where a plain name
+  could clash (`mol_surface`, not `surface`).
+- **Paths stay inside the library.** A `cvc://` path is relative to the search path, and the
+  resolver refuses one that could leave it: a `..` segment (with `/` or `\` between segments), a
+  leading separator, or a `:` (a drive or a stream), on every platform. A component imports
+  another by its `cvc://` path, in a collection as at the top (`volume/volume_grid.ari` imports
+  `cvc://components/volume/transfer_function.ari`).
+- **The check.** `AriadneComponents.ShippedComponentsLoadClean` walks the library, collections
+  included. It fails on a file its directory's `INDEX.ari` doesn't list, an entry without `file:`,
+  `unit:` or `nodes:`, and a subdirectory the top index doesn't list. A new collection is a
+  directory, its `INDEX.ari` and an entry in the top index's `collections:`.
+
+The components, by unit (the collection, where one holds it, in parentheses):
 
 | component | drives |
 |---|---|
@@ -6470,25 +6506,31 @@ copy (a libcvc checkout's `src/cvc/ariadne`). Each binds state keys a C++ object
 | `display_toggles`, `sim_transport`, `raster_view` | `show.*` layer keys, `sim.*` + host verbs, a host-published image (arg `keys`, default `raster`) |
 | `nav_lab_stats`, `nav_lab_ledger` | several navigation policies side by side: their Stats and Ledger from a run log at a tick, written by cvc::nav's `publish_tables` / `publish_charts` (host verbs `arms.retarget`, `arms.seek`; [NAV_LAB.md](NAV_LAB.md)) |
 | `nav_lab_scrub`, `nav_lab_training`, `nav_lab_episode` (`nav_lab_scrub.ari`) | the checkpoint scrubber: checkpoint k beside step 0, the deployed metric, the training curve, the episode's time, written by `cvc::nav::scrub_view` (host verbs `scrub.prev`, `scrub.next`, `scrub.pick_step`) |
-| `volren_controls`, `volslice_controls` | a `volren` / `volslice` node (arg `node`, default `bunny_volume`) |
+| `volren_controls`, `volslice_controls` (`volume/`) | a `volren` / `volslice` node (arg `node`, default `bunny_volume`) |
 | `forest_controls`, `sea_controls`, `sky_controls` | a `forest_trees` / `wave_sea` / `cloud_sky` node (arg `keys`, below) |
 | `world_controls` | a `generated_world` node (§5.4; arg `keys`) |
+| `world_source` (+ `world_source_controls`) | a scene's worlds (`world: <name>` on its nodes): which world is on (generated, a data bundle, a terrain, a flat ground), its settings, Regenerate or load another bundle, and the ready revision other panels wait on (args `world`, `keys`, `data`, `as`, `title`, `id`) |
+| `world_physics` (+ `world_physics_controls`) | a scene's physics world: on / off, pause, speed, step and restart, and its stats (bodies, awake, contacts, step time and its plot, bodies by node, a line per vehicle) (args `physics`, `title`, `id`) |
+| `vehicle_selector` (+ `vehicle_selector_controls`) | a world document's vehicles (`world: vehicles: archetypes:`): pick one on a studio set (a `vehicle_preview` node in a `scenes:` entry), set it within its ranges, its controller and identity, spawn it into the scene's physics world, and remove spawned ones (args `vehicles`, `entities`, `scene`, `view`, `title`, `id`) |
+| `spawn_points` (+ `spawn_points_controls`) | a world's spawn points on a minimap: add, remove or tag points (team, vehicle), the policy a spawn follows, and points suggested along the roads (args `spawns`, `view`, `title`, `id`) |
 | `swarm_controls`, `swarm_minimap` | a `nav_swarm` node (§5.4, "Swarms"; arg `swarm`, its `keys:`): what its next build makes, its layers, the chase camera and the avoidance; and its minimap, a map view where a press drags a rally point or follows a vehicle |
 | `water_controls` | a `water` node (arg `keys`, default `water`) |
 | `boat_controls` | a `boat` node's helm: drive, throttle, rudder, goal, and what it does (arg `keys`, default `boat`: the node's id or `keys:`) |
 | `weather_controls` | a `weather` node: the weather now, a storm started upwind or overhead, the sky cleared, the weather's time scale, the rain's effects, the lightning and the wet friction (arg `keys`, default `weather`) |
 | `wind_controls` | the scene's one wind (`wind.speed`, `wind.dir`, `wind.gustiness`; §5.4 "Wind") |
-| `mesh_tools` | a `mesh_lab` node (§5.4; arg `node`, default `mesh`) |
-| `fe_controls` | an `fe_lab` node (§5.4; arg `node`, default `domain`) |
-| `contour_tiler` | a `contour_lab` node (§5.4; args `node`, default `contours`, `title`, `id` and `slices`, the slice range's slider end): the component picker, the slice range, the tiler's parameters, Tile, Stop and Load, and a progress bar naming the slice pair |
+| `mesh_tools` (`mesh/`) | a `mesh_lab` node (§5.4; arg `node`, default `mesh`) |
+| `fe_controls` (`mesh/`) | an `fe_lab` node (§5.4; arg `node`, default `domain`) |
+| `contour_tiler` (`mesh/`) | a `contour_lab` node (§5.4; args `node`, default `contours`, `title`, `id` and `slices`, the slice range's slider end): the component picker, the slice range, the tiler's parameters, Tile, Stop and Load, and a progress bar naming the slice pair |
 | `scene_view` | a window holding a view of the scene (the `viewport` widget, §5.18), from a camera of its own or a named one (args `view`, `scene`, `show`, `hide`, `mode`, `camera`, `chrome`, `shadows`, `caption`, `width`, `height`, `title`, `id`) |
 | `card` | a card in a list: avatar / title / subtitle / timestamp header, body, `media` and `actions` slots; its args are state keys, so a `repeat:` includes one per item (not a window: embed it) |
-| `transfer_function`, `transfer_function_editor` | any node's `transfer_function` model (args `node`, `id`): the ColorTable2 editor with histogram / contour spectrum / contour tree layers — see [`TRANSFER_FUNCTIONS.md`](TRANSFER_FUNCTIONS.md) |
-| `volume_grid` (+ `volume_grid_views`, `volume_grid_tools`) | a `volume_grid` node (§5.4; args `node`, `title`, `id`, `view_size`, `layout`): VolumeGridRover's slice views under an XY / XZ / ZY switch beside a 3D view (`layout: switch`, the default) or all four in a 2 x 2 grid (`layout: quad`), the tool, and the Probe, Point classes, Contours, Transfer function and Segmentation tabs. `volume_grid_tools`' tabs end in `slot: tabs`; `volume_grid_contours_tab` is the Contours tab alone (objects, the curve being drawn, edits, Tile with its progress and Stop, Save and Load through the app) |
-| `volume_grid_segmentation` (+ `volume_grid_segmentation_tab`) | the Segmentation tab in a window of its own (args `node`, `title`, `id`; the `_tab` unit is the controls alone, a group): thresholds, gamma, automatic seeds, Segment and Stop with a progress bar, the result's classes, how labels and surfaces draw, Save classes and Save labels |
+| `transfer_function`, `transfer_function_editor` (`volume/`) | any node's `transfer_function` model (args `node`, `id`): the ColorTable2 editor with histogram / contour spectrum / contour tree layers — see [`TRANSFER_FUNCTIONS.md`](TRANSFER_FUNCTIONS.md) |
+| `volume_grid` (+ `volume_grid_views`, `volume_grid_tools`) (`volume/`) | a `volume_grid` node (§5.4; args `node`, `title`, `id`, `view_size`, `layout`): VolumeGridRover's slice views under an XY / XZ / ZY switch beside a 3D view (`layout: switch`, the default) or all four in a 2 x 2 grid (`layout: quad`), the tool, and the Probe, Point classes, Contours, Transfer function and Segmentation tabs. `volume_grid_tools`' tabs end in `slot: tabs`; `volume_grid_contours_tab` is the Contours tab alone (objects, the curve being drawn, edits, Tile with its progress and Stop, Save and Load through the app) |
+| `volume_grid_segmentation` (+ `volume_grid_segmentation_tab`) (`volume/`) | the Segmentation tab in a window of its own (args `node`, `title`, `id`; the `_tab` unit is the controls alone, a group): thresholds, gamma, automatic seeds, Segment and Stop with a progress bar, the result's classes, how labels and surfaces draw, Save classes and Save labels |
 | `chat`, `chat_panel` | a room's chat and direct messages through the chat verbs (args `id`, `title`, `room`); its functions come with the import: call `(chat-ui-step ID ROOM)` from `on_tick` (§5.16) |
 | `shell` | not a unit but a document of its own: the Ariadne shell, which runs a catalog of documents as applications on demand (§6.8). `ari run cvc://components/shell.ari --catalog shell_apps.json [--open SLUG,...]` |
-| `processes` | the document's running DSL programs, a row each ([ARIADNE_SHELL.md](roadmap/ARIADNE_SHELL.md) 4.10): the application each belongs to (its `(ps)` scope looked up in `ariadne.apps`, §5.25; the document's own rows by its `meta.name`), pid, name, status, steps, what it waits on, memory, and a Kill button (args `id`, `title`, `rows`). Call `(processes-step ROWS)` from `on_tick`: it polls `(ps)` and `(inspect)` twice a second (`ROWS.every`), at most `ROWS.max` rows (50), the rest counted in `ROWS.more`, and each `mounts:` application's share of its budget (§6.8) in `ROWS.apps`. It lists only its own Runtime's processes (the document's and the documents it loads), in execution group 0 too, where it once listed every document's: a program with an owner sees only its owner's processes (§2.5) |
+| `py_console`, `py_console_panel` (`dev/`) | a Python console in the document's own namespace (§9.6): a scrollback, an input line and Clear (args `id`, `title`; the `_panel` unit is the same without the window). It needs a scripting host and `console: true` in the document's `python:` block |
+| `processes` (`dev/`) | the document's running DSL programs, a row each ([ARIADNE_SHELL.md](roadmap/ARIADNE_SHELL.md) 4.10): the application each belongs to (its `(ps)` scope looked up in `ariadne.apps`, §5.25; the document's own rows by its `meta.name`), pid, name, status, steps, what it waits on, memory, and a Kill button (args `id`, `title`, `rows`). Call `(processes-step ROWS)` from `on_tick`: it polls `(ps)` and `(inspect)` twice a second (`ROWS.every`), at most `ROWS.max` rows (50), the rest counted in `ROWS.more`, and each `mounts:` application's share of its budget (§6.8) in `ROWS.apps`. It lists only its own Runtime's processes (the document's and the documents it loads), in execution group 0 too, where it once listed every document's: a program with an owner sees only its owner's processes (§2.5) |
+| `audio_buffers` | a conference's Audio window: each person's jitter buffer as a graph (what it holds and its target over the last 30 s) with how often it ran dry, and the buffers' tuning (args `id`, `title`, `rows`; the rows are `room_users`') |
 | `room_users`, `room_users_compact` | everyone in a room from `room-roster` (bridged users in rows of their own, with no media), with local cam / mic / volume and a message button (args `id`, `title`, `rows`, `chat`, `self`); call `(room-users-step ROWS ROOM CHAT)` from `on_tick` |
 | `conference`, `conference_avatar`, `conference_peers` | the conference app's windows (`conference.ari`, which imports `room_users` and `chat`): My Camera (your name, camera, mic and their pickers), Avatar (Colour, Wear, the Body where the world offers more than one, the energy budget and ledger), and a camera window per other participant (arg `rows`). Call `(conference-step)` from `on_tick` for the whole app, or its pieces for some of it: `conference-join`, `conference-media-open`, `conference-name-step`, `conference-devices-step`, `conference-avatar-step`. The baseline conference app (`examples/ariadne/documents/conference_roster.ari`) is these placed in a document with its menus; another app adds its own windows beside them |
 | `http_cache` | the app's HTTP cache (§10.3): what it holds of its budget, its hits, misses, revalidations and evictions, the budget and the largest entry in MiB, how long a reply that says nothing stays fresh, on / off, and Clear (the bare action `http_cache.clear`). It binds app-root keys (`/sys.net.http_cache.*`), so it shows the same cache in any document; arigl puts it in every one (*Settings > Network cache...*) |
@@ -6554,9 +6596,9 @@ is empty is not drawn. The avatar is a circle `avatar_size` px across (40),
 loading through `avatar_auth`'s credential where its URL needs one. A one-column grid with an
 outer border frames the card: an ImGui table, a box in a terminal.
 
-Most components that address one node use a fixed node id; copy the file and change the id to
-drive another node. `transfer_function` instead takes the node as an include arg (§6.1). A
-component may also carry `functions:` (§6.6), which the import brings with its units: `chat` and
+A component that drives a node takes the node as an include arg (`node`, or `keys` where the
+realizer keeps its keys under a root of its own; §6.1), so a document drives two nodes of a kind by
+including the component twice. A component may also carry `functions:` (§6.6), which the import brings with its units: `chat` and
 `room_users` keep their windows current that way, from the document's `on_tick`.
 `examples/ariadne/documents/mesh_lab.ari` uses the last two, and so does
 `examples/ariadne/documents/fem_gallery.ari`, which steps one `fe_lab` and one `mesh_lab`
@@ -7715,7 +7757,7 @@ init: (state-set-tree "hist" (histogram (list 1 2 2 3)))
 - **Trust.** Natively the block runs with the user's authority, like any program they start (it
   can `import os`), so run a document with Python only when you would run the program.
 
-**A console.** The shipped component `cvc://components/py_console.ari` is a Python console: a
+**A console.** The shipped component `cvc://components/dev/py_console.ari` is a Python console: a
 scrollback, an input line, and Clear. It is plain widgets (`text_view`, `message_input`, §5.15),
 so `ariglx`, `arix` and `ariglx-web` all draw it. Under ImGui (`ariglx`, `ariglx-web`) the input
 line has a Run button; `arix` runs the cell with Enter. A document turns it on with
@@ -7726,7 +7768,7 @@ requires: [python]
 python:
   console: true
   source: import math
-import: cvc://components/py_console.ari
+import: cvc://components/dev/py_console.ari
 windows:
   - include: py_console
     args: { id: console, title: Python }
@@ -9492,12 +9534,12 @@ below (G17–G21 in the internal gap report) are tracked for reconciliation.
 - **Documents in groups of their own gain nothing in the shipped hosts yet** (§2.5). `ari` and
   `arigl` drive one document each with `drain()`, and an arigl document stays on the frame's
   thread: its camera, touch, lighting, HUD and settings subscribers sit under its prefix and assume
-  the render thread ([STATE_EXEC_THREADED.md](STATE_EXEC_THREADED.md) 4.8). Two more limits, for a
-  host that makes several documents: every `AppRuntime`'s host verbs and functions are bound into
-  every document's programs (the provider registry is process-global), so one `AppRuntime` with a
-  host verb keeps all its siblings' documents on the frame's thread; and `AppRuntime` has no way
-  to mark a host verb as safe off the host thread, so a host that wants one registers its own
-  provider as `any` (§9.1).
+  the render thread ([STATE_EXEC_THREADED.md](STATE_EXEC_THREADED.md) 4.8). One more limit, for a
+  host that makes several documents: `AppRuntime` has no way to mark a host verb as safe off the
+  host thread, so a host that wants one registers its own provider as `any` (§9.1). Each
+  `AppRuntime` binds its host verbs and functions into its own document's programs alone
+  (`Runtime::add_program_intrinsics`), and the providers `register_action_intrinsics` adds are the
+  app's, so a document never reaches another document's verbs.
 
 ---
 

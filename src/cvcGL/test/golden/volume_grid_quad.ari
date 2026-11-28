@@ -8,7 +8,7 @@ meta:
   min_libcvc: 4.0.0
 
 import:
-  - cvc://components/volume_grid.ari
+  - cvc://components/volume/volume_grid.ari
 
 # The app holds the data: the bunny's 32^3 signed distance field (cvcGL's sdf generator) and the
 # point classes of volume_grid.vgr. The grid reads no file; it shows those.

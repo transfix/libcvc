@@ -313,7 +313,7 @@ if(EMSCRIPTEN)
   # The component library the document imports (cvc://components/...: its Users and Chat windows),
   # embedded where an install keeps it, as arigl-web does.
   set(_cyprty_components "${CMAKE_CURRENT_SOURCE_DIR}/../cvc/ariadne/components")
-  file(GLOB _cyprty_component_files CONFIGURE_DEPENDS "${_cyprty_components}/*.ari")
+  file(GLOB_RECURSE _cyprty_component_files CONFIGURE_DEPENDS "${_cyprty_components}/*.ari")
   target_link_options(cyprty PRIVATE
                       "--embed-file=${_cyprty_components}@/usr/share/libcvc/ariadne/components"
                       ${_arigl_font_embed})
@@ -354,7 +354,7 @@ if(EMSCRIPTEN)
     list(APPEND _arigl_wasm_link -sPTHREAD_POOL_SIZE=6)
   endif()
   set(_arigl_components "${CMAKE_CURRENT_SOURCE_DIR}/../cvc/ariadne/components")
-  file(GLOB _arigl_component_files CONFIGURE_DEPENDS "${_arigl_components}/*.ari")
+  file(GLOB_RECURSE _arigl_component_files CONFIGURE_DEPENDS "${_arigl_components}/*.ari")
 
   # In the examples' browser gallery (examples/web), arigl is the gallery's Ariadne app: every
   # .ari demo there is arigl opened on its document (<gallery>/arigl/?doc=<name>), and its Demos
@@ -376,8 +376,8 @@ if(EMSCRIPTEN)
       target_link_options(arigl PRIVATE "--preload-file=${_arigl_examples}/data@/data")
     endif()
     # Re-embed when a document or component changes.
-    file(GLOB _arigl_embedded CONFIGURE_DEPENDS "${_arigl_examples}/ariadne/documents/*.ari"
-         "${_arigl_components}/*.ari")
+    file(GLOB_RECURSE _arigl_embedded CONFIGURE_DEPENDS
+         "${_arigl_examples}/ariadne/documents/*.ari" "${_arigl_components}/*.ari")
     set_property(TARGET arigl APPEND PROPERTY LINK_DEPENDS ${_arigl_embedded})
     if(COMMAND cvcgl_wasm_app)
       cvcgl_wasm_app(arigl)

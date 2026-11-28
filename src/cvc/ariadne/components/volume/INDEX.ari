@@ -1,0 +1,67 @@
+# volume/INDEX.ari — the volume collection of the Ariadne component library (docs/ARIADNE.md §6.5):
+# VolumeGridRover (volume_grid and its segmentation), the volren and volslice settings, and the transfer function.
+#
+# Import a component by its path in the collection and include its unit:
+#
+#     import: cvc://components/volume/<file>.ari
+#     windows:
+#       - include: <unit>            # or, parametrized:  { include: <unit>, args: { node: myNode } }
+#
+# This file is in the top INDEX.ari's shape, and data-only like it: each catalog: entry's file: is
+# relative to this directory, and `nodes:` lists the scene node types the component can drive (any
+# one of them; [] for none). The top INDEX.ari's collections: lists this collection.
+
+meta:
+  name: "Ariadne components: volume"
+  description: Volume components shipped with libcvc (import via cvc://components/volume/…).
+  min_libcvc: 4.0.10
+
+catalog:
+  - component: volren_controls
+    file: volren_controls.ari
+    unit: volren_controls
+    nodes: [volren]
+    binds: "<prefix>.graphics.root.children.{node}.volren.*"   # cvc::volren::state_settings
+    for: "a `type: volren` node (steps / ambient / supersample / volumetric shadows)"
+    args: { node: bunny_volume, title: Volume raycast, id: volren_controls }   # defaults
+  - component: volslice_controls
+    file: volslice_controls.ari
+    unit: volslice_controls
+    nodes: [volslice]
+    binds: "<prefix>.graphics.root.children.{node}.volslice.*" # cvc::volslice::state_settings
+    for: "a `type: volslice` node (quality / near-plane peel / max planes)"
+    args: { node: bunny_volume, title: Volume slices, id: volslice_controls }   # defaults
+  - component: transfer_function
+    file: transfer_function.ari
+    unit: transfer_function
+    nodes: [volren, volslice, volume, volume_slice, fe_lab]
+    binds: "<prefix>.graphics.root.children.{node}.transfer_function (+ .range / .histogram / .contour_spectrum / .contour_tree / .overlay_request) and <prefix>.tree.{id}.view.*"
+    for: "a volume-type node (volren / volslice / volume, or a volume_slice plane) or an fe_lab node: colour ramp, opacity curve and isocontours over histogram / contour spectrum / contour tree layers"
+    args: { node: volume, title: Transfer Function, id: transfer_function }   # defaults
+    note: "a window holding the tf_editor widget (the ColorTable2 port); every volume node publishes the model and the layers, so no host C++ is needed"
+    demos: [transfer_function.ari, volren_bunny.ari, volslice_bunny.ari, mesh_lab.ari, orthoslicer.ari]   # orthoslicer: on its first volume_slice plane
+  - component: transfer_function_editor
+    file: transfer_function.ari
+    unit: transfer_function_editor
+    nodes: [volren, volslice, volume, volume_slice, fe_lab]
+    binds: "<prefix>.graphics.root.children.{node}.transfer_function (+ the layers beside it) and <prefix>.tree.{id}.view.*"
+    for: "the same editor without a window, to embed in a document's own window (several in one document: give each its own id)"
+    args: { node: volume, label: Transfer function, id: transfer_function_editor }   # defaults
+  - component: volume_grid
+    file: volume_grid.ari
+    unit: volume_grid
+    nodes: [volume_grid]
+    binds: "<prefix>.graphics.root.children.{node}.grid.* (view, tool, slice.*, display.*, source.*, classes.*, pick.*, pointer.*, cursor.*, request, status) and .transfer_function; <prefix>.viewers.{id}_*.camera"
+    for: "a `type: volume_grid` node (VolumeGridRover): slice views down its axes under an XY / XZ / ZY switch (layout: switch) or all three at once (layout: quad), a 3D view, the probe, point classes (mark, select, move, delete, save, load), contours per object (linear or spline; draw, close, move, select, delete, save, load) tiled into surfaces in the 3D view, the segmentation (its Segmentation tab), sessions and the transfer function, over a volume the app holds"
+    args: { node: grid, title: Volume grid, id: volume_grid, view_size: 360, layout: switch }   # defaults
+    note: "the node reads no file: give it source: { data: <name> } (a data: entry the app loads); the panel saves and loads point classes and sessions through the app (data-save, data-load). volume_grid_views (the views), volume_grid_tools (the tool and the side panel, its tabs ending in slot tabs) and volume_grid_contours_tab (the Contours tab) are groups for a document that lays out its own windows; the views are the cvcGL `viewport` widget (AriRuntime hosts)"
+    demos: [volume_grid.ari, volume_grid_segment.ari, volume_grid_contours.ari]   # point classes; the Segmentation tab on the Visible Human CT; the Contours tab
+  - component: volume_grid_segmentation
+    file: volume_grid_segmentation.ari
+    unit: volume_grid_segmentation
+    nodes: [volume_grid]
+    binds: "<prefix>.graphics.root.children.{node}.grid.segment.* (t_low, t_high, gamma, automatic, show, opacity, show_surfaces, surface_opacity, make_surfaces, live, mesh.*, rows.*, info.*, warnings), .grid.request, .grid.busy / stoppable / progress / phase and .grid.files.segments"
+    for: "the Segmentation tab of a volume_grid in a window of its own: thresholds, gamma and the automatic seeds, Segment and Stop with a progress bar, the result's classes (colour, show, voxels, triangles), how the labels and surfaces draw, and Save (the classes as one multi-variable volume, the labels as one)"
+    args: { node: grid, title: Segmentation, id: volume_grid_segmentation }   # defaults
+    note: "the grid's point classes of the shown variable and timestep are the seeds; the labels draw on the slices while the fronts advance, each class's surface in the 3D view; saving goes through the app (data-save). volume_grid_segmentation_tab is the controls alone (a group, args node and id), the volume_grid component's Segmentation tab"
+    demos: [volume_grid_segment.ari]   # its tab, inside the volume_grid component (no demo opens the window alone)

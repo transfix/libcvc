@@ -35,9 +35,9 @@ customs:
 import:
   - cvc://components/stage_lighting.ari
   - cvc://components/camera_controls.ari
-  - cvc://components/mesh_tools.ari
-  - cvc://components/fe_controls.ari
-  - cvc://components/transfer_function.ari
+  - cvc://components/mesh/mesh_tools.ari
+  - cvc://components/mesh/fe_controls.ari
+  - cvc://components/volume/transfer_function.ari
 
 menubar:
   - menu: File

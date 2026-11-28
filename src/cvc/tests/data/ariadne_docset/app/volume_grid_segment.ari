@@ -11,7 +11,7 @@ data:
     generate: sdf
     params: { mesh: stanford.bunny, dim: 32, fit: { height: 100, up: y } }
 import:
-  - cvc://components/volume_grid.ari
+  - cvc://components/volume/volume_grid.ari
 init: (state-set "seg.step" "start")
 on_tick: |
   (if (and (= (state-get "seg.step") "start")

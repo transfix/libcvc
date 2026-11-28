@@ -1,5 +1,5 @@
 // cvcgl_ariadne_volume_grid — the volume_grid component
-// (src/cvc/ariadne/components/volume_grid.ari) over two `volume_grid` nodes in one document,
+// (src/cvc/ariadne/components/volume/volume_grid.ari) over two `volume_grid` nodes in one document,
 // through AriRuntime, the mouse and the views (docs/roadmap/VOLROVER-LIBRARY-PORTS-ROADMAP.md §4,
 // P8; T6 and T13):
 //   - the document (the component's switch layout for one grid, its quad layout for the other)
@@ -54,7 +54,7 @@ std::string doc(const std::string &file) {
   name: volume grid test
   min_libcvc: 4.0.0
 import:
-  - cvc://components/volume_grid.ari
+  - cvc://components/volume/volume_grid.ari
 data:
   coded: ")" +
          file + R"("

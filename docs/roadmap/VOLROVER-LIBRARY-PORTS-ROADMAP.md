@@ -216,7 +216,7 @@ layer is useful on its own. Every layer builds and runs on wasm-mt as well as na
 | 3. Python | `bindings/pycvc` | SWIG wraps the public header (§1.4), so the C++ names carry over. |
 | 4. DSL intrinsics | Registered on the app (§1.6) | Async functions for `cvc exec`, pycvc's `Exec`, arisrv programs and Ariadne hosts. |
 | 5. Node type | `src/cvcGL/ariadne/` + `inc/cvc/gl/ariadne/` | A custom scene node, registered on the app (§1.3). It owns its data, runs the core's stepper as a sliced task on the app's state_exec scheduler (§1.9), keeps its parameters and data on the state tree (§1.5), and publishes `busy`, `stoppable`, `status`, `progress` and `phase`. Commands are a `request` key (ARIADNE.md §5.5). |
-| 6. Component | `src/cvc/ariadne/components/<name>.ari` + an `INDEX.ari` entry | A window that binds those keys, so a document drives the node with no host C++. It takes the args `node`, `title` and `id`, like every node-scoped component since b2f54578. |
+| 6. Component | `src/cvc/ariadne/components/<collection>/<name>.ari` + an entry in the collection's `INDEX.ari` (ARIADNE.md §6.5) | A window that binds those keys, so a document drives the node with no host C++. It takes the args `node`, `title` and `id`, like every node-scoped component since b2f54578. |
 
 ### 1.2 No GPL code: permissive libraries replace CGAL (settled 2026-11-08)
 

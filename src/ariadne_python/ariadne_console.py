@@ -1,4 +1,4 @@
-"""The scripting hosts' Python console (ARIADNE.md 9.6): cvc://components/py_console.ari's engine.
+"""The Python console of the scripting hosts (ARIADNE.md 9.6): cvc://components/dev/py_console.ari.
 
 The engine (python_engine.cpp) compiles this into the host and imports it as ``_ariadne_console``.
 A document whose ``python:`` block says ``console: true`` gets ``consoles_for``'s ``Consoles``, and
