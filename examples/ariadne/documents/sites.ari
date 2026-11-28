@@ -1,0 +1,56 @@
+# sites.ari — a module per child of a state key: repeat: {children: key} on a load:
+# (docs/ARIADNE.md §6.3).
+#
+# Each child of `sites` mounts apps/site.ari at includes.<site>, named by the child (as: "{key}"),
+# with a hole to its own sessions.<site>. An instance is its child, not a position: add a site
+# before the others, or remove one, and the rest keep their windows and their state (each one's
+# visits count stays its own). A site removed keeps its state at includes.<site>, and adding it
+# again shows it as it was.
+#
+#   ari run examples/ariadne/documents/sites.ari
+#   arigl run examples/ariadne/documents/sites.ari
+
+meta:
+  name: Sites
+  min_libcvc: 4.0.10
+
+requires:
+  - state-delete                   # Remove takes a site out of sites
+
+init: |
+  (begin
+    (state-set "sites.tx_wtf.on" "1")
+    (state-set "sessions.tx_wtf.host" "tx.wtf")
+    (state-set "sites.ncviz.on" "1")
+    (state-set "sessions.ncviz.host" "ncviz.com")
+    (state-set "new_site" ""))
+
+windows:
+  - window: Sites
+    id: sites
+    size: [320, 200]
+    children:
+      - text: "Each site below is a window of its own."
+      - type: group
+        repeat: {children: sites}
+        layout: {kind: horizontal}
+        children:
+          - text: "{key}"
+          - button: Remove
+            on: (state-delete "sites.{key}")
+      - input_text: Site (a name without dots)
+        bind: new_site
+      - button: Add
+        enabled_when: (!= (state-get "new_site") "")
+        on: |
+          (begin
+            (state-set (str-concat "sessions." (state-get "new_site") ".host")
+                       (str-concat (state-get "new_site") ".example"))
+            (state-set (str-concat "sites." (state-get "new_site") ".on") "1")
+            (state-set "new_site" ""))
+
+  - load: apps/site.ari
+    as: "{key}"
+    repeat: {children: sites}
+    link:
+      session: {to: "sessions.{key}", mode: rw}

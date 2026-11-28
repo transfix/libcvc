@@ -6365,6 +6365,85 @@ root:
     EXPECT_EQ(w.find("nested 'repeat'"), std::string::npos) << w;
 }
 
+// §3 repeat: {children: key} on a load: — the key on the wrapper, flagged, and the mount id
+// "{key}" kept for each child's instance to fill in (as its holes and its name: are), with no
+// warning. The schema takes the map form on any widget.
+TEST(AriadneMount, ARepeatOverAKeysChildrenKeepsItsTokensForEachChild) {
+  SKIP_WITHOUT_YAML();
+  write_temp_ari("keyed_site.ari", "needs: session\n"
+                                   "root: [ { text: \"site\", bind: session.host } ]\n");
+  const std::string main = write_temp_ari("main_keyed_sites.ari", R"(
+meta: { min_libcvc: "4.0.10" }
+root:
+  - load: keyed_site.ari
+    as: "{key}"
+    repeat: {children: sites}
+    name: sites.{key}.title
+    link:
+      session: {to: "sessions.{key}", mode: rw}
+  - text: "{i} {key}"
+    repeat: {children: sites}
+)");
+  LoadResult r = fresh_load_file(main);
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_TRUE(r.warnings.empty()) << r.warnings.front();
+  EXPECT_TRUE(r.schema_issues.empty()) << r.schema_issues.front().text();
+  const Widget *site = find_scope(r.root, "includes.{key}");
+  ASSERT_NE(site, nullptr);
+  EXPECT_EQ(site->repeat, "sites");
+  EXPECT_TRUE(site->repeat_children);
+  EXPECT_EQ(site->app_name, "{key}") << "named by its child, with no meta.name";
+  EXPECT_EQ(site->app_name_bind, "sites.{key}.title");
+  ASSERT_EQ(site->links.size(), 1u);
+  EXPECT_EQ(site->links[0].target, "sessions.{key}");
+  EXPECT_TRUE(site->links[0].writable);
+  bool row = false;
+  for (const Widget &c : r.root.children)
+    row = row || (c.label == "{i} {key}" && c.repeat == "sites" && c.repeat_children);
+  EXPECT_TRUE(row) << "a plain widget takes it too";
+}
+
+// What a repeat: map can get wrong: an expression or no key (not repeated), another key (warned
+// and ignored), and a mount id's {key} with no repeat: {children:} to fill it in (taken
+// literally). The schema reports the map's unknown key.
+TEST(AriadneMount, ARepeatOverChildrenThatIsMalformedWarns) {
+  SKIP_WITHOUT_YAML();
+  cvc::app app;
+  LoadResult r = load_string(app, R"(
+root:
+  - text: a
+    repeat: {children: (state-children "sites")}
+  - text: b
+    repeat: {}
+  - text: c
+    repeat: {children: sites, by: name}
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_TRUE(has_warning(r, "takes a state key, not an expression")) << r.warnings.front();
+  EXPECT_TRUE(has_warning(r, "needs a state key"));
+  EXPECT_TRUE(has_warning(r, "unknown key 'by'"));
+  ASSERT_EQ(r.root.children.size(), 3u);
+  EXPECT_TRUE(r.root.children[0].repeat.empty());
+  EXPECT_TRUE(r.root.children[1].repeat.empty());
+  EXPECT_EQ(r.root.children[2].repeat, "sites");
+  EXPECT_TRUE(has_schema_issue(r, "/root/2/repeat"));
+
+  write_temp_ari("keyed_lone.ari", "root: [ { text: hi } ]\n");
+  const std::string main = write_temp_ari("main_keyed_lone.ari", R"(
+root:
+  - load: keyed_lone.ari
+    as: "{key}"
+  - load: keyed_lone.ari
+    as: "slot{i}"
+    repeat: 2
+)");
+  LoadResult m = fresh_load_file(main);
+  ASSERT_TRUE(m.ok) << m.error;
+  EXPECT_TRUE(has_warning(m, "only a repeat: {children: key} fills in")) << m.warnings.front();
+  EXPECT_NE(find_scope(m.root, "includes._key_"), nullptr) << "taken literally";
+  EXPECT_NE(find_scope(m.root, "includes.slot{i}"), nullptr) << "a count fills in its {i}";
+}
+
 TEST(AriadneMount, LoadDefaultsMountIdFromBasename) {
   SKIP_WITHOUT_YAML();
   write_temp_ari("gauge.ari", "root: [ { text: hi } ]\n");

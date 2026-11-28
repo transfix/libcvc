@@ -235,91 +235,124 @@ std::string replace_all(std::string s, std::string_view token, const std::string
 // A repeat's loop-index token.
 constexpr std::string_view kIndexToken = "{i}";
 
-// §3 repeat: substitute the loop-index token `{i}` with the 0-based index `idx`, in place on an
-// instance's own copy of its template, in every field an instance uses to address distinct state
-// or to display (id/label/bind/on and the pointer handlers/predicates/tooltip/options). Goes
-// through its children (substitute_index_in), without recursing. (Single-level: a nested `repeat`
-// shares the same `{i}` token and is not independently indexed — a follow-up.)
-void substitute_index_one(Widget &out, const std::string &idx) {
-  constexpr std::string_view kTok = kIndexToken;
-  replace_in(out.id, kTok, idx);
-  replace_in(out.label, kTok, idx);
-  replace_in(out.bind, kTok, idx);
-  replace_in(out.on, kTok, idx);
-  replace_in(out.pick, kTok, idx); // a chart's or a heatmap's pick: key
+// ... and a repeat over a key's children (repeat: {children: key}): the child's name.
+constexpr std::string_view kKeyToken = "{key}";
+
+// One repeat instance: its place this frame (`{i}`) and its key (`{key}`), the child's name under
+// repeat: {children: key}, its index again under a count.
+struct InstanceTokens {
+  std::string idx, key;
+};
+
+// A repeated mount's instance sub-prefix: the mount's scope with its tokens filled in (as: "{key}"
+// mounts each child at includes.<name>), else with the instance's key appended
+// (includes.<as>.<i>). A key is a child's name, one segment; what isn't a letter, a digit, `_` or
+// `-` in it is `_` here, so a name can only ever make one segment of the scope.
+std::string instance_scope(std::string scope, const InstanceTokens &t) {
+  std::string seg = t.key;
+  for (char &c : seg)
+    if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_' && c != '-')
+      c = '_';
+  if (scope.find(kKeyToken) == std::string::npos && scope.find(kIndexToken) == std::string::npos)
+    return scope + "." + seg;
+  replace_in(scope, kKeyToken, seg);
+  replace_in(scope, kIndexToken, t.idx);
+  return scope;
+}
+
+// §3 repeat: substitute the loop-index token `{i}` with the 0-based index, and `{key}` with the
+// instance's key, in place on an instance's own copy of its template, in every field an instance
+// uses to address distinct state or to display (id/label/bind/on and the pointer
+// handlers/predicates/tooltip/options). Goes through its children (substitute_index_in), without
+// recursing. (Single-level: a nested `repeat` shares the same tokens and is not independently
+// indexed — a follow-up.)
+void substitute_index_one(Widget &out, const InstanceTokens &t) {
+  const auto sub = [&t](std::string &s) {
+    if (s.find('{') == std::string::npos)
+      return;
+    replace_in(s, kIndexToken, t.idx);
+    replace_in(s, kKeyToken, t.key);
+  };
+  sub(out.id);
+  sub(out.label);
+  sub(out.bind);
+  sub(out.on);
+  sub(out.pick); // a chart's or a heatmap's pick: key
   // A chart's series, cursor and log axis: a row's own curves (series: [{bind: runs.{i}.y}]).
   for (ChartSeriesBind &s : out.chart_series) {
-    replace_in(s.bind, kTok, idx);
-    replace_in(s.label, kTok, idx);
+    sub(s.bind);
+    sub(s.label);
   }
-  replace_in(out.cursor, kTok, idx);
-  replace_in(out.log_y, kTok, idx);
+  sub(out.cursor);
+  sub(out.log_y);
   // §4.6 the pointer handlers, a text_view's on_top, and a message_input's hint and send label: a
   // row's handler acts on that row (on_click: (state-set "tree.cam_{i}.open" "1")).
-  replace_in(out.on_click, kTok, idx);
-  replace_in(out.on_hover, kTok, idx);
-  replace_in(out.on_drag, kTok, idx);
-  replace_in(out.on_drag_start, kTok, idx);
-  replace_in(out.on_drag_end, kTok, idx);
-  replace_in(out.on_hover_end, kTok, idx);
-  replace_in(out.on_top, kTok, idx);
-  replace_in(out.hint, kTok, idx);
-  replace_in(out.send, kTok, idx);
-  replace_in(out.on_change, kTok, idx);
+  sub(out.on_click);
+  sub(out.on_hover);
+  sub(out.on_drag);
+  sub(out.on_drag_start);
+  sub(out.on_drag_end);
+  sub(out.on_hover_end);
+  sub(out.on_top);
+  sub(out.hint);
+  sub(out.send);
+  sub(out.on_change);
   // A list's selection key and edit handlers, and a tab bar's titles.
-  replace_in(out.list_current, kTok, idx);
-  replace_in(out.on_add, kTok, idx);
-  replace_in(out.on_remove, kTok, idx);
-  for (std::string &t : out.tab_titles)
-    replace_in(t, kTok, idx);
+  sub(out.list_current);
+  sub(out.on_add);
+  sub(out.on_remove);
+  for (std::string &title : out.tab_titles)
+    sub(title);
   // A settings editor's roots and filter (root: vehicles.{i}).
   for (std::string &r : out.settings_roots)
-    replace_in(r, kTok, idx);
+    sub(r);
   for (std::string &f : out.settings_filter)
-    replace_in(f, kTok, idx);
-  replace_in(out.visible_when, kTok, idx);
-  replace_in(out.enabled_when, kTok, idx);
-  replace_in(out.disabled_when, kTok, idx);
-  replace_in(out.tooltip, kTok, idx);
-  replace_in(out.badge, kTok, idx); // §5.11 a picture's "+3"
-  replace_in(out.options_expr, kTok, idx);
-  replace_in(out.src, kTok, idx); // §5.11: a picture per item (src: feed.{i}.png)
-  replace_in(out.media_status, kTok, idx);
-  replace_in(out.background.src, kTok, idx); // §5.12
-  replace_in(out.background.bind, kTok, idx);
-  replace_in(out.background.status, kTok, idx);
-  replace_in(out.background.color_src, kTok, idx); // §5.26
-  replace_in(out.color_src, kTok, idx);            // §5.26 a row's colour (palette.{i})
-  replace_in(out.poster, kTok, idx); // §5.13
-  replace_in(out.emoji, kTok, idx);  // §5.11 a post's own shortcodes
-  replace_in(out.button_icon, kTok, idx); // §5.27 a row's button: its picture, whether it's chosen
-  replace_in(out.selected, kTok, idx);
+    sub(f);
+  sub(out.visible_when);
+  sub(out.enabled_when);
+  sub(out.disabled_when);
+  sub(out.tooltip);
+  sub(out.badge); // §5.11 a picture's "+3"
+  sub(out.options_expr);
+  sub(out.src); // §5.11: a picture per item (src: feed.{i}.png)
+  sub(out.media_status);
+  sub(out.background.src); // §5.12
+  sub(out.background.bind);
+  sub(out.background.status);
+  sub(out.background.color_src); // §5.26
+  sub(out.color_src);            // §5.26 a row's colour (palette.{i})
+  sub(out.poster);               // §5.13
+  sub(out.emoji);                // §5.11 a post's own shortcodes
+  sub(out.button_icon);          // §5.27 a row's button: its picture, whether it's chosen
+  sub(out.selected);
   // §5.20 rich text: a row's runs (runs: feed.items.{i}.runs) and its handlers
-  replace_in(out.runs_src, kTok, idx);
-  replace_in(out.on_link, kTok, idx);
+  sub(out.runs_src);
+  sub(out.on_link);
   for (TextRunSpec &r : out.runs) {
-    replace_in(r.text, kTok, idx);
-    replace_in(r.href, kTok, idx);
-    replace_in(r.on_click, kTok, idx);
-    replace_in(r.tooltip, kTok, idx);
+    sub(r.text);
+    sub(r.href);
+    sub(r.on_click);
+    sub(r.tooltip);
   }
-  // §12: a repeated MOUNT (Widget::scope set) gets a per-instance sub-prefix — append the loop
-  // index so each instance's fragment binds to its OWN state subtree (includes.<as>.<i>), rather
-  // than all N instances sharing one, which would violate repeat's per-instance-state contract.
+  // §12: a repeated MOUNT (Widget::scope set) gets a per-instance sub-prefix — its key appended,
+  // or filled in where its as: has a token, so each instance's fragment binds to its OWN state
+  // subtree (includes.<as>.<i>, includes.<key>), rather than all N instances sharing one, which
+  // would violate repeat's per-instance-state contract.
   if (!out.scope.empty())
-    out.scope += "." + idx;
-  replace_in(out.app_name_bind, kTok, idx); // §5.25 and its name: (slots.{i}.name)
+    out.scope = instance_scope(std::move(out.scope), t);
+  sub(out.app_name);      // §5.25 a name from as: "{key}"
+  sub(out.app_name_bind); // §5.25 and its name: (slots.{i}.name)
   // §12: and its parent-scope holes are {i}-substituted too, so an instance can grant a
   // per-instance target (link: { slot: fleet.{i} }) — mirroring the bind/on substitution above.
   for (LinkHole &h : out.links) {
-    replace_in(h.name, kTok, idx);
-    replace_in(h.target, kTok, idx);
+    sub(h.name);
+    sub(h.target);
   }
 }
 
 // `out` and its subtree (its children and its context menu's items), each node on its own: no
 // call per level, and only a node with a subtree of its own waits in `todo`.
-void substitute_index_in(Widget &out, const std::string &idx) {
+void substitute_index_in(Widget &out, const InstanceTokens &idx) {
   std::vector<Widget *> todo;
   for (Widget *w = &out;;) {
     substitute_index_one(*w, idx);
@@ -346,9 +379,9 @@ void substitute_index_in(Widget &out, const std::string &idx) {
 // One deep copy of the template, then the index substituted through it in place. (Copying each
 // level and then its children again copied a subtree once per level above it, each frame, for
 // every instance of a feed's repeat.)
-Widget substitute_index(const Widget &w, int index) {
+Widget substitute_index(const Widget &w, const InstanceTokens &t) {
   Widget out = w;
-  substitute_index_in(out, std::to_string(index));
+  substitute_index_in(out, t);
   return out;
 }
 
@@ -1894,9 +1927,10 @@ struct Runtime::Impl {
   // Where the walk is in the tree, as child indices from the root: names an unnamed grid
   // (emit_container), so two in one window never share a backend id.
   std::vector<std::size_t> emit_path;
-  // The repeat instances the walk is inside, outermost first (emit, emit_container): with
-  // emit_path, one widget instance's identity across frames (instance_key).
-  std::vector<int> instance_path;
+  // The repeat instances the walk is inside, outermost first (emit, emit_container), by key (an
+  // index, or a child's name under repeat: {children: key}): with emit_path, one widget instance's
+  // identity across frames (instance_key).
+  std::vector<std::string> instance_path;
   // A widget's backend id as an item (begin_item_group): its id:, else its place in the tree.
   std::string item_id(const Widget &w) const {
     if (!w.id.empty())
@@ -1910,8 +1944,8 @@ struct Runtime::Impl {
     std::string key;
     for (const std::size_t k : emit_path)
       key += std::to_string(k) + ".";
-    for (const int i : instance_path)
-      key += "#" + std::to_string(i);
+    for (const std::string &i : instance_path)
+      key += "#" + i;
     return key;
   }
   // §4.6 on_click handlers and button presses fired so far this walk: a group fires its own
@@ -1931,7 +1965,7 @@ struct Runtime::Impl {
     bool active = false;
     Widget w;
     std::vector<std::size_t> emit_path;
-    std::vector<int> instance_path;
+    std::vector<std::string> instance_path;
     std::vector<std::string> scope_stack;
     std::shared_ptr<const FunctionScope> functions;
     bool made_os = false, saw_os = false;
@@ -1947,7 +1981,7 @@ struct Runtime::Impl {
   // §5.9 windows drawn maximized last frame and this one (their tree.<id>.maximized paths): one
   // that becomes maximized comes to the front.
   std::set<std::string> maximized_shown, maximized_now;
-  void autofocus(const Widget &inst, int i);
+  void autofocus(const Widget &inst, const std::string *key); // key: a repeat instance's
   // §3: last successful repeat-count per expression. A reactive repeat-count eval fail-safes to 0
   // on a transient per-frame budget exhaustion (reactive eval is slow in wasm, and video decode can
   // eat the frame); collapsing a repeated list — the conference roster, the per-peer camera windows
@@ -2412,16 +2446,37 @@ struct Runtime::Impl {
     Resident resident;
     const Widget *repeat = nullptr; // the outermost repeat: template it was emitted under, if any
     int instance = -1;              // and that repeat's instance index
+    std::string key;                // ... and its key (a child's name under repeat: {children:})
   };
   std::map<std::string, MountTick> mount_ticks_; // by sub-prefix
   // The outermost repeat: template being emitted and the instance index (a template in `root`,
   // whose address holds until the next reconcile; an inner one is copied per frame).
   const Widget *emitting_repeat_ = nullptr;
   int emitting_instance_ = -1;
+  std::string emitting_key_; // and its key
   // §12 a repeated mount's instances, made once from its template (in `root`, whose address holds
   // until the next reconcile, which clears them) rather than copied each frame: an instance is a
-  // whole loaded document, and its copy each frame cost as much as drawing it.
-  std::map<std::pair<const Widget *, int>, Widget> mount_instances_;
+  // whole loaded document, and its copy each frame cost as much as drawing it. By key, so under
+  // repeat: {children: key} an instance stays itself as its siblings come and go; one whose key
+  // is gone is dropped (begin_repeat).
+  std::map<std::pair<const Widget *, std::string>, Widget> mount_instances_;
+  // §3 a repeat's instances this frame: `count` of them, and under repeat: {children: key} the
+  // children's names, in name order (a count's keys are its indices).
+  struct RepeatInstances {
+    int count = 0;
+    bool keyed = false;
+    std::vector<std::string> keys;
+    InstanceTokens tokens(int i) const {
+      std::string idx = std::to_string(i);
+      return {idx, keyed ? keys[static_cast<std::size_t>(i)] : idx};
+    }
+    bool has(int index, const std::string &key) const {
+      return keyed ? std::binary_search(keys.begin(), keys.end(), key) : index < count;
+    }
+  };
+  // `w`'s instances, its count or its key worked out in the current scope (a key's children are
+  // read at `scope` when it is given).
+  RepeatInstances eval_repeat(const Widget &w, const std::string *scope = nullptr);
   // §5.25 a mount's `name:`, worked out in the current scope: a key's value, or an expression's;
   // "" when it has none or it comes out empty.
   std::string mount_name_of(const std::string &spec) {
@@ -2433,8 +2488,9 @@ struct Runtime::Impl {
   // On a reconcile: stop every mount tick the new tree does not have at the same sub-prefix with
   // the same program (a repeated mount's restart at their next frame).
   void drop_mount_ticks();
-  // A repeat of `tmpl` made `count` instances this frame: stop the ticks of the ones past it.
-  void sweep_repeated_ticks(const Widget *tmpl, int count);
+  // A repeat of `tmpl` made `live` this frame: stop the ticks of the ones it no longer has (past
+  // its count, or a child no longer there), and drop those mounts' instances.
+  void sweep_repeated_ticks(const Widget *tmpl, const RepeatInstances &live);
 
   // Resolve a widget bind path to an absolute cvc::state path. Delegates to the
   // shared rule (bind.h) so widget binds and scene `visible:` binds collide on the
@@ -2574,6 +2630,7 @@ struct Runtime::Impl {
     int count = 0;          // Instances: how many; Node(Group): clicks_fired before its children
     const Widget *w = nullptr;
     std::unique_ptr<std::optional<Widget>> inst; // Instances: the instance drawn now
+    std::vector<std::string> keys;    // Instances: the children's names (repeat: {children: key})
     std::string path, path2;          // Container: tracks, columns; Node(Window): its open path
     const MenuEvent *outer = nullptr; // ContextMenu: the menu event it took the place of
     std::function<void()> then;
@@ -3101,6 +3158,7 @@ template <class Start> void Runtime::Impl::run_walk(Start &&start) {
   const std::size_t functions = fn_stack.size();
   const Widget *const repeat = emitting_repeat_;
   const int instance = emitting_instance_;
+  const std::string key = emitting_key_;
   try {
     start();
     while (walk_.size() > base)
@@ -3111,6 +3169,7 @@ template <class Start> void Runtime::Impl::run_walk(Start &&start) {
     fn_stack.resize(functions);
     emitting_repeat_ = repeat;
     emitting_instance_ = instance;
+    emitting_key_ = key;
     throw;
   }
 }
@@ -3200,21 +3259,28 @@ void Runtime::Impl::step_walk() {
       if (f.outermost) {
         emitting_repeat_ = nullptr;
         emitting_instance_ = -1;
+        emitting_key_.clear();
       }
       walk_.pop_back();
       return;
     }
     const int i = static_cast<int>(f.next++);
     ++frame_instances;
-    if (f.outermost)
+    // Its tokens: `{i}` its place, `{key}` the child it is under repeat: {children: key}.
+    InstanceTokens tok{std::to_string(i), std::string()};
+    tok.key = f.keys.empty() ? tok.idx : f.keys[static_cast<std::size_t>(i)];
+    if (f.outermost) {
       emitting_instance_ = i;
+      emitting_key_ = tok.key;
+    }
     const Widget *inst = nullptr;
     if (f.outermost && !f.w->scope.empty()) { // a repeated mount: its instance, made once
-      auto it = mount_instances_.find({f.w, i});
+      auto it = mount_instances_.find({f.w, tok.key});
       if (it == mount_instances_.end()) {
-        Widget made = substitute_index(*f.w, i);
+        Widget made = substitute_index(*f.w, tok);
         made.repeat.clear();
-        it = mount_instances_.emplace(std::make_pair(f.w, i), std::move(made)).first;
+        made.repeat_children = false;
+        it = mount_instances_.emplace(std::make_pair(f.w, tok.key), std::move(made)).first;
       }
       inst = &it->second;
     } else {
@@ -3222,8 +3288,9 @@ void Runtime::Impl::step_walk() {
       if (!f.inst)
         f.inst = std::make_unique<std::optional<Widget>>();
       Widget &made = f.inst->emplace(*f.w);
-      substitute_index_in(made, std::to_string(i));
+      substitute_index_in(made, tok);
       made.repeat.clear(); // the instance renders once
+      made.repeat_children = false;
       inst = &made;
     }
     if (f.cell) {
@@ -3231,19 +3298,21 @@ void Runtime::Impl::step_walk() {
       if (!visible(*inst))
         return; // the next instance, at the next step
       backend->grid_next_cell();
-      backend->push_id(std::to_string(i).c_str());
-      instance_path.push_back(i);
+      backend->push_id(tok.key.c_str());
+      instance_path.push_back(tok.key);
       walk_.back().open_item = true;
-      autofocus(*inst, i);
+      autofocus(*inst, &tok.key);
       next_is_cell = true; // §5.26 a group's fill covers its cell
       emit_node(*inst);
       return;
     }
-    backend->push_id(std::to_string(i).c_str()); // per-instance identity
-    instance_path.push_back(i);
+    // Per-instance identity: its key, so a child's instance keeps its backend state as its
+    // siblings come and go (a count's key is its index, as before).
+    backend->push_id(tok.key.c_str());
+    instance_path.push_back(tok.key);
     f.open_item = true;
     if (visible(*inst)) { // §4: a falsy visible_when hides it + subtree
-      autofocus(*inst, i);
+      autofocus(*inst, &tok.key);
       emit_node(*inst);
     }
     return;
@@ -3452,21 +3521,49 @@ void Runtime::Impl::emit_container(const Widget &w) {
 // A `repeat` template: the count and the outermost repeat's bookkeeping, then its instances, one a
 // step (step_walk, Op::Instances).
 void Runtime::Impl::begin_repeat(const Widget &w, bool cell) {
-  const int n = eval_count(w.repeat); // capped, fail-safe 0
+  RepeatInstances live = eval_repeat(w); // capped, fail-safe 0
   // §12 the outermost repeat's instance, for the mount ticks started under it (a nested repeat is
   // a per-frame copy, so its instances are tracked by the outer one's).
   const bool outermost = emitting_repeat_ == nullptr;
-  if (outermost && !mount_ticks_.empty())
-    sweep_repeated_ticks(&w, n);
+  if (outermost && (!mount_ticks_.empty() || !w.scope.empty()))
+    sweep_repeated_ticks(&w, live);
   if (outermost)
     emitting_repeat_ = &w; // until its last instance is done (Op::Instances)
   WalkFrame f;
   f.op = WalkFrame::Op::Instances;
   f.w = &w;
-  f.count = n;
+  f.count = live.count;
+  f.keys = std::move(live.keys);
   f.cell = cell;
   f.outermost = outermost;
   walk_.push_back(std::move(f));
+}
+
+Runtime::Impl::RepeatInstances Runtime::Impl::eval_repeat(const Widget &w,
+                                                          const std::string *scope) {
+  RepeatInstances r;
+  if (!w.repeat_children) {
+    r.count = eval_count(w.repeat);
+    return r;
+  }
+  // repeat: {children: key}: a child per instance, in name order, read through a link: hole as
+  // every read is (a module can repeat over a granted key).
+  constexpr std::size_t kMaxRepeat = 4096; // as eval_count's cap
+  r.keyed = true;
+  const std::string path = scope ? resolve_bind(*scope, w.repeat) : resolve(w.repeat);
+  try {
+    if (cvc::state *n = read_node(app, path))
+      r.keys = n->childNames(); // in name order, so has() can look one up
+  } catch (const std::exception &e) {
+    warn_once("ari: repeat: {children: " + w.repeat + "}: " + e.what());
+  }
+  if (r.keys.size() > kMaxRepeat) {
+    warn_once("ari: repeat: {children: " + w.repeat + "} has " + std::to_string(r.keys.size()) +
+              " children, past the cap (" + std::to_string(kMaxRepeat) + ") — clamped");
+    r.keys.resize(kMaxRepeat);
+  }
+  r.count = static_cast<int>(r.keys.size());
+  return r;
 }
 
 // A grid's child: a plain one is one cell; a `repeat` child a cell per instance. Visibility is
@@ -3480,19 +3577,19 @@ void Runtime::Impl::begin_cells(const Widget &c) {
   if (!visible(c))
     return;
   backend->grid_next_cell();
-  autofocus(c, -1);
+  autofocus(c, nullptr);
   next_is_cell = true; // §5.26 a group's fill covers its cell
   emit_node(c);
 }
 
-void Runtime::Impl::autofocus(const Widget &inst, int i) {
+void Runtime::Impl::autofocus(const Widget &inst, const std::string *instance) {
   if (!inst.autofocus)
     return;
   std::string key;
   for (const std::size_t k : emit_path)
     key += std::to_string(k) + ".";
-  if (i >= 0)
-    key += "#" + std::to_string(i);
+  if (instance)
+    key += "#" + *instance;
   if (!autofocus_shown.count(key))
     backend->focus_next_widget();
   autofocus_now.insert(std::move(key));
@@ -3508,7 +3605,7 @@ void Runtime::Impl::begin_emit(const Widget &w) {
     return;
   }
   if (visible(w)) { // §4: a falsy visible_when hides it + subtree
-    autofocus(w, -1);
+    autofocus(w, nullptr);
     emit_node(w);
   }
 }
@@ -5922,21 +6019,26 @@ void Runtime::Impl::plan_windows_menu() {
 
 std::vector<Runtime::Impl::RepeatedWindow> Runtime::Impl::repeated_windows() {
   std::vector<RepeatedWindow> out;
-  constexpr std::string_view kTok = kIndexToken;
   for (const auto &[tmpl, scope] : windows_menu.repeated) {
-    const int n = eval_count(tmpl->repeat); // the count its windows are drawn with this frame
-    for (int i = 0; i < n; ++i) {
-      const std::string idx = std::to_string(i);
+    // The instances its windows are drawn with this frame.
+    const RepeatInstances live = eval_repeat(*tmpl, &scope);
+    for (int i = 0; i < live.count; ++i) {
+      const InstanceTokens tok = live.tokens(i);
+      const auto fill = [&tok](std::string s) {
+        replace_in(s, kIndexToken, tok.idx);
+        replace_in(s, kKeyToken, tok.key);
+        return s;
+      };
       RepeatedWindow r;
-      r.id = replace_all(tmpl->id.empty() ? tmpl->label : tmpl->id, kTok, idx);
+      r.id = fill(tmpl->id.empty() ? tmpl->label : tmpl->id);
       r.open_path = resolve_bind(scope, "tree." + r.id + ".open");
       r.raise_path = resolve_bind(scope, "tree." + r.id + ".raise");
       if (windows_menu.toggled.count(r.open_path))
         continue;
       // Its title as the window shows it: the bound one (a peer's name), else its label.
-      r.title = replace_all(tmpl->label, kTok, idx);
+      r.title = fill(tmpl->label);
       if (!tmpl->bind.empty()) {
-        const std::string bind = replace_all(tmpl->bind, kTok, idx);
+        const std::string bind = fill(tmpl->bind);
         const std::string t =
             is_expr(bind) ? eval_text(bind) : read_string(app, resolve_bind(scope, bind));
         if (!t.empty())
@@ -6124,23 +6226,33 @@ void Runtime::Impl::plan_frame_apps() {
       frame_apps.push_back(std::move(app_));
       continue;
     }
-    int n = 0;
+    RepeatInstances live;
     {
       const ScopedTo in(*this, a.parent_scope, nullptr);
-      n = eval_count(a.repeat->repeat);
+      live = eval_repeat(*a.repeat);
     }
-    for (int i = 0; i < n; ++i) {
+    for (int i = 0; i < live.count; ++i) {
+      const InstanceTokens tok = live.tokens(i);
+      const auto fill = [&tok](std::string s) {
+        replace_in(s, kIndexToken, tok.idx);
+        replace_in(s, kKeyToken, tok.key);
+        return s;
+      };
       WindowsMenuPlan::App inst = a;
-      inst.scope = resolve_bind(a.parent_scope, a.repeat->scope + "." + std::to_string(i));
+      inst.scope = resolve_bind(a.parent_scope, instance_scope(a.repeat->scope, tok));
       std::string name;
-      if (!a.name_bind.empty()) { // this instance's name:, {i} filled in
-        std::string spec = a.name_bind;
-        replace_in(spec, kIndexToken, std::to_string(i));
+      if (!a.name_bind.empty()) { // this instance's name:, {i} and {key} filled in
         const ScopedTo in(*this, a.parent_scope, nullptr);
-        name = mount_name_of(spec);
+        name = mount_name_of(fill(a.name_bind));
       }
-      inst.name = unique(name.empty() ? a.name + " " + std::to_string(i + 1) : std::move(name));
-      frame_app_bars.push_back(substitute_index(*a.bar, i));
+      // Else its name, numbered ("Lab 1") or by its child ("Lab tx_wtf"); a name with a token
+      // (as: "{key}" makes the mount id one) has it filled in instead.
+      if (name.empty())
+        name = a.name.find('{') != std::string::npos ? fill(a.name)
+               : live.keyed                          ? a.name + " " + tok.key
+                                                     : a.name + " " + std::to_string(i + 1);
+      inst.name = unique(std::move(name));
+      frame_app_bars.push_back(substitute_index(*a.bar, tok));
       inst.bar = &frame_app_bars.back();
       inst.repeat = nullptr;
       frame_apps.push_back(std::move(inst));
@@ -9201,6 +9313,7 @@ void Runtime::Impl::ensure_mount_tick(const std::string &sub_prefix, const Widge
   t.channel = owner_ + "#tick@" + sub_prefix;
   t.repeat = emitting_repeat_;
   t.instance = emitting_instance_;
+  t.key = emitting_key_;
   ensure_resident(t.channel, t.body, t.resident, sub_prefix, t.functions);
 }
 
@@ -9239,14 +9352,26 @@ void Runtime::Impl::drop_mount_ticks() {
   }
 }
 
-void Runtime::Impl::sweep_repeated_ticks(const Widget *tmpl, int count) {
+void Runtime::Impl::sweep_repeated_ticks(const Widget *tmpl, const RepeatInstances &live) {
   for (auto it = mount_ticks_.begin(); it != mount_ticks_.end();) {
-    if (it->second.repeat == tmpl && it->second.instance >= count) {
+    if (it->second.repeat == tmpl && !live.has(it->second.instance, it->second.key)) {
       stop_resident(it->second.resident);
       it = mount_ticks_.erase(it);
     } else {
       ++it;
     }
+  }
+  // A repeated mount's instances it no longer has (a site the user removed): made again if the
+  // child comes back. Its state, under its sub-prefix, stays, as a quit application's does.
+  for (auto it = mount_instances_.lower_bound({tmpl, std::string()});
+       it != mount_instances_.end() && it->first.first == tmpl;) {
+    int index = -1;
+    if (!live.keyed)
+      index = std::atoi(it->first.second.c_str());
+    if (!live.has(index, it->first.second))
+      it = mount_instances_.erase(it);
+    else
+      ++it;
   }
 }
 
