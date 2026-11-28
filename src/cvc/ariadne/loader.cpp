@@ -425,9 +425,12 @@ njson yaml_to_json(const YAML::Node &n) {
     return a;
   }
   case YAML::NodeType::Map: {
+    // A repeated key keeps the first, as the loader reads it (drop_repeated_keys, §2.1).
     njson o = njson::object();
     for (const auto &kv : n)
-      o[kv.first.IsScalar() ? kv.first.Scalar() : std::string()] = yaml_to_json(kv.second);
+      if (const std::string k = kv.first.IsScalar() ? kv.first.Scalar() : std::string();
+          !o.contains(k))
+        o[k] = yaml_to_json(kv.second);
     return o;
   }
   case YAML::NodeType::Scalar: {
@@ -2412,6 +2415,76 @@ std::string place_text(const Place &p) {
   return p.source.empty() ? "line " + at : p.source + ":" + at;
 }
 
+// §2.1 a file holds one YAML document: the first of those `all` reads (a YAML::LoadAll), and in
+// `more` whether any follow it, which the reader warns about (warn_more_documents). When a later
+// one does not parse, `first` reads the first alone, and throws if the first is the bad one.
+template <class All, class First>
+YAML::Node first_document(const All &all, const First &first, bool &more) {
+  std::vector<YAML::Node> docs;
+  try {
+    docs = all();
+  } catch (const YAML::BadFile &) {
+    throw;
+  } catch (const YAML::Exception &) {
+    YAML::Node one = first();
+    more = true;
+    return one;
+  }
+  more = docs.size() > 1;
+  return docs.empty() ? YAML::Node() : docs.front();
+}
+
+// §2.1 the warning for a file (`file`, "" for a string) that holds more than one YAML document.
+void warn_more_documents(Ctx &ctx, bool more, const std::string &file) {
+  if (more)
+    ctx.warn("ari: " + (file.empty() ? std::string("the document") : file) +
+             " holds more than one YAML document — a file holds one, so only the first is read");
+}
+
+// §2.1 a map must not repeat a key. Each repeat in `root` (a file's document; `file` its path, ""
+// for a string) warns at its place and is removed, so every reader of the map, by lookup, by
+// iteration or by the schema check, reads the first. A loop over a list, not a call a level
+// (§6.7). Each container is walked once, by its place in the text: an alias shares its anchor's
+// node, so it is neither walked nor warned about again.
+CVC_ARI_NOINLINE void drop_repeated_keys(Ctx &ctx, const YAML::Node &root,
+                                         const std::string &file) {
+  std::set<int> walked; // the text positions of the containers walked
+  std::vector<YAML::Node> todo{root};
+  while (!todo.empty()) {
+    YAML::Node n = todo.back();
+    todo.pop_back();
+    if (!n.IsMap() && !n.IsSequence())
+      continue;
+    if (const YAML::Mark m = n.Mark(); !m.is_null() && !walked.insert(m.pos).second)
+      continue;
+    if (n.IsSequence()) {
+      for (const YAML::Node &e : n)
+        todo.push_back(e);
+      continue;
+    }
+    std::map<std::string, YAML::Mark> first;
+    std::vector<YAML::Node> repeats; // each the repeated key's own node: remove() takes that pair
+    for (const auto &kv : n) {
+      if (kv.first.IsScalar()) {
+        const auto [at, fresh] = first.emplace(kv.first.Scalar(), kv.first.Mark());
+        if (!fresh) {
+          const std::string was = at->second.is_null()
+                                      ? std::string()
+                                      : " at line " + std::to_string(at->second.line + 1);
+          ctx.warn("ari: " + place_text({file, kv.first.Mark()}) + ": key '" + kv.first.Scalar() +
+                   "' repeats the one" + was +
+                   " — a map must not repeat a key, so the first is read");
+          repeats.push_back(kv.first);
+          continue;
+        }
+      }
+      todo.push_back(kv.second);
+    }
+    for (const YAML::Node &k : repeats)
+      n.remove(k);
+  }
+}
+
 // §6.7 refuse `n`, the first widget (or with `scene`, scene node) past the nesting limit: the parse
 // stops, and the load fails with an error at `n`, which counts the include:s and load:s (a scene
 // node's use:s) on the way down and names each that goes into another file.
@@ -2505,9 +2578,7 @@ void merge_units(Ctx &ctx, const YAML::Node &unitsNode, bool warn_collision,
     // §6.2 a document's own unit marked `fallback: true` stands in only where no import defines
     // the name (a component the host's library may not have yet). The key stays on the stored
     // template (an include drops it, instantiate_unit), so the template keeps its positions.
-    const bool fallback = kv.second.IsMap() && kv.second["fallback"] &&
-                          kv.second["fallback"].IsScalar() &&
-                          kv.second["fallback"].as<std::string>("") == "true";
+    const bool fallback = kv.second.IsMap() && flag(kv.second, "fallback", false);
     if (fallback && ctx.units.count(name))
       continue;
     if (warn_collision && ctx.units.count(name))
@@ -2716,8 +2787,7 @@ void process_imports(Ctx &ctx, const YAML::Node &doc, const std::string &base_di
     if (p.IsScalar())
       uris.emplace_back(p.Scalar(), false);
     else if (p.IsMap() && p["uri"] && p["uri"].IsScalar())
-      uris.emplace_back(p["uri"].Scalar(),
-                        p["optional"] && p["optional"].as<std::string>("") == "true");
+      uris.emplace_back(p["uri"].Scalar(), flag(p, "optional", false));
   };
   if (imp && imp.IsSequence())
     for (const auto &p : imp)
@@ -2740,12 +2810,16 @@ void process_imports(Ctx &ctx, const YAML::Node &doc, const std::string &base_di
     if (!ctx.imported.insert(res.canonical).second)
       continue; // already imported (dedup) or on the stack (cycle) — skip
     YAML::Node sub;
+    bool more = false;
     try {
-      sub = YAML::Load(res.content);
+      sub = first_document([&] { return YAML::LoadAll(res.content); },
+                           [&] { return YAML::Load(res.content); }, more);
     } catch (const std::exception &e) {
       ctx.warn("ari: import '" + uri + "' parse error: " + e.what());
       continue;
     }
+    warn_more_documents(ctx, more, res.canonical);
+    drop_repeated_keys(ctx, sub, res.canonical);
     // §14 a library is a document too: its structure is checked (its units as they are included).
     check_schema(ctx, sub, /*widget=*/false, res.canonical, "", sub, YAML::Mark::null_mark(), "");
     const std::string sub_base = std::filesystem::path(res.canonical).parent_path().string();
@@ -3035,20 +3109,23 @@ CVC_ARI_NOINLINE bool read_fragment(Ctx &ctx, const YAML::Node &n, std::string &
     return fail("ari: load: mount limit reached (" + std::to_string(kMaxMounts) +
                 " fragments) — refused");
   ++*ctx.mount_count;
+  bool more = false;
   try {
-    frag = YAML::Load(res.content);
+    frag = first_document([&] { return YAML::LoadAll(res.content); },
+                          [&] { return YAML::Load(res.content); }, more);
   } catch (const std::exception &e) {
     return fail("ari: load '" + uri + "' parse error: " + e.what());
   }
-  if (outcome) {
-    if (frag.IsMap() && (frag["scene"] || frag["scenes"]))
-      outcome->has_scene = true;
-    // A mount at run time keeps the min_libcvc gate a top-level document has (§3.1a).
-    const Meta m = frag.IsMap() ? parse_meta(frag["meta"]) : Meta{};
-    if (!m.min_libcvc.empty() && !version_at_least(libcvc_version(), m.min_libcvc))
-      return fail("ari: load '" + uri + "' requires libcvc >= " + m.min_libcvc +
-                  " but this build is " + libcvc_version());
-  }
+  // Every fragment keeps the min_libcvc gate a top-level document has (§3.1a), before anything
+  // else is read: a static load: is an empty group, a mounts: entry is refused.
+  const Meta m = frag.IsMap() ? parse_meta(frag["meta"]) : Meta{};
+  if (!m.min_libcvc.empty() && !version_at_least(libcvc_version(), m.min_libcvc))
+    return fail("ari: load '" + uri + "' requires libcvc >= " + m.min_libcvc +
+                " but this build is " + libcvc_version());
+  warn_more_documents(ctx, more, res.canonical);
+  drop_repeated_keys(ctx, frag, res.canonical);
+  if (outcome && frag.IsMap() && (frag["scene"] || frag["scenes"]))
+    outcome->has_scene = true;
   // Args substitute into the cloned fragment before parse (same single-pass rule as include:).
   std::map<std::string, std::string> args;
   const YAML::Node a = n["args"];
@@ -3366,6 +3443,10 @@ void parse_document(Ctx &ctx, const YAML::Node &doc, Widget &w) {
   }
   for (const char *k : {"windows", "overlays"})
     parse_seq(ctx, doc[k], w.children);
+  // children: stands for root:; a document with both reads root: (§8.4).
+  if (doc["root"].IsDefined() && doc["children"].IsDefined())
+    ctx.warn("ari: the document has both root: and children:, which mean the same — "
+             "children: is ignored");
   parse_seq(ctx, doc["root"].IsDefined() ? doc["root"] : doc["children"], w.children);
   document_settings(doc, w.children);
 }
@@ -5494,7 +5575,7 @@ CVC_ARI_NOINLINE void fail_nesting(Ctx &ctx, LoadResult &r) {
 // imports back to this document is caught.
 LoadResult load_node(cvc::app &app, const YAML::Node &doc,
                      const std::string &base_dir = std::string(),
-                     const std::string &self_path = std::string()) {
+                     const std::string &self_path = std::string(), bool more_documents = false) {
   LoadResult r;
   Ctx ctx;
   ctx.app = &app;
@@ -5518,6 +5599,9 @@ LoadResult load_node(cvc::app &app, const YAML::Node &doc,
               libcvc_version();
     return r;
   }
+  // §2.1 one YAML document, and no map repeating a key: what follows reads the first of each.
+  warn_more_documents(ctx, more_documents, self_path);
+  drop_repeated_keys(ctx, doc, self_path);
 
   // §14 the document's structure, before anything below reads it (so a load that fails further
   // on still says what in it breaks the schema). Its imports, fragments and include: expansions
@@ -5790,7 +5874,10 @@ LoadResult load_node(cvc::app &app, const YAML::Node &doc,
 
 LoadResult load_string(cvc::app &app, const std::string &yaml) {
   try {
-    return load_node(app, YAML::Load(yaml));
+    bool more = false;
+    const YAML::Node doc =
+        first_document([&] { return YAML::LoadAll(yaml); }, [&] { return YAML::Load(yaml); }, more);
+    return load_node(app, doc, std::string(), std::string(), more);
   } catch (const YAML::Exception &e) {
     LoadResult r;
     r.error = std::string("ari: YAML parse error: ") + e.what();
@@ -5858,7 +5945,10 @@ LoadResult load_file(cvc::app &app, const std::string &path) {
     // file's own canonical path seeds the import cycle-guard.
     const std::string self = resolve_file_path(path, std::string());
     const std::string dir = std::filesystem::path(self).parent_path().string();
-    return load_node(app, YAML::LoadFile(path), dir, self);
+    bool more = false;
+    const YAML::Node doc = first_document([&] { return YAML::LoadAllFromFile(path); },
+                                          [&] { return YAML::LoadFile(path); }, more);
+    return load_node(app, doc, dir, self, more);
   } catch (const YAML::BadFile &e) {
     LoadResult r;
     r.error = std::string("ari: cannot open '") + path + "': " + e.what();

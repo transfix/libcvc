@@ -8441,3 +8441,194 @@ TEST(AriadneLoader, LoadMountRefusesADocumentNestedPastTheLimit) {
       << past.error;
   EXPECT_EQ(find(past.wrapper, Kind::Text, "deepest"), nullptr);
 }
+
+// The defects docs/ARIADNE_SPEC.md §9 listed, each fixed here and checked against its rule.
+namespace {
+std::size_t warnings_with(const LoadResult &r, const std::string &needle) {
+  std::size_t n = 0;
+  for (const std::string &w : r.warnings)
+    n += w.find(needle) != std::string::npos ? 1 : 0;
+  return n;
+}
+} // namespace
+
+// Spec §3: a fragment carries its own meta: and is gated on its own, a static load: as a mounts:
+// entry is. One too new for this build is not mounted, and is not read past its meta:.
+TEST(AriadneSpec, AStaticLoadFragmentTooNewIsNotMounted) {
+  SKIP_WITHOUT_YAML();
+  const std::string newer = write_temp_ari("spec_frag_newer.ari", R"(meta: {min_libcvc: "99.0.0"}
+brand_new_block: {made: later}
+root:
+  - text: too new
+)");
+  const std::string older = write_temp_ari("spec_frag_older.ari", R"(meta: {min_libcvc: "0.0.1"}
+root:
+  - text: old enough
+)");
+  const LoadResult r = fresh_load("meta: {min_libcvc: \"0.0.0\"}\nroot:\n  - load: " + newer +
+                                  "\n    as: newer\n  - load: " + older + "\n    as: older\n");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_TRUE(has_warning(r, "requires libcvc >= 99.0.0"));
+  EXPECT_EQ(find(r.root, Kind::Text, "too new"), nullptr);
+  EXPECT_NE(find(r.root, Kind::Text, "old enough"), nullptr);
+  EXPECT_EQ(warnings_with(r, "brand_new_block"), 0u) << "a fragment too new is not checked";
+}
+
+// Spec §2.1: a map must not repeat a key. Each repeat warns at its place, and every reader reads
+// the first: a lookup (a widget's text:), an iteration (units:) and the schema check.
+TEST(AriadneSpec, ARepeatedKeyWarnsAndTheFirstIsRead) {
+  SKIP_WITHOUT_YAML();
+  const LoadResult r = fresh_load(R"(meta: {min_libcvc: "0.0.0"}
+units:
+  card: {text: mine}
+  card: {text: theirs}
+root:
+  - text: one
+    text: two
+  - include: card
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  EXPECT_TRUE(has_warning(r, "line 4:3: key 'card' repeats the one at line 3"));
+  EXPECT_TRUE(has_warning(r, "line 7:5: key 'text' repeats the one at line 6"));
+  EXPECT_NE(find(r.root, Kind::Text, "one"), nullptr);
+  EXPECT_EQ(find(r.root, Kind::Text, "two"), nullptr);
+  EXPECT_NE(find(r.root, Kind::Text, "mine"), nullptr) << "units: iterated reads the first too";
+  EXPECT_EQ(find(r.root, Kind::Text, "theirs"), nullptr);
+
+  // An alias shares its anchor's map: its repeat is one warning, however often it is used.
+  const LoadResult alias = fresh_load(R"(meta: {min_libcvc: "0.0.0"}
+x-card: &c {text: hi, text: again}
+root: [*c, *c, *c]
+)");
+  ASSERT_TRUE(alias.ok) << alias.error;
+  EXPECT_EQ(warnings_with(alias, "key 'text' repeats"), 1u);
+  EXPECT_EQ(find(alias.root, Kind::Text, "again"), nullptr);
+
+  // The schema check, run on its own, reads the first as well.
+  if (have_jsonschema()) {
+    cvc::app app;
+    const ValidationResult v = validate_string(app, "meta: {min_libcvc: \"0.0.0\"}\n"
+                                                    "windows: []\nwindows: 5\n");
+    EXPECT_TRUE(v.issues.empty()) << v.issues.front().text();
+  }
+}
+
+// Spec §2.1: a file holds one YAML document. A reader reads the first and warns about the rest,
+// even when a later one does not parse; one document between --- and ... is no warning.
+TEST(AriadneSpec, ASecondYamlDocumentWarns) {
+  SKIP_WITHOUT_YAML();
+  const LoadResult two = fresh_load("meta: {min_libcvc: \"0.0.0\"}\nroot: [{text: one}]\n---\n"
+                                    "root: [{text: two}]\n");
+  ASSERT_TRUE(two.ok) << two.error;
+  EXPECT_TRUE(has_warning(two, "the document holds more than one YAML document"));
+  EXPECT_NE(find(two.root, Kind::Text, "one"), nullptr);
+  EXPECT_EQ(find(two.root, Kind::Text, "two"), nullptr);
+
+  const LoadResult bad = fresh_load("meta: {min_libcvc: \"0.0.0\"}\nroot: [{text: one}]\n---\n"
+                                    "root: [unclosed\n");
+  ASSERT_TRUE(bad.ok) << bad.error;
+  EXPECT_TRUE(has_warning(bad, "more than one YAML document"));
+  EXPECT_NE(find(bad.root, Kind::Text, "one"), nullptr);
+
+  const LoadResult broken = fresh_load("root: [unclosed\n---\nroot: []\n");
+  EXPECT_FALSE(broken.ok) << "the first document's error still refuses";
+
+  const LoadResult one =
+      fresh_load("---\nmeta: {min_libcvc: \"0.0.0\"}\nroot: [{text: one}]\n...\n");
+  ASSERT_TRUE(one.ok) << one.error;
+  EXPECT_EQ(warnings_with(one, "YAML document"), 0u);
+
+  const std::string file = write_temp_ari("spec_two_documents.ari",
+                                          "meta: {min_libcvc: \"0.0.0\"}\nroot: []\n---\nx: 1\n");
+  const LoadResult from_file = fresh_load_file(file);
+  ASSERT_TRUE(from_file.ok) << from_file.error;
+  EXPECT_TRUE(has_warning(from_file, "spec_two_documents.ari holds more than one YAML document"));
+
+  const std::string lib = write_temp_ari("spec_two_document_lib.ari",
+                                         "units:\n  card: {text: from the library}\n---\nx: 1\n");
+  const LoadResult imported =
+      fresh_load("meta: {min_libcvc: \"0.0.0\"}\nimport: " + lib + "\nroot:\n  - include: card\n");
+  ASSERT_TRUE(imported.ok) << imported.error;
+  EXPECT_TRUE(has_warning(imported, "spec_two_document_lib.ari holds more than one YAML document"));
+  EXPECT_NE(find(imported.root, Kind::Text, "from the library"), nullptr);
+}
+
+// Spec §2.2: an import's optional: and a unit's fallback: are flags, in any of a flag's spellings.
+TEST(AriadneSpec, ImportOptionalAndUnitFallbackAreFlags) {
+  SKIP_WITHOUT_YAML();
+  const LoadResult missing = fresh_load(R"(meta: {min_libcvc: "0.0.0"}
+import: [{uri: /nowhere/lib.ari, optional: yes}]
+units:
+  card: {fallback: On, text: mine}
+root:
+  - include: card
+)");
+  ASSERT_TRUE(missing.ok) << missing.error;
+  EXPECT_EQ(warnings_with(missing, "could not be resolved"), 0u) << "optional: yes";
+  EXPECT_NE(find(missing.root, Kind::Text, "mine"), nullptr);
+
+  const std::string lib = write_temp_ari("spec_flag_lib.ari", "units:\n  card: {text: theirs}\n");
+  const LoadResult present = fresh_load("meta: {min_libcvc: \"0.0.0\"}\nimport: [{uri: " + lib +
+                                        ", optional: 1}]\nunits:\n  card: {fallback: True, text: "
+                                        "mine}\nroot:\n  - include: card\n");
+  ASSERT_TRUE(present.ok) << present.error;
+  EXPECT_NE(find(present.root, Kind::Text, "theirs"), nullptr) << "fallback: True yields";
+  EXPECT_EQ(find(present.root, Kind::Text, "mine"), nullptr);
+  EXPECT_EQ(warnings_with(present, "more than one library"), 0u);
+
+  const LoadResult no = fresh_load(R"(meta: {min_libcvc: "0.0.0"}
+import: [{uri: /nowhere/lib.ari, optional: no}]
+root: []
+)");
+  EXPECT_TRUE(has_warning(no, "could not be resolved")) << "optional: no is not optional";
+}
+
+// Spec §8.4: children: stands for root:. A document with both reads root: and warns.
+TEST(AriadneSpec, RootAndChildrenTogetherWarn) {
+  SKIP_WITHOUT_YAML();
+  const LoadResult both = fresh_load(R"(meta: {min_libcvc: "0.0.0"}
+root: [{text: from root}]
+children: [{text: from children}]
+)");
+  ASSERT_TRUE(both.ok) << both.error;
+  EXPECT_TRUE(has_warning(both, "both root: and children:"));
+  EXPECT_NE(find(both.root, Kind::Text, "from root"), nullptr);
+  EXPECT_EQ(find(both.root, Kind::Text, "from children"), nullptr);
+
+  const LoadResult alone = fresh_load("meta: {min_libcvc: \"0.0.0\"}\nchildren: [{text: kids}]\n");
+  ASSERT_TRUE(alone.ok) << alone.error;
+  EXPECT_NE(find(alone.root, Kind::Text, "kids"), nullptr);
+  EXPECT_EQ(warnings_with(alone, "root:"), 0u);
+}
+
+// Spec §8 and the schema: background: is a window's, an overlay's or a group's (a panel, an
+// include: or load: site). The loader reads it there only, and says so anywhere else.
+TEST(AriadneSpec, BackgroundIsReadOnWindowsAndGroupsOnly) {
+  SKIP_WITHOUT_YAML();
+  const LoadResult r = fresh_load(R"(meta: {min_libcvc: "0.0.0"}
+windows:
+  - window: W
+    background: wall.png
+    children:
+      - text: plain
+        background: wall.png
+      - panel: P
+        id: p
+        background: [0.1, 0.2, 0.3]
+        children: []
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  const Widget *w = find(r.root, Kind::Window, "W");
+  ASSERT_NE(w, nullptr);
+  EXPECT_EQ(w->background.src, "wall.png");
+  const Widget *text = find(r.root, Kind::Text, "plain");
+  ASSERT_NE(text, nullptr);
+  EXPECT_FALSE(text->background.any());
+  const Widget *panel = find_id(r.root, "p");
+  ASSERT_NE(panel, nullptr);
+  EXPECT_TRUE(panel->background.any());
+  std::size_t ignored = 0;
+  for (const std::string &m : loader_warnings(r))
+    ignored += m.find("background: is for a window, overlay or group") != std::string::npos;
+  EXPECT_EQ(ignored, 1u);
+}
