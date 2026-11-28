@@ -90,6 +90,11 @@ units:
         bind: "{keys}.city"
         options: (string.split (state-get "{keys}.generators.city") "\n")
         tooltip: "districts: the roads-first city; none: no streets or buildings"
+      # The world themes (cvc/world/world_theme.h), by name: the built-ins and any a host added.
+      - combo: Theme
+        bind: "{keys}.theme"
+        options: (string.split (state-get "{keys}.generators.theme") "\n")
+        tooltip: "the models the world builds with: none, the procedural buildings and L-system trees; temperate_town, brick shops, brownstones and offices, oaks inland; coastal_town, the same streets with palms along the coast; tropical, palms everywhere but the hills, a low-rise town; port_town, container yards by the water. A theme's models not installed are fetched from cvcpkg (in a browser their web packages), and the world regenerates once they arrive"
       - slider_float: World half (m)
         bind: "{keys}.half"
         commit: release

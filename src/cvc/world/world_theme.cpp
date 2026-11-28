@@ -74,10 +74,30 @@ int weighted(const std::vector<Rule> &rules, const std::vector<int> &idx, double
   return idx.back();
 }
 
+// The cy-pca package each built-in asset ships in (cy-pca/graphics-assets).
+std::string builtinPackage(const std::string &asset) {
+  if (asset == "BrickCornerShop")
+    return "cy-pca/building-brick-corner-shop";
+  if (asset == "Brownstone")
+    return "cy-pca/building-brownstone";
+  if (asset == "ModernOffice")
+    return "cy-pca/building-modern-office";
+  if (asset == "OakTree")
+    return "cy-pca/tree-oak";
+  if (asset == "YoungOakTree")
+    return "cy-pca/tree-young-oak";
+  if (asset == "PalmTree")
+    return "cy-pca/tree-palm";
+  if (asset == "ShippingContainer")
+    return "cy-pca/prop-shipping-container";
+  return std::string();
+}
+
 std::vector<world_theme> makeBuiltins() {
   auto bld = [](const char *asset, double w, double lo, double hi, int span = 1) {
     building_archetype_rule r;
     r.asset = asset;
+    r.package = builtinPackage(asset);
     r.weight = w;
     r.min_urbanity = lo;
     r.max_urbanity = hi;
@@ -87,6 +107,7 @@ std::vector<world_theme> makeBuiltins() {
   auto tree = [](const char *asset, double w, double smin, double smax, biome_rule b) {
     tree_archetype_rule r;
     r.asset = asset;
+    r.package = builtinPackage(asset);
     r.weight = w;
     r.min_scale = smin;
     r.max_scale = smax;
@@ -140,8 +161,26 @@ std::vector<world_theme> makeBuiltins() {
   t.tree_share = 0.75;
   t.trees = {tree("PalmTree", 1.0, 0.7, 1.3, warm), tree("OakTree", 0.15, 0.75, 1.1, hills)};
   v.push_back(t);
+
+  // The port: a lot by the water takes a container yard first (its weight against the town's),
+  // the town's streets behind it.
+  building_archetype_rule yard = bld("ShippingContainer", 4.0, 0.0, 1.0);
+  yard.layout = building_layout::yard;
+  yard.max_stack = 3;
+  yard.min_scale = yard.max_scale = 1.0; // containers come in one size
+  yard.max_water_m = 80.0;               // to the sea or a lake
+  t = world_theme();
+  t.name = "port_town";
+  t.description = "Container yards by the water, the coastal town behind; palms on the coast.";
+  t.buildings = town;
+  t.buildings.insert(t.buildings.begin(), yard);
+  t.building_share = 0.8;
+  t.trees = {tree("PalmTree", 1.0, 0.7, 1.25, coast), tree("OakTree", 0.8, 0.75, 1.2, inlandFar)};
+  v.push_back(t);
   return v;
 }
+
+const char *layoutName(building_layout l) { return l == building_layout::yard ? "yard" : "single"; }
 
 struct theme_registry {
   static constexpr const char *app_slot = "cvc.world.themes";
@@ -216,6 +255,23 @@ bool find_world_theme(cvc::app &app, const std::string &name, world_theme &out) 
   return false;
 }
 
+std::vector<theme_package> world_theme_packages(const world_theme &t) {
+  std::vector<theme_package> out;
+  auto add = [&](const std::string &asset, const std::string &package) {
+    if (package.empty())
+      return;
+    for (const theme_package &p : out)
+      if (p.asset == asset)
+        return;
+    out.push_back({asset, package});
+  };
+  for (const building_archetype_rule &b : t.buildings)
+    add(b.asset, b.package);
+  for (const tree_archetype_rule &r : t.trees)
+    add(r.asset, r.package);
+  return out;
+}
+
 std::string world_theme_json(const world_theme &t) {
   std::ostringstream o;
   o << "{\n  \"name\": " << quoted(t.name) << ",\n  \"description\": " << quoted(t.description)
@@ -223,17 +279,20 @@ std::string world_theme_json(const world_theme &t) {
   for (std::size_t i = 0; i < t.buildings.size(); ++i) {
     const building_archetype_rule &b = t.buildings[i];
     o << (i ? "," : "") << "\n    {\"asset\": " << quoted(b.asset)
-      << ", \"weight\": " << num(b.weight) << ", \"min_urbanity\": " << num(b.min_urbanity)
+      << ", \"package\": " << quoted(b.package) << ", \"weight\": " << num(b.weight)
+      << ", \"min_urbanity\": " << num(b.min_urbanity)
       << ", \"max_urbanity\": " << num(b.max_urbanity) << ", \"min_scale\": " << num(b.min_scale)
-      << ", \"max_scale\": " << num(b.max_scale) << ", \"span\": " << b.span << "}";
+      << ", \"max_scale\": " << num(b.max_scale) << ", \"span\": " << b.span
+      << ", \"max_water_m\": " << num(b.max_water_m) << ", \"layout\": \"" << layoutName(b.layout)
+      << "\", \"max_stack\": " << b.max_stack << "}";
   }
   o << "\n  ],\n  \"tree_share\": " << num(t.tree_share) << ",\n  \"trees\": [";
   for (std::size_t i = 0; i < t.trees.size(); ++i) {
     const tree_archetype_rule &r = t.trees[i];
     const biome_rule &b = r.biome;
     o << (i ? "," : "") << "\n    {\"asset\": " << quoted(r.asset)
-      << ", \"weight\": " << num(r.weight) << ", \"min_scale\": " << num(r.min_scale)
-      << ", \"max_scale\": " << num(r.max_scale)
+      << ", \"package\": " << quoted(r.package) << ", \"weight\": " << num(r.weight)
+      << ", \"min_scale\": " << num(r.min_scale) << ", \"max_scale\": " << num(r.max_scale)
       << ", \"biome\": {\"min_height_m\": " << num(b.min_height_m)
       << ", \"max_height_m\": " << num(b.max_height_m)
       << ", \"max_slope_deg\": " << num(b.max_slope_deg)
@@ -270,7 +329,16 @@ world_theme world_theme_from_json(const std::string &text, const std::string &wh
       b.min_scale = jnum(j, "min_scale", b.min_scale);
       b.max_scale = jnum(j, "max_scale", b.max_scale);
       b.span = j.get<int>("span", b.span);
+      b.package = j.get<std::string>("package", "");
+      b.max_water_m = jnum(j, "max_water_m", b.max_water_m);
+      const std::string layout = j.get<std::string>("layout", "single");
+      b.max_stack = j.get<int>("max_stack", b.max_stack);
       check(!b.asset.empty(), what, "a building archetype with no asset");
+      check(layout == "single" || layout == "yard", what,
+            "building '" + b.asset + "': layout is single or yard, not '" + layout + "'");
+      b.layout = layout == "yard" ? building_layout::yard : building_layout::single;
+      check(b.max_stack >= 1, what, "building '" + b.asset + "': max_stack under 1");
+      check(b.max_water_m >= 0.0, what, "building '" + b.asset + "': a negative max_water_m");
       check(b.weight >= 0.0, what, "building '" + b.asset + "': a negative weight");
       check(b.min_urbanity <= b.max_urbanity, what, "building '" + b.asset + "': urbanity band");
       check(b.min_scale > 0.0 && b.min_scale <= b.max_scale, what,
@@ -283,6 +351,7 @@ world_theme world_theme_from_json(const std::string &text, const std::string &wh
       const ptree &j = e.second;
       tree_archetype_rule r;
       r.asset = j.get<std::string>("asset", "");
+      r.package = j.get<std::string>("package", "");
       r.weight = jnum(j, "weight", r.weight);
       r.min_scale = jnum(j, "min_scale", r.min_scale);
       r.max_scale = jnum(j, "max_scale", r.max_scale);
@@ -316,8 +385,8 @@ building_pick pick_building(const world_theme &theme, const model_catalog &catal
     const building_archetype_rule &r = theme.buildings[i];
     model_asset a;
     if (r.weight <= 0.0 || r.span < lot.lots || lot.urbanity < r.min_urbanity ||
-        lot.urbanity > r.max_urbanity || !catalog.find(r.asset, a) || a.half_x <= 0.0 ||
-        a.half_y <= 0.0)
+        lot.urbanity > r.max_urbanity || lot.water_m > r.max_water_m || !catalog.find(r.asset, a) ||
+        a.half_x <= 0.0 || a.half_y <= 0.0)
       continue;
     const double s = std::min({r.max_scale, (0.5 * lot.frontage - margin) / a.half_x,
                                (lot.depth - 2.0 * margin) / (2.0 * a.half_y)});

@@ -379,6 +379,7 @@ scene:
       trees: 110
       rocks: 30
       buildings: 60
+      theme: temperate_town        # model shops, brownstones and oaks (none: the procedural ones)
       amp: 16                      # gentle hills
       water_level: -2              # just under the relief: grass, no lakes
       water: 0

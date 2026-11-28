@@ -41,6 +41,7 @@
 #include <cvc/world/building_archetypes.h>
 #include <cvc/world/city_bundle.h>
 #include <cvc/world/world_geometry.h>
+#include <cvc/world/world_theme.h> // world_theme_names: the panel's Theme options
 #include <exception>
 #include <map>
 #include <mutex>
@@ -163,6 +164,8 @@ world::generated_world_params generated_world_params_from(const SceneNode &n) {
   b.terrain_file = n.props.str("terrain_file", b.terrain_file);
   b.edge = std::max(0, world::world_edge_from_name(n.props.str("edge", "wall")));
   b.theme = n.props.str("theme", b.theme); // a world theme by name (world::find_world_theme)
+  if (b.theme == "none")
+    b.theme.clear();
   return b;
 }
 
@@ -260,6 +263,10 @@ GeneratedWorldKeys generated_world_keys(cvc::app &app, const SceneNode &n,
   write<std::string>(app, key("world.generators.terrain"),
                      joined(world::terrain_generator_names(app)));
   write<std::string>(app, key("world.generators.city"), joined(world::city_generator_names(app)));
+  // The themes, "none" (the plain world) first.
+  std::vector<std::string> themes = world::world_theme_names(app);
+  themes.insert(themes.begin(), "none");
+  write<std::string>(app, key("world.generators.theme"), joined(themes));
   return k;
 }
 
@@ -281,6 +288,8 @@ world::generated_world_params read_generated_world_params(cvc::app &app,
   p.city = read_or<std::string>(app, k.city, b.city);
   p.terrain_file = read_or<std::string>(app, k.terrain_file, b.terrain_file);
   p.theme = read_or<std::string>(app, k.theme, b.theme);
+  if (p.theme == "none") // the panel's name for no theme
+    p.theme.clear();
   p.edge = std::clamp(static_cast<int>(read_or<double>(app, k.edge, b.edge)), 0, 2);
   return p;
 }
@@ -347,6 +356,19 @@ void publish_generated_world_stats(cvc::app &app, const GeneratedWorldKeys &k,
   std::string status = w.params.terrain + " terrain, " + w.params.city + " city";
   if (w.building_count)
     status += w.archetypes ? ", Austin archetypes" : ", procedural buildings";
+  if (!w.models.empty()) { // the theme's models: "coastal_town: 12 buildings, 40 trees"
+    status += "; " + w.params.theme + ":";
+    const char *sep = " ";
+    auto add = [&](std::size_t n, const char *what) {
+      if (n) {
+        status += sep + std::to_string(n) + " " + what;
+        sep = ", ";
+      }
+    };
+    add(w.model_buildings, "buildings");
+    add(w.model_trees, "trees");
+    add(w.model_props, "yard props");
+  }
   write<std::string>(app, k.status, status);
 }
 

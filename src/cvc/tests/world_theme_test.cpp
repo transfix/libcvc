@@ -24,9 +24,12 @@
 // (the building and tree archetype draws, biome rules, JSON), and a themed generated world.
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <cvc/ariadne/data.h>
+#include <cvc/ariadne/world_model_packages.h>
 #include <cvc/core/app.h>
 #include <cvc/model/model.h>
 #include <cvc/model/model_file_io.h>
@@ -37,10 +40,12 @@
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
+#include <limits>
 #include <map>
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace cvc::world;
@@ -78,6 +83,7 @@ const real kReal[] = {
     {"OakTree", "tree", {-5.168, 0.0, -4.357}, {5.277, 10.0, 4.362}},
     {"YoungOakTree", "tree", {-4.591, 0.0, -2.853}, {4.6, 10.0, 2.909}},
     {"PalmTree", "tree", {-2.972, 0.0, -3.01}, {3.01, 8.0, 2.895}},
+    {"ShippingContainer", "prop", {-3.0303, 0.0, -1.2504}, {3.028, 2.6, 1.2472}},
 };
 
 void add_real(model_catalog &c) {
@@ -205,7 +211,10 @@ TEST(WorldModelAssets, ABadSidecarIsRefused) {
   EXPECT_THROW(parse_model_asset(sidecar("A", "spaceship", lo, hi), ""), std::runtime_error);
   EXPECT_THROW(parse_model_asset(sidecar("A", "tree", lo, hi, {0.0, 0.5, 0.2}), ""),
                std::runtime_error); // an error that falls down the ladder
-  EXPECT_THROW(parse_model_asset(sidecar("A", "tree", lo, hi, {0.1}), ""), std::runtime_error);
+  EXPECT_THROW(parse_model_asset(sidecar("A", "tree", lo, hi, {-0.1, 0.2}), ""),
+               std::runtime_error); // a negative error
+  // A ladder that starts above 0 (a web package, without the full model) is a ladder.
+  EXPECT_NO_THROW(parse_model_asset(sidecar("A", "tree", lo, hi, {0.1, 0.4}), ""));
   EXPECT_THROW(parse_model_asset(sidecar("A", "tree", lo, hi, {}), ""), std::runtime_error);
   const double flat[3] = {1, 2, 1};
   EXPECT_THROW(parse_model_asset(sidecar("A", "tree", flat, hi), ""), std::runtime_error);
@@ -280,7 +289,7 @@ TEST(WorldModelAssets, TheAppsCatalogTakesAssetsAddedToIt) {
 TEST(WorldTheme, TheBuiltInsAreTheAppsAndARegisteredThemeReplacesOrAdds) {
   cvc::app app;
   const std::vector<std::string> names = world_theme_names(app);
-  for (const char *n : {"temperate_town", "coastal_town", "tropical"})
+  for (const char *n : {"temperate_town", "coastal_town", "tropical", "port_town"})
     EXPECT_NE(std::find(names.begin(), names.end(), n), names.end()) << n;
   world_theme t;
   ASSERT_TRUE(find_world_theme(app, "coastal_town", t));
@@ -611,4 +620,198 @@ TEST(WorldThemedGeneration, ABundleCarriesTheModels) {
   // A world with no models writes no models.json.
   const generated_world plain = generate_world(app, themed_world(""));
   EXPECT_EQ(generated_world_bundle(app, plain, "test").count("models.json"), 0u);
+}
+
+// ── the port: container yards by the water ──────────────────────────────────────────────────────
+
+TEST(WorldTheme, APortsYardsKeepToTheWater) {
+  model_catalog c;
+  add_real(c);
+  const world_theme t = builtin("port_town");
+  ASSERT_FALSE(t.buildings.empty());
+  ASSERT_EQ(t.buildings.front().layout, building_layout::yard);
+  ASSERT_EQ(t.buildings.front().asset, "ShippingContainer");
+  lot_view nearLot;
+  nearLot.frontage = 20.0;
+  nearLot.depth = 30.0;
+  nearLot.urbanity = 0.5;
+  nearLot.water_m = 40.0;
+  lot_view farLot = nearLot;
+  farLot.water_m = 500.0;
+  int nearYards = 0, farYards = 0, farTown = 0;
+  for (int i = 0; i < 200; ++i) {
+    nearLot.x = farLot.x = 37.0 * i;
+    nearLot.y = farLot.y = 11.0 * i;
+    const building_pick a = pick_building(t, c, nearLot, 7), b = pick_building(t, c, farLot, 7);
+    nearYards += a.archetype == 0;
+    farYards += b.archetype == 0;
+    farTown += b.archetype > 0;
+    if (a.archetype == 0)
+      EXPECT_DOUBLE_EQ(a.scale, 1.0); // containers come in one size
+  }
+  EXPECT_GT(nearYards, 50) << "a lot by the water mostly takes a yard";
+  EXPECT_EQ(farYards, 0) << "never a yard out of the water's reach";
+  EXPECT_GT(farTown, 50) << "the town's buildings there instead";
+}
+
+TEST(WorldTheme, AYardAndThePackagesRoundTripThroughJson) {
+  const world_theme t = builtin("port_town");
+  const world_theme u = world_theme_from_json(world_theme_json(t));
+  ASSERT_EQ(u.buildings.size(), t.buildings.size());
+  for (std::size_t i = 0; i < t.buildings.size(); ++i) {
+    EXPECT_EQ(u.buildings[i].package, t.buildings[i].package);
+    EXPECT_EQ(u.buildings[i].layout, t.buildings[i].layout);
+    EXPECT_EQ(u.buildings[i].max_stack, t.buildings[i].max_stack);
+    EXPECT_EQ(u.buildings[i].max_water_m, t.buildings[i].max_water_m); // infinity too
+  }
+  ASSERT_EQ(u.trees.size(), t.trees.size());
+  for (std::size_t i = 0; i < t.trees.size(); ++i)
+    EXPECT_EQ(u.trees[i].package, t.trees[i].package);
+  const world_theme d = world_theme_from_json("{\"buildings\": [{\"asset\": \"B\"}]}");
+  EXPECT_EQ(d.buildings[0].layout, building_layout::single);
+  EXPECT_EQ(d.buildings[0].max_stack, 1);
+  EXPECT_TRUE(d.buildings[0].package.empty());
+  EXPECT_TRUE(std::isinf(d.buildings[0].max_water_m));
+  for (const char *bad : {"{\"buildings\": [{\"asset\": \"B\", \"layout\": \"heap\"}]}",
+                          "{\"buildings\": [{\"asset\": \"B\", \"max_stack\": 0}]}",
+                          "{\"buildings\": [{\"asset\": \"B\", \"max_water_m\": -1}]}"})
+    EXPECT_THROW(world_theme_from_json(bad), std::runtime_error) << bad;
+}
+
+TEST(WorldTheme, EveryBuiltInNamesItsPackagesOnce) {
+  for (const world_theme &t : builtin_world_themes()) {
+    std::set<std::string> assets;
+    for (const theme_package &p : world_theme_packages(t)) {
+      EXPECT_TRUE(assets.insert(p.asset).second) << t.name << ": " << p.asset << " twice";
+      EXPECT_EQ(p.package.rfind("cy-pca/", 0), 0u) << p.package;
+    }
+    for (const building_archetype_rule &b : t.buildings)
+      EXPECT_EQ(assets.count(b.asset), 1u) << t.name << ": " << b.asset;
+    for (const tree_archetype_rule &r : t.trees)
+      EXPECT_EQ(assets.count(r.asset), 1u) << t.name << ": " << r.asset;
+  }
+#ifndef __EMSCRIPTEN__
+  EXPECT_EQ(cvc::ariadne::model_package_uri("cy-pca/tree-palm"), "cvcpkg://cy-pca/tree-palm");
+#endif
+  for (const char *uri : {"https://example.org/p.tar.gz", "/srv/models", "C:/models", ""})
+    EXPECT_EQ(cvc::ariadne::model_package_uri(uri), uri);
+}
+
+TEST(WorldThemedGeneration, APortTownStacksContainerYardsByTheWater) {
+  cvc::app app;
+  model_catalog_of(app).clear();
+  add_real(model_catalog_of(app));
+  const generated_world w = generate_world(app, themed_world("port_town"));
+  ASSERT_GT(w.model_props, 0u) << "a shore-edged port has yards";
+  EXPECT_EQ(w.model_buildings + w.model_trees + w.model_props, w.models.size());
+  // The sea's and the lakes' samples (not the ponds'), to measure each container's reach.
+  std::vector<std::pair<double, double>> wet;
+  const water_bodies &wb = w.water;
+  for (int r = 0; r < wb.grid.rows; ++r)
+    for (int c = 0; c < wb.grid.cols; ++c) {
+      const int b = wb.body[wb.index(r, c)];
+      if (b >= 0 && wb.bodies[b].kind != water_kind::pond)
+        wet.emplace_back(wb.grid.min_x + c * wb.grid.cell_w(),
+                         wb.grid.min_y + r * wb.grid.cell_h());
+    }
+  ASSERT_FALSE(wet.empty());
+  std::vector<const generated_world::model_instance *> boxes;
+  for (const generated_world::model_instance &m : w.models)
+    if (w.model_assets[m.asset].kind == model_kind::prop)
+      boxes.push_back(&m);
+  ASSERT_EQ(boxes.size(), w.model_props);
+  const double h = 2.6; // the container's height
+  std::map<std::pair<long, long>, std::vector<double>> stacks;
+  for (const generated_world::model_instance *m : boxes) {
+    EXPECT_EQ(w.model_assets[m->asset].name, "ShippingContainer");
+    double reach = std::numeric_limits<double>::infinity();
+    for (const auto &p : wet)
+      reach = std::min(reach, std::hypot(p.first - m->x, p.second - m->y));
+    // Its lot's centre within 80 m of the sea or a lake (plus the lot's half diagonal, cells).
+    EXPECT_LE(reach, 80.0 + 25.0 + 4.0 * std::max(w.grid.cell_w(), wb.grid.cell_w()));
+    stacks[{std::lround(m->x * 10.0), std::lround(m->y * 10.0)}].push_back(m->z);
+  }
+  for (auto &[at, zs] : stacks) {
+    std::sort(zs.begin(), zs.end());
+    EXPECT_LE(zs.size(), 3u) << "stacked at most three high";
+    for (std::size_t k = 1; k < zs.size(); ++k)
+      EXPECT_NEAR(zs[k] - zs[k - 1], h, 1e-6) << "each on the one below";
+    EXPECT_GE(zs.front(), w.height(at.first / 10.0, at.second / 10.0) - 1.5) << "not buried";
+  }
+  // Two containers on one level never overlap: their centres are at least a width apart.
+  for (std::size_t i = 0; i < boxes.size(); ++i)
+    for (std::size_t j = i + 1; j < boxes.size(); ++j)
+      if (std::fabs(boxes[i]->z - boxes[j]->z) < 0.1)
+        EXPECT_GE(std::hypot(boxes[i]->x - boxes[j]->x, boxes[i]->y - boxes[j]->y), 2.45);
+  // The containers collide, a box each, with the model buildings.
+  for (const geometry_item &it : w.geometry().items())
+    if (it.name == "model_buildings")
+      EXPECT_EQ(it.geometry->num_tris(), 12u * (w.model_buildings + w.model_props));
+  // A bundle keeps the count.
+  const city_bundle_files files = generated_world_bundle(app, w, "test");
+  const city_bundle b = load_city_bundle(app, city_bundle_memory_reader(files), "port");
+  const bundle_world bw = world_from_bundle(app, b, city_bundle_memory_reader(files));
+  ASSERT_TRUE(bw.world);
+  EXPECT_EQ(bw.world->model_props, w.model_props);
+}
+
+// ── fetching a theme's packages ─────────────────────────────────────────────────────────────────
+
+namespace {
+// Poll a fetch until its loads end (at most 20 s).
+bool finish(cvc::ariadne::model_package_fetch &f) {
+  const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+  while (!f.poll()) {
+    if (std::chrono::steady_clock::now() > until)
+      return false;
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  return true;
+}
+} // namespace
+
+TEST(WorldModelPackages, AThemesMissingPackageIsFetchedIntoTheCatalog) {
+  cvc::app app;
+  model_catalog &catalog = model_catalog_of(app);
+  catalog.clear();
+  const fs::path dir = temp_dir("fetch");
+  const double lo[3] = {-1.0, 0.0, -1.5}, hi[3] = {1.0, 3.0, 1.5};
+  write_file(dir / "Shed.asset.json", sidecar("Shed", "building", lo, hi, {0.0}));
+  const std::vector<unsigned char> glb = one_triangle_glb();
+  write_file(dir / "Shed.glb", std::string(glb.begin(), glb.end()));
+  // Installed already: never fetched.
+  catalog.add(parse_model_asset(sidecar("Here", "tree", lo, hi, {0.0}), dir.string()));
+
+  world_theme t;
+  t.name = "sheds";
+  t.buildings.resize(2);
+  t.buildings[0].asset = "Shed";
+  t.buildings[0].package = dir.generic_string(); // a directory: its files, as a data entry's
+  t.buildings[1].asset = "Gone";
+  t.buildings[1].package = (dir / "nowhere").generic_string();
+  t.trees.resize(1);
+  t.trees[0].asset = "Here";
+  t.trees[0].package = "cy-pca/here";
+  cvc::ariadne::model_package_fetch f(app, t);
+  EXPECT_EQ(f.pending(), 2u) << "the shed's and the missing one's, not the installed tree's";
+  ASSERT_TRUE(finish(f));
+  EXPECT_EQ(f.fetched(), 1u);
+  model_asset a;
+  ASSERT_TRUE(catalog.find("Shed", a));
+  EXPECT_FALSE(a.data_node.empty());
+  EXPECT_TRUE(a.dir.empty());
+  EXPECT_TRUE(cvc::ariadne::data_file(app, a.data_node, "Shed.glb"));
+  EXPECT_EQ(model_asset_json(a).find("data_node"), std::string::npos) << "not in the sidecar";
+  EXPECT_FALSE(catalog.contains("Gone"));
+  ASSERT_EQ(f.errors().size(), 1u);
+  EXPECT_NE(f.errors()[0].find("nowhere"), std::string::npos) << f.errors()[0];
+
+  // The world builds with the fetched asset.
+  register_world_theme(app, t);
+  const generated_world w = generate_world(app, themed_world("sheds"));
+  EXPECT_GT(w.model_buildings, 0u);
+  bool shed = false;
+  for (const model_asset &m : w.model_assets)
+    shed = shed || (m.name == "Shed" && !m.data_node.empty());
+  EXPECT_TRUE(shed);
 }

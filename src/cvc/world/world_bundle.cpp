@@ -857,6 +857,7 @@ std::string models_json(const generated_world &w) {
   rows += w.models.empty() ? "]" : "\n  ]";
   return jobj({{"buildings", juint(w.model_buildings)},
                {"trees", juint(w.model_trees)},
+               {"props", juint(w.model_props)},
                {"fields",
                 jarr({jstr("asset"), jstr("x"), jstr("y"), jstr("z"), jstr("yaw"), jstr("scale")})},
                {"assets", assets},
@@ -869,6 +870,7 @@ void read_models(const std::string &text, generated_world &w) {
   const ptree j = parse_json(text, "models.json");
   w.model_buildings = j.get<std::size_t>("buildings", 0);
   w.model_trees = j.get<std::size_t>("trees", 0);
+  w.model_props = j.get<std::size_t>("props", 0);
   if (const auto as = j.get_child_optional("assets"))
     for (const auto &e : *as) {
       std::ostringstream o;

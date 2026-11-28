@@ -48,6 +48,7 @@
 #include <cvc/ariadne/shown_clock.h>   // the time the scene is drawn at (OW5q)
 #include <cvc/ariadne/uri.h>
 #include <cvc/ariadne/value.h>
+#include <cvc/ariadne/world_model_packages.h> // a themed world's packages, fetched
 #include <cvc/core/app.h>
 #include <cvc/core/sliced_task.h>
 #include <cvc/core/types.h> // CVC_VERSION_STRING
@@ -70,6 +71,7 @@
 #include <cvc/world/building_archetypes.h>
 #include <cvc/world/city_bundle.h>
 #include <cvc/world/generated_world.h>
+#include <cvc/world/world_theme.h> // find_world_theme: a rebuild's theme, for its packages
 #include <functional>
 #include <map>
 #include <memory>
@@ -155,6 +157,9 @@ struct WorldRT {
   ari::GeneratedWorldKeys k;
   ari::GeneratedWorldRelay relay;     // GB5: the relay's world, while joined to one that runs it
   world::generated_world_params base; // the authored props
+  // The first world is built at once from what is installed; a themed one's missing packages are
+  // fetched meanwhile, and once any arrive the world regenerates with them (one rebuild).
+  std::unique_ptr<ari::model_package_fetch> fetch;
   std::string base_dir;               // the document's, for a relative terrain_file
   const world::building_library *library = nullptr;
   std::shared_ptr<world::generated_world> w; // the world shown
@@ -1003,6 +1008,16 @@ void swap_world(WorldRT &rt) {
   } else { // a data node's world: drawn
     ari::write<std::string>(*rt.app, rt.k.status, std::string());
   }
+  // A theme's package that could not be fetched, or a model that did not read: the world is built
+  // without it, and the status says so.
+  if (!in.job->model_errors.empty()) {
+    for (const std::string &e : in.job->model_errors)
+      std::fprintf(stderr, "ari: generated_world '%s': models: %s\n", id.c_str(), e.c_str());
+    const std::size_t more = in.job->model_errors.size() - 1;
+    ari::write<std::string>(*rt.app, rt.k.status,
+                            "models: " + in.job->model_errors.front() +
+                                (more ? " (and " + std::to_string(more) + " more)" : ""));
+  }
   publish_stats(rt);
   sg.invalidateShadowBake();
 }
@@ -1128,8 +1143,14 @@ public:
   WorldTask(cvc::app &app, std::shared_ptr<WorldJob> job, const world::generated_world_params &p,
             const world::building_library *library, std::shared_ptr<ari::ResolvedFile> file,
             int texture_size)
-      : _app(&app), _job(std::move(job)), _file(std::move(file)), _size(texture_size) {
-    if (_job->rebuild)
+      : _app(&app), _job(std::move(job)), _file(std::move(file)), _size(texture_size), _params(p),
+        _library(library) {
+    // A themed world's packages that are not installed are fetched first (a browser has none),
+    // then the builder starts with them in the catalog.
+    world::world_theme theme;
+    if (_job->rebuild && !p.theme.empty() && world::find_world_theme(app, p.theme, theme))
+      _fetch = std::make_unique<ari::model_package_fetch>(app, theme);
+    if (_job->rebuild && !_fetch)
       _builder = std::make_unique<world::world_builder>(app, p, library);
     _bundled = !_job->rebuild;
   }
@@ -1138,6 +1159,16 @@ public:
     if (done())
       return true;
     try {
+      if (_fetch) {
+        set("models", 0.0);
+        if (!_fetch->poll())
+          return done();
+        for (const std::string &e : _fetch->errors())
+          _job->model_errors.push_back(e);
+        _fetch.reset();
+        _builder = std::make_unique<world::world_builder>(*_app, _params, _library);
+        return done();
+      }
       if (_builder) {
         _builder->step(budget);
         set(_builder->phase(), kBuildShare * _builder->progress());
@@ -1229,6 +1260,9 @@ private:
   std::shared_ptr<ari::ResolvedFile> _file;
   int _size;
   bool _bundled = true, _painted = false;
+  world::generated_world_params _params;
+  const world::building_library *_library = nullptr;
+  std::unique_ptr<ari::model_package_fetch> _fetch; // a themed rebuild's packages, first
   std::unique_ptr<world::world_builder> _builder;
   std::unique_ptr<world::surface_painter> _painter;
   std::atomic<const char *> _phase{"terrain"};
@@ -1333,6 +1367,15 @@ constexpr double kInstallBudgetMs = 6.0;
 void tick_world(WorldRT &rt, vtkRenderer *ren) {
   if (rt.terrain.expired())
     return;
+  // The first world's theme packages: once their loads end, a world with the fetched models.
+  if (rt.fetch && rt.fetch->poll()) {
+    for (const std::string &e : rt.fetch->errors())
+      std::fprintf(stderr, "ari: generated_world '%s': models: %s\n", rt.id.c_str(), e.c_str());
+    const bool got = rt.fetch->fetched() > 0;
+    rt.fetch.reset();
+    if (got)
+      ari::write<std::string>(*rt.app, rt.k.request, "regenerate");
+  }
   // The meshes and the water beside the node follow its visibility, so a `visible:` on the node
   // hides (and shows) the whole world, not only the ground it draws itself. Each follows a change
   // of the node's, as a child follows its parent's (SceneNode::propagateVisible).
@@ -1422,6 +1465,14 @@ std::shared_ptr<GraphicsNode> realize_generated_world(SceneGraph &sg, const ari:
   rt->color = int(ari::read_or<double>(app, rt->k.color, rt->color));
   rt->w = ari::first_generated_world(app, rt->k, n, p0, rt->library, warnings);
   rt->sig = ari::generated_world_signature(p0);
+  {
+    world::world_theme theme;
+    if (!p0.theme.empty() && world::find_world_theme(app, p0.theme, theme)) {
+      auto fetch = std::make_unique<ari::model_package_fetch>(app, theme);
+      if (fetch->pending())
+        rt->fetch = std::move(fetch);
+    }
+  }
 
   // The node is the terrain; its height_field is what `ground: <id>` and a body stand on. It draws
   // through its chunks (make_chunk): its own mesh stays empty, and it holds their texture.

@@ -23,6 +23,7 @@
 // world_models.cpp — see world_models.h.
 
 #include <cmath>
+#include <cvc/ariadne/data.h>
 #include <cvc/core/app.h>
 #include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/LodGraphicsNode.h>
@@ -94,7 +95,19 @@ cvc::geometry model_frame_to_world(cvc::geometry g) {
 std::shared_ptr<model_mesh> load_model_mesh(cvc::app &app, const cvc::world::model_asset &asset,
                                             std::string *error) {
   const cvc::world::model_asset a = located(app, asset);
-  const std::string key = a.path(0);
+  // A fetched asset's files are in its dataset's store node; an installed one's on disk.
+  const bool fetched = !a.data_node.empty();
+  const std::string key =
+      fetched && !a.lods.empty() ? a.data_node + "/" + a.lods[0].file : a.path(0);
+  auto read_rung = [&](std::size_t k) {
+    if (!fetched)
+      return cvc::read_model(app, a.path(int(k)));
+    const cvc::ariadne::DataBytes bytes = cvc::ariadne::data_file(app, a.data_node, a.lods[k].file);
+    if (!bytes)
+      throw std::runtime_error("not in its package");
+    return cvc::read_model_from_memory(app, bytes->data(), bytes->size(),
+                                       std::filesystem::path(a.lods[k].file).extension().string());
+  };
   if (key.empty()) {
     if (error)
       *error = "model '" + a.name + "' has no LODs";
@@ -110,7 +123,7 @@ std::shared_ptr<model_mesh> load_model_mesh(cvc::app &app, const cvc::world::mod
   mesh->name = a.name;
   for (std::size_t k = 0; k < a.lods.size(); ++k) {
     try {
-      cvc::model m = cvc::read_model(app, a.path(int(k)));
+      cvc::model m = read_rung(k);
       cvc::geometry geo = model_frame_to_world(m.merged());
       if (geo.num_tris() == 0)
         throw std::runtime_error("it has no triangles");
@@ -123,12 +136,14 @@ std::shared_ptr<model_mesh> load_model_mesh(cvc::app &app, const cvc::world::mod
           break;
         }
       mesh->pyr.rungs.push_back(std::move(geo));
-      mesh->pyr.world_error_m.push_back(k == 0 ? 0.0 : a.lods[k].world_error_m);
+      // The sidecar's errors as they are: a package without the full model (a web one) starts its
+      // ladder at a coarser rung, whose error is not 0.
+      mesh->pyr.world_error_m.push_back(a.lods[k].world_error_m);
       mesh->textures.push_back(std::move(tex));
     } catch (const std::exception &e) {
       if (k == 0) {
         if (error)
-          *error = "model '" + a.name + "': " + a.path(0) + ": " + e.what();
+          *error = "model '" + a.name + "': " + key + ": " + e.what();
         return nullptr;
       }
       break; // the ladder ends at the last rung that reads

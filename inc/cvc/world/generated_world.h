@@ -279,9 +279,10 @@ struct generated_world {
 
   // The theme's models (generated_world_params::theme): the assets they draw, and each placed
   // copy. Not merged into any mesh above: a renderer draws each instance from its asset's own LOD
-  // ladder (model_asset::lods), textured. The buildings among them collide (geometry() adds a box
-  // per building, role_collide); the trees are drawn only, like the props. The city's
-  // building_count counts the model buildings too.
+  // ladder (model_asset::lods), textured. The buildings and props among them collide (geometry()
+  // adds a box per building and per prop, role_collide: a yard's containers one each); the trees
+  // are drawn only, like the scatter's props. The city's building_count counts the model buildings
+  // too, and each yard as one.
   struct model_instance {
     int asset = -1;             // index into model_assets
     double x = 0, y = 0, z = 0; // where the model's origin (its bottom centre) stands
@@ -291,6 +292,7 @@ struct generated_world {
   std::vector<model_asset> model_assets;
   std::vector<model_instance> models;
   std::size_t model_buildings = 0, model_trees = 0;
+  std::size_t model_props = 0; // a yard's models (a port's containers)
   double road_length = 0.0;  // the street network's total length (metres)
   std::size_t districts = 0; // how many district cores the city grew from
 

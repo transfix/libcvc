@@ -31,10 +31,12 @@
 //
 // Headless: a bare scene graph, nothing rendered. NOT assert() (Release builds drop it).
 
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <cvc/ariadne/world_model_packages.h>
 #include <cvc/core/app.h>
 #include <cvc/gl/GeometryNode.h>
 #include <cvc/gl/LodGraphicsNode.h>
@@ -42,9 +44,11 @@
 #include <cvc/gl/ariadne/world_models.h>
 #include <cvc/lod/select.h>
 #include <cvc/world/model_assets.h>
+#include <cvc/world/world_theme.h>
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <thread>
 #include <vector>
 #include <vtkNew.h>
 #include <vtkRenderer.h>
@@ -251,6 +255,56 @@ void test_instances(cvc::app &app) {
   fs::remove_all(d, ec);
 }
 
+// A fetched package (a web edition: its ladder starts at a coarser rung): the theme's package is a
+// directory, loaded into the data store; the loader reads its rungs from memory, with the
+// sidecar's errors, the top one too.
+void test_fetched(cvc::app &app) {
+  std::printf("fetched\n");
+  const fs::path d = fs::temp_directory_path() / "cvcgl_world_models_web";
+  std::error_code ec;
+  fs::remove_all(d, ec);
+  fs::create_directories(d);
+  write_box_glb(d / "WebBox.lod1.glb", 12);
+  write_box_glb(d / "WebBox.lod2.glb", 2);
+  std::ofstream(d / "WebBox.asset.json")
+      << "{\"schema\": \"cvc-model-asset/1\", \"name\": \"WebBox\", \"kind\": \"building\","
+         " \"bounds\": {\"min\": [-0.5, 0, -0.5], \"max\": [0.5, 1, 0.5]}, \"lods\": ["
+         "{\"file\": \"WebBox.lod1.glb\", \"triangles\": 12, \"world_error_m\": 0.05},"
+         "{\"file\": \"WebBox.lod2.glb\", \"triangles\": 2, \"world_error_m\": 0.5}]}";
+  cvc::world::world_theme t;
+  t.name = "web";
+  t.buildings.resize(1);
+  t.buildings[0].asset = "WebBox";
+  t.buildings[0].package = d.generic_string();
+  cvc::ariadne::model_package_fetch f(app, t);
+  CHECK(f.pending() == 1);
+  const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+  while (!f.poll() && std::chrono::steady_clock::now() < until)
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  for (const std::string &e : f.errors())
+    std::printf("  fetch: %s\n", e.c_str());
+  CHECK(f.pending() == 0 && f.fetched() == 1);
+  fs::remove_all(d, ec); // the files are in the data store now: nothing is read from disk
+  cvc::world::model_asset a;
+  CHECK(cvc::world::model_catalog_of(app).find("WebBox", a));
+  CHECK(!a.data_node.empty());
+  std::string why;
+  std::shared_ptr<gla::model_mesh> mesh = gla::load_model_mesh(app, a, &why);
+  if (!mesh && why.find("handler") != std::string::npos) {
+    std::printf("  SKIP: no glb reader in this build (%s)\n", why.c_str());
+    return;
+  }
+  CHECK(mesh != nullptr);
+  if (!mesh)
+    return;
+  CHECK(mesh->pyr.rungs.size() == 2);
+  CHECK(mesh->pyr.world_error_m.size() == 2 && mesh->pyr.world_error_m[0] == 0.05 &&
+        mesh->pyr.world_error_m[1] == 0.5);
+  if (mesh->pyr.rungs.size() == 2)
+    CHECK(mesh->pyr.rungs[0].num_tris() == 12 && mesh->pyr.rungs[1].num_tris() == 2);
+  CHECK(gla::load_model_mesh(app, a) == mesh); // cached by its store node and file
+}
+
 } // namespace
 
 int main() {
@@ -259,6 +313,7 @@ int main() {
   test_frames(app);
   test_loading(app);
   test_instances(app);
+  test_fetched(app);
   std::printf("%s: cvcgl_world_models (%d check%s failed)\n", g_failures == 0 ? "PASS" : "FAIL",
               g_failures, g_failures == 1 ? "" : "s");
   return g_failures == 0 ? 0 : 1;

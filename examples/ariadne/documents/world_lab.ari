@@ -149,6 +149,7 @@ scene:
       trees: 60
       rocks: 20
       buildings: 24
+      theme: temperate_town   # model shops, brownstones and oaks (none: the procedural ones)
       body: {}
     - node: hill
       world: terrain

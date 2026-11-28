@@ -409,14 +409,48 @@ int modelAssetIndex(generated_world &w, const model_asset &a) {
 }
 
 // The distance from each raster cell to the nearest water (its ground under the water level), in
-// metres, row-major over w.grid; empty for a raster with no cells.
-std::vector<double> waterDistance(const generated_world &w) {
+// metres, row-major over w.grid; empty for a raster with no cells. With min_body_m2, only the sea
+// (water touching the raster's edge) and enclosed bodies of at least that area count: a port's
+// lots measure to the sea or a lake, not a pond.
+std::vector<double> waterDistance(const generated_world &w, double min_body_m2 = 0.0) {
   const raster_out &ro = w.raster;
   if (ro.rows <= 0 || ro.cols <= 0 || ro.height.size() != std::size_t(ro.rows) * ro.cols)
     return {};
   std::vector<std::uint8_t> wet(ro.height.size());
   for (std::size_t i = 0; i < wet.size(); ++i)
     wet[i] = ro.height[i] < w.params.water_level_m ? 1 : 0;
+  if (min_body_m2 > 0.0) { // drop the small enclosed bodies (4-connected runs of wet cells)
+    const double cellArea = w.grid.cell_w() * w.grid.cell_h();
+    std::vector<std::uint8_t> seen(wet.size(), 0);
+    std::vector<std::size_t> run, stack;
+    for (std::size_t s = 0; s < wet.size(); ++s) {
+      if (!wet[s] || seen[s])
+        continue;
+      run.clear();
+      stack.assign(1, s);
+      seen[s] = 1;
+      bool edge = false;
+      while (!stack.empty()) {
+        const std::size_t i = stack.back();
+        stack.pop_back();
+        run.push_back(i);
+        const int r = int(i / ro.cols), c = int(i % ro.cols);
+        edge = edge || r == 0 || c == 0 || r == ro.rows - 1 || c == ro.cols - 1;
+        const int nr[4] = {r - 1, r + 1, r, r}, nc[4] = {c, c, c - 1, c + 1};
+        for (int k = 0; k < 4; ++k)
+          if (nr[k] >= 0 && nr[k] < ro.rows && nc[k] >= 0 && nc[k] < ro.cols) {
+            const std::size_t j = std::size_t(nr[k]) * ro.cols + nc[k];
+            if (wet[j] && !seen[j]) {
+              seen[j] = 1;
+              stack.push_back(j);
+            }
+          }
+      }
+      if (!edge && double(run.size()) * cellArea < min_body_m2)
+        for (std::size_t i : run)
+          wet[i] = 0;
+    }
+  }
   std::vector<double> d = cvc::algo::edt2_squared(wet.data(), ro.rows, ro.cols);
   const double cell = w.grid.cell_w();
   for (double &v : d)
@@ -926,10 +960,86 @@ Footprint massLot(const lot &L, std::uint64_t seed, const surface_registry &reg,
 // buried; a site whose ground falls more than kModelRelief keeps the massing. Records the instance,
 // its plinth (in `out`, with the massing) and its footprint; false leaves the lot to the massing.
 constexpr double kModelRelief = 6.0;
+
+// A yard of `a` on the site: the models' long sides across the street (local +Y), in columns
+// along the frontage and rows back from the setback line, a 4 m aisle after every second row,
+// each spot a stack 1 to rule.max_stack high or (one in eight) empty, its doors drawn front or
+// back. All of it stands on the site's highest ground, a concrete pad down to its lowest. Records
+// the instances (model_props) and the yard's footprint; false when not one model fits.
+bool placeYard(const building_archetype_rule &rule, const model_asset &a, double sc,
+               const lot &site, std::uint64_t seed, const surface_registry &reg, generated_world &w,
+               cvc::geometry &out, FootprintIndex &fps) {
+  using lsys::stream;
+  const double len = 2.0 * a.half_x * sc, wid = 2.0 * a.half_y * sc; // the model's long side, short
+  const double margin = 1.0, gapCol = 0.3, gapRow = 0.8, aisle = 4.0;
+  const double spanX = site.frontage - 2.0 * margin, spanY = site.depth - 2.0 * margin;
+  const int cols = int(std::floor((spanX + gapCol) / (wid + gapCol)));
+  if (cols < 1 || spanY < len)
+    return false;
+  // Rows from the front back: two, an aisle, two, ... while they fit.
+  std::vector<double> rows; // each row's centre, local y
+  for (double y = 0.5 * site.depth - margin;;) {
+    if (y - len < -0.5 * site.depth + margin - 1e-9)
+      break;
+    rows.push_back(y - 0.5 * len);
+    y -= len + ((rows.size() % 2) ? gapRow : aisle);
+  }
+  const double usedX = cols * wid + (cols - 1) * gapCol;
+  const double yc = std::cos(site.yaw), ys = std::sin(site.yaw);
+  const double base = site.has_ground ? site.ground_max : 0.0;
+  const int asset = modelAssetIndex(w, a);
+  const double kHalfPi = 1.5707963267948966;
+  std::size_t placed = 0;
+  for (std::size_t r = 0; r < rows.size(); ++r)
+    for (int c = 0; c < cols; ++c) {
+      const double lx = -0.5 * usedX + 0.5 * wid + c * (wid + gapCol), ly = rows[r];
+      const double gx = site.x + lx * yc - ly * ys, gy = site.y + lx * ys + ly * yc;
+      const std::uint64_t el =
+          lsys::cell_id(std::int32_t(std::lround(gx * 4.0)), std::int32_t(std::lround(gy * 4.0)));
+      const double u = lsys::uni(seed, stream::theme, el, 20);
+      if (u < 0.125)
+        continue; // an empty spot
+      const int high =
+          1 + int(std::min(double(rule.max_stack - 1),
+                           std::floor(lsys::uni(seed, stream::theme, el, 21) * rule.max_stack)));
+      // The model's long side (its x) along the lot's local y: a quarter turn, or three.
+      const double yaw =
+          site.yaw + (lsys::uni(seed, stream::theme, el, 22) < 0.5 ? kHalfPi : -kHalfPi);
+      const double mc = std::cos(yaw), ms = std::sin(yaw);
+      for (int k = 0; k < high; ++k) {
+        generated_world::model_instance m;
+        m.asset = asset;
+        m.x = gx - (a.centre_x * mc - a.centre_y * ms) * sc;
+        m.y = gy - (a.centre_x * ms + a.centre_y * mc) * sc;
+        m.z = base + k * a.height * sc - a.base_z * sc;
+        m.yaw = yaw;
+        m.scale = sc;
+        w.models.push_back(m);
+        ++placed;
+      }
+    }
+  if (placed == 0)
+    return false;
+  w.model_props += placed;
+  const double padX = 0.5 * site.frontage - 0.5, padY = 0.5 * site.depth - 0.5;
+  if (site.has_ground && site.ground_max - site.ground_min > 0.05) {
+    auto to = [&](double lx, double ly, double z) {
+      return Vec3d{site.x + lx * yc - ly * ys, site.y + lx * ys + ly * yc, z};
+    };
+    cvc::geometry::color_t pad = roleColor(reg, lsys::role::wall_concrete);
+    for (double &ch : pad)
+      ch *= 0.85;
+    appendMass(out, to, 0.0, 0.0, padX, padY, site.ground_min - 0.5, base, 0.0, pad, pad);
+  }
+  fps.add(Footprint{site.x, site.y, yc, ys, padX + 1.0, padY + 1.0});
+  return true;
+}
+
 bool placeModelBuilding(const world_theme &theme, const model_catalog &catalog,
                         const std::vector<lot> &ordered, std::vector<char> &used, std::size_t i,
                         std::uint64_t seed, const surface_registry &reg, generated_world &w,
-                        cvc::geometry &out, FootprintIndex &fps) {
+                        cvc::geometry &out, FootprintIndex &fps,
+                        const std::function<double(double, double)> &waterAt) {
   const lot &L = ordered[i];
   auto relief = [](const lot &a) { return a.has_ground ? a.ground_max - a.ground_min : 0.0; };
   // The lot alone.
@@ -939,6 +1049,8 @@ bool placeModelBuilding(const world_theme &theme, const model_catalog &catalog,
   v1.frontage = L.frontage;
   v1.depth = L.depth;
   v1.urbanity = L.urbanity;
+  if (waterAt)
+    v1.water_m = waterAt(L.x, L.y);
   const building_pick one =
       relief(L) <= kModelRelief ? pick_building(theme, catalog, v1, seed) : building_pick();
   // The lot and its neighbour, for the archetypes that span two.
@@ -980,6 +1092,8 @@ bool placeModelBuilding(const world_theme &theme, const model_catalog &catalog,
         v2.depth = pair.depth;
         v2.urbanity = pair.urbanity;
         v2.lots = 2;
+        if (waterAt)
+          v2.water_m = waterAt(pair.x, pair.y);
         two = pick_building(theme, catalog, v2, seed);
       }
     }
@@ -997,8 +1111,16 @@ bool placeModelBuilding(const world_theme &theme, const model_catalog &catalog,
   const building_pick pick = spans ? two : one;
   const lot &site = spans ? pair : L;
   model_asset a;
-  if (!catalog.find(theme.buildings[pick.archetype].asset, a))
+  const building_archetype_rule &rule = theme.buildings[pick.archetype];
+  if (!catalog.find(rule.asset, a))
     return false;
+  if (rule.layout == building_layout::yard) {
+    if (!placeYard(rule, a, pick.scale, site, seed, reg, w, out, fps))
+      return false;
+    if (spans)
+      used[partner] = 1;
+    return true;
+  }
   if (spans)
     used[partner] = 1;
   const double sc = pick.scale, yc = std::cos(site.yaw), ys = std::sin(site.yaw);
@@ -1140,6 +1262,22 @@ std::size_t buildCity(const building_library *lib, const road_network &net,
     count = inst.size();
   } else {
     const bool themed = theme && catalog && w && !theme->buildings.empty();
+    // The lots' distances to the water, when an archetype keeps to the water's edge.
+    std::vector<double> water;
+    std::function<double(double, double)> waterAt;
+    if (themed)
+      for (const building_archetype_rule &r : theme->buildings)
+        if (std::isfinite(r.max_water_m)) {
+          water = waterDistance(*w, water_bodies_params().pond_max_area_m2); // not the ponds
+          break;
+        }
+    if (!water.empty())
+      waterAt = [&water, w](double x, double y) {
+        const grid_spec &g = w->grid;
+        const int c = std::clamp(int(std::lround((x - g.min_x) / g.cell_w())), 0, g.cols - 1);
+        const int r = std::clamp(int(std::lround((y - g.min_y) / g.cell_h())), 0, g.rows - 1);
+        return water[std::size_t(r) * g.cols + c];
+      };
     std::vector<char> used(ordered.size(), 0);
     for (std::size_t i = 0; i < ordered.size(); ++i) {
       if (count >= limit)
@@ -1148,8 +1286,8 @@ std::size_t buildCity(const building_library *lib, const road_network &net,
         continue;
       const lot &L = ordered[i];
       used[i] = 1;
-      if (!(themed &&
-            placeModelBuilding(*theme, *catalog, ordered, used, i, seed, reg, *w, out, fps)))
+      if (!(themed && placeModelBuilding(*theme, *catalog, ordered, used, i, seed, reg, *w, out,
+                                         fps, waterAt)))
         fps.add(massLot(L, seed, reg, out));
       forecourt(L);
       ++count;
@@ -1610,7 +1748,7 @@ world_geometry generated_world::geometry() const {
   cvc::geometry boxes;
   for (const model_instance &m : models) {
     if (m.asset < 0 || m.asset >= int(model_assets.size()) ||
-        model_assets[m.asset].kind != model_kind::building)
+        model_assets[m.asset].kind == model_kind::tree)
       continue;
     const model_asset &a = model_assets[m.asset];
     const double c = std::cos(m.yaw), s = std::sin(m.yaw), k = m.scale;
