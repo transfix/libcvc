@@ -1016,9 +1016,9 @@ and the relay read (`python:`, `wasm:`, `server:`, `relay:`, `world:`) are in th
 than `min_libcvc`, the load **fails with no tree** (major.minor.patch compare, ignoring
 `-pre` / `+build` suffixes; `version_at_least`,
 [`loader.cpp`](../src/cvc/ariadne/loader.cpp)). A missing `min_libcvc` only warns. A
-document opened in a `mounts:` slot (§6.8) carries its own `meta` and is gated independently
-when it opens. A static `load:` fragment is meant to be gated the same way, but libcvc does
-not gate it yet ([`ARIADNE_SPEC.md`](ARIADNE_SPEC.md) §3, §9).
+fragment pulled in by `load:` carries its own `meta` and is gated independently
+(`read_fragment`), as a document opened in a `mounts:` slot (§6.8) is: a `load:` fragment too
+new for this build warns and is an empty group, and a `mounts:` entry is refused when it opens.
 
 ```yaml
 meta:
