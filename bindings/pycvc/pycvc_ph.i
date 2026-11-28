@@ -16,6 +16,7 @@
 %{
 #include <algorithm>
 #include <cvc/ph/compose.h>
+#include <cvc/ph/mechanical.h>
 #include <cvc/ph/microgrid.h>
 #include <cvc/ph/query.h>
 #include <cvc/ph/train.h>
@@ -109,6 +110,9 @@ PyObject *ph_list(const double *v, size_t n) {
 %feature("kwargs") pycvc::ph_composite::fit_history;
 %feature("kwargs") pycvc::ph_composite::card;
 %feature("kwargs") pycvc::ph_train_dgu;
+%feature("kwargs") pycvc::ph_arm_json;
+%feature("kwargs") pycvc::ph_arm_study;
+%feature("kwargs") pycvc::ph_go2_leg_json;
 
 %inline %{
 namespace pycvc {
@@ -170,11 +174,13 @@ public:
   // "iterations", "converged", "report"}.
   PyObject *simulate(PyObject *x0, PyObject *u = nullptr, int steps = 100, double dt = 0.01,
                      const std::string &scheme = "split", const std::string &coupling = "midpoint",
-                     int substeps = 2, int local_substeps = 1, int max_iter = 10, double tol = 1e-6) const {
+                     int substeps = 2, int local_substeps = 1, int max_iter = 10, double tol = 1e-6,
+                     const std::string &order = "coupling_outside") const {
     cvc::ph::transition_opts o;
     o.dt = dt;
     o.scheme = cvc::ph::step_scheme_of(scheme);
     o.coupling = cvc::ph::coupling_scheme_of(coupling);
+    o.order = cvc::ph::split_order_of(order);
     o.substeps = substeps;
     o.local_substeps = local_substeps;
     o.solve.max_iter = max_iter;
@@ -583,6 +589,107 @@ PyObject *ph_train_dgu(int updates = 2000, int constraint_first = 0, int batch =
   Py_DECREF(tr);
   Py_DECREF(fd);
   Py_DECREF(hist);
+  return out;
+}
+
+// The planar arm of the count-transfer study (mechanical.h): n known joints, their port 0 paired
+// by the skew `coupling` (n x n rows, or None for none), as cvc-ph-system/1 text. Simulate it with
+// coupling="cayley", order="inputs_outside", substeps=1, dt=0.02 (Algorithm 2).
+std::string ph_arm_json(int n, PyObject *coupling = nullptr) {
+  std::vector<double> C;
+  if (coupling && coupling != Py_None)
+    for (const std::vector<double> &row : ph_rows(coupling, "coupling"))
+      C.insert(C.end(), row.begin(), row.end());
+  return cvc::ph::system_json(cvc::ph::arm_system(cvc::ph::arm_joint(), n, C));
+}
+
+// The count-transfer study, as `cvc ph arm` runs it: the coupling fitted at train_n joints, then
+// takeover MSE without and with it at each of test_n. Returns {"U" (smax rows), "smax",
+// "mse_start", "mse", "evals", "counts": {n: {"none", "fitted"}}, "system" (the fitted arm at
+// train_n, cvc-ph-system/1)}.
+PyObject *ph_arm_study(int train_n = 4, PyObject *test_n = nullptr, int train = 200, int test = 20,
+                       int steps = 200, int context = 5, int horizon = 50,
+                       const std::string &observer = "fit", unsigned seed = 1) {
+  std::vector<int> counts = {2, 3, 4, 5, 6, 8};
+  if (test_n && test_n != Py_None)
+    counts = ph_ints(test_n, "test_n");
+  cvc::ph::coupling_fit_options f;
+  f.takeover.context = context;
+  f.takeover.horizon = horizon;
+  if (observer == "fd")
+    f.takeover.observer.kind = cvc::ph::observer_kind::finite_difference;
+  else if (observer != "fit")
+    throw std::invalid_argument("ph_arm_study: observer is 'fit' or 'fd'");
+  f.smax = train_n;
+  for (int n : counts)
+    f.smax = std::max(f.smax, n);
+  const cvc::ph::arm_params p;
+  cvc::ph::coupling_fit_result fit;
+  std::vector<std::pair<double, double>> mse;
+  std::string err, system;
+  Py_BEGIN_ALLOW_THREADS
+  try {
+    const cvc::ph::law_ptr joint = cvc::ph::arm_joint(p);
+    const cvc::ph::transition_opts o = cvc::ph::arm_transition(p);
+    fit = cvc::ph::fit_arm_coupling(joint, train_n, cvc::ph::arm_dataset(train_n, train, steps, seed, p), o, f);
+    for (int n : counts) {
+      const auto data = cvc::ph::arm_dataset(n, test, steps, seed + 100 + n, p);
+      mse.emplace_back(cvc::ph::takeover_mse(cvc::ph::arm_system(joint, n), o, data, f.takeover),
+                       cvc::ph::takeover_mse(cvc::ph::arm_system(joint, n, cvc::ph::count_coupling(fit.U, fit.smax, n)),
+                                             o, data, f.takeover));
+    }
+    system = cvc::ph::system_json(cvc::ph::arm_system(joint, train_n, cvc::ph::count_coupling(fit.U, fit.smax, train_n)));
+  } catch (const std::exception &e) {
+    err = e.what();
+    if (err.empty())
+      err = "ph_arm_study failed";
+  }
+  Py_END_ALLOW_THREADS
+  if (!err.empty())
+    throw std::runtime_error(err);
+  PyObject *U = PyList_New(fit.smax);
+  for (int a = 0; a < fit.smax; ++a)
+    PyList_SET_ITEM(U, a, ph_list(fit.U.data() + size_t(a) * fit.smax, fit.smax));
+  PyObject *by = PyDict_New();
+  for (size_t k = 0; k < counts.size(); ++k) {
+    PyObject *key = PyLong_FromLong(counts[k]);
+    PyObject *v = Py_BuildValue("{s:d,s:d}", "none", mse[k].first, "fitted", mse[k].second);
+    PyDict_SetItem(by, key, v);
+    Py_DECREF(key);
+    Py_DECREF(v);
+  }
+  PyObject *out = Py_BuildValue("{s:O,s:i,s:d,s:d,s:i,s:O,s:s}", "U", U, "smax", fit.smax, "mse_start", fit.mse_start,
+                                "mse", fit.mse, "evals", fit.evals, "counts", by, "system", system.c_str());
+  Py_DECREF(U);
+  Py_DECREF(by);
+  return out;
+}
+
+// A Go2 leg (mechanical.h: hip fixed, the foot's x, y, z ports, inputs the three joint torques then
+// a force at the foot) on compliant ground (contact_law and its Hunt-Crossley damper on the foot's
+// z), as cvc-ph-system/1 text. Its blocks are the leg (named by `leg`) and "ground". Simulate with
+// coupling="cayley", order="inputs_with_coupling", substeps=1.
+std::string ph_go2_leg_json(const std::string &leg = "FL", double stiffness = 2.0e4, double damping = 2.0e5) {
+  cvc::ph::composite s;
+  const int b = s.add_block(cvc::ph::go2_leg_law(cvc::ph::go2_leg_of(leg)), leg);
+  cvc::ph::attach_contact(s, b, 2, stiffness, damping, "ground");
+  return cvc::ph::system_json(s);
+}
+
+// A Go2 foot in the base frame at the leg's joint angles q: {"r": [x, y, z], "jacobian": 3 rows}.
+PyObject *ph_go2_foot(const std::string &leg, PyObject *q) {
+  const std::vector<double> qs = ph_floats(q, "q");
+  if (qs.size() != 3)
+    throw std::invalid_argument("ph_go2_foot: three joint angles");
+  double r[3], J[9];
+  cvc::ph::go2_foot(cvc::ph::go2_leg_of(leg)).eval(qs.data(), r, J);
+  PyObject *rows = PyList_New(3);
+  for (int i = 0; i < 3; ++i)
+    PyList_SET_ITEM(rows, i, ph_list(J + 3 * i, 3));
+  PyObject *rr = ph_list(r, 3);
+  PyObject *out = Py_BuildValue("{s:O,s:O}", "r", rr, "jacobian", rows);
+  Py_DECREF(rr);
+  Py_DECREF(rows);
   return out;
 }
 

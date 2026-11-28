@@ -16,7 +16,8 @@ Checks:
   7. a query: fit_history from bus voltages alone, a candidate's card, and ph_rank's certified,
      inconclusive and abstaining outcomes;
   8. a short native training run of a DGU law (ph_train_dgu);
-  9. errors: a wrong-sized state, an unknown scheme, a malformed file.
+  9. mechanics: the arm, its count-transfer fit, a Go2 leg on compliant ground;
+  10. errors: a wrong-sized state, an unknown scheme, a malformed file.
 Script-style, like the other pycvc tests; self-skips (exit 0) when the running pycvc predates the
 bindings.
 """
@@ -169,7 +170,36 @@ if hasattr(pycvc, "ph_train_dgu"):
     law = json.loads(t["law"])
     check(law["kind"] == "canonical" and t["parameters"] > 100, f"law: {law.get('kind')}, {t['parameters']}")
 
-# 9. Errors.
+# 9. Mechanics: the arm (Algorithm 2's step keeps its books to second order), the count-transfer
+#    study's fit on a small set, and a Go2 leg settling on compliant ground.
+if hasattr(pycvc, "ph_arm_json"):
+    C = [[0.0, 0.25, 0.0], [-0.25, 0.0, 0.25], [0.0, -0.25, 0.0]]
+    arm = pycvc.ph_composite(pycvc.ph_arm_json(3, coupling=C))
+    check(arm.blocks() == 3 and arm.state_dim() == 6 and arm.input_dim() == 3, "arm dims")
+    check(np.allclose(np.array(arm.pairing()).reshape(3, 3), C), f"arm pairing: {arm.pairing()}")
+    a = arm.simulate([0.3, 0.0, -0.2, 0.0, 0.1, 0.0], [0.5, -0.5, 0.2], steps=50, dt=0.02, coupling="cayley",
+                     order="inputs_outside", substeps=1)
+    b = arm.simulate([0.3, 0.0, -0.2, 0.0, 0.1, 0.0], [0.5, -0.5, 0.2], steps=100, dt=0.01, coupling="cayley",
+                     order="inputs_outside", substeps=1)
+    ra, rb = np.abs(a["residual"]).max(), np.abs(b["residual"]).max()
+    check(ra / rb > 5, f"Algorithm 2's books are second order: {ra} vs {rb}")
+    st = pycvc.ph_arm_study(train_n=3, test_n=[2, 3, 4], train=12, test=4, steps=60)
+    check(st["mse"] < 0.1 * st["mse_start"] and st["smax"] == 4, f"arm study: {st['mse_start']} -> {st['mse']}")
+    check(all(st["counts"][n]["fitted"] < st["counts"][n]["none"] for n in (2, 3)), f"counts: {st['counts']}")
+    check(pycvc.ph_composite(st["system"]).blocks() == 3, "the fitted arm reads back")
+    foot = pycvc.ph_go2_foot("FL", [0.0, 0.0, 0.0])
+    check(np.allclose(foot["r"], [0.1914, 0.142, -0.426], atol=1e-12), f"FL foot at q = 0: {foot['r']}")
+    leg = pycvc.ph_composite(pycvc.ph_go2_leg_json("FL"))
+    check(leg.blocks() == 2 and leg.block(1)["kind"] == "contact" and "damper" in leg.describe(), leg.describe())
+    x0 = [0.0, 0.9, -1.8, 0.0, 0.0, 0.0, -0.02]
+    u = [0.0] * 6
+    u[5] = -20.0
+    r = leg.simulate(x0, u, steps=4000, dt=5e-4, coupling="cayley", order="inputs_with_coupling", substeps=1)
+    f = leg.effort(r["x"][-1])[6]
+    check(abs(f - 20.0) < 0.01, f"the ground carries the load: {f}")
+    check(leg.check(50)["rate_error"] < 1e-12, "the leg on the ground balances its power")
+
+# 10. Errors.
 for bad, what in ((lambda: g.energy([1.0, 2.0]), "a wrong-sized state"),
                   (lambda: g.simulate(x0, u0, coupling="trapezoid"), "an unknown coupling"),
                   (lambda: pycvc.ph_composite('{"format": "cvc-ph-system/9"}'), "a wrong format"),

@@ -971,6 +971,7 @@ jobs:
             if ! git diff --name-only "$base" HEAD -- src/cvc/physics inc/cvc/physics \
                    src/cvc/geometry/height_field.cpp inc/cvc/geometry/height_field.h \
                    src/cvc/tests/physics_mujoco_robot_test.cpp src/cvc/tests/CMakeLists.txt \
+                   src/cvc/ph inc/cvc/ph src/cvc/tests/ph_mech_test.cpp \
                    src/cvc-cli CMakeLists.txt src/cvc/CMakeLists.txt CMake \
                    bindings/pycvc/pycvc_mujoco.i bindings/pycvc/pycvc.i \
                    bindings/pycvc/test_pycvc_mujoco.py bindings/pycvc/CMakeLists.txt \
@@ -1016,7 +1017,8 @@ jobs:
             2>&1 | tee configure.log
           grep -q "cvc::physics::mujoco_robot ENABLED" configure.log \
             || { echo "::error::the configure did not find cvcpkg's MuJoCo"; exit 1; }
-          cmake --build build-mj --target physics_mujoco_robot_test cvc-cli pycvc -j"$(nproc)"
+          cmake --build build-mj --target physics_mujoco_robot_test ph_mech_test cvc-cli pycvc \
+            -j"$(nproc)"
 
       - name: Run the Go2's tests, cvc mujoco and the pycvc binding
         if: steps.paths.outputs.run == 'true'
@@ -1026,6 +1028,12 @@ jobs:
           # Every test runs here: a skip means the build lost MuJoCo or the Menagerie.
           if grep -q '^\[  SKIPPED \]' mujoco_test.txt; then
             echo "::error::MuJoCo tests skipped in the lane that builds MuJoCo"; exit 1
+          fi
+          # cvc::ph's Go2 legs against MuJoCo's own kinematics (mechanical.h's go2_foot).
+          build-mj/bin/ph_mech_test --gtest_filter='PhMech.Go2Feet*' 2>&1 | tee ph_mech_test.txt
+          test "${PIPESTATUS[0]}" -eq 0
+          if grep -q '^\[  SKIPPED \]' ph_mech_test.txt; then
+            echo "::error::ph_mech_test's MuJoCo check skipped in the lane that builds MuJoCo"; exit 1
           fi
           go2="$MJ_DEPS/share/mujoco-menagerie/unitree_go2/scene.xml"
           build-mj/bin/cvc mujoco info "$go2"

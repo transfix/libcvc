@@ -2437,6 +2437,39 @@ TEST_F(CvcCliTest, PhTrainDguFitsAndWritesALaw) {
   EXPECT_NE(0, bad.exit_code);
 }
 
+TEST_F(CvcCliTest, PhArmFitsTheCouplingAndTransfersIt) {
+  const std::string arm = path("arm.json");
+  auto r = cvc("ph arm \"" + arm +
+               "\" --train-n 3 --test-n 2,3,4 --arm-train 8 --arm-test 3 --arm-steps 60");
+  ASSERT_EQ(0, r.exit_code) << r.output;
+  EXPECT_NE(std::string::npos, r.output.find("coupling fitted at N = 3")) << r.output;
+  EXPECT_NE(std::string::npos, r.output.find("no coupling")) << r.output;
+  ASSERT_TRUE(fs::exists(arm));
+  const cvc::ph::composite s = cvc::ph::load_system(arm);
+  EXPECT_EQ(s.blocks(), 3);
+  EXPECT_EQ(s.input_dim(), 3);
+  auto sim = cvc("ph simulate \"" + arm +
+                 "\" --coupling cayley --order inputs_outside --substeps 1 --dt 0.02 --steps 20"
+                 " --x0 0.2,0,0.1,0,-0.1,0 --u 0.5,0,-0.5");
+  EXPECT_EQ(0, sim.exit_code) << sim.output;
+  EXPECT_NE(0, cvc("ph arm \"" + arm + "\" --observer nonsense").exit_code);
+}
+
+TEST_F(CvcCliTest, PhLegLandsOnCompliantGround) {
+  const std::string leg = path("leg.json");
+  auto r = cvc("ph leg \"" + leg + "\" --leg RR --steps 2000");
+  ASSERT_EQ(0, r.exit_code) << r.output;
+  EXPECT_NE(std::string::npos, r.output.find("the ground carries")) << r.output;
+  ASSERT_TRUE(fs::exists(leg));
+  const cvc::ph::composite s = cvc::ph::load_system(leg);
+  EXPECT_EQ(s.blocks(), 2);
+  EXPECT_EQ(s.law(1).kind(), "contact");
+  EXPECT_EQ(s.dampers().size(), 1u);
+  auto check = cvc("ph check \"" + leg + "\"");
+  EXPECT_EQ(0, check.exit_code) << check.output;
+  EXPECT_NE(0, cvc("ph leg \"" + leg + "\" --leg XX").exit_code);
+}
+
 // ===========================================================================
 // ph-train: the learned port-Hamiltonian vehicle (cvc::ph) from plant logs
 // ===========================================================================

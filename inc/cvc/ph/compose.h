@@ -52,6 +52,7 @@
 #ifndef __CVC_PH_COMPOSE_H__
 #define __CVC_PH_COMPOSE_H__
 
+#include <array>
 #include <cvc/nav/detail/dyn_bike.h> // dyn_ph_books: the energy books every libcvc plant keeps
 #include <iosfwd>
 #include <map>
@@ -172,9 +173,30 @@ struct mlp {
 
 enum class conservative_scheme { implicit_midpoint, leapfrog };
 
+// A point carried by a chain of revolute joints, one per configuration coordinate: joint i sits at
+// offset[i] in joint i-1's frame (the block's base frame for i = 0) and turns its frame by q_i
+// about axis[i], a unit vector in that frame. The point sits at `point` in the last joint's frame.
+// At q = 0 every frame is aligned with the base: MuJoCo's body tree for a hinge chain without body
+// rotations (the Go2's legs, a planar arm).
+//
+// Its position r(q) and Jacobian dr/dq make the collocated port of C-PHAST's attachment maps
+// (Eq. 49): a force F at the point enters as the generalized force (dr/dq)^T F, and the port's
+// output is the point's velocity (dr/dq) qdot, so F . rdot = tau . qdot. `components` picks which
+// of the point's x, y, z the port carries.
+struct serial_chain {
+  std::vector<std::array<double, 3>> offset, axis; // one per joint
+  std::array<double, 3> point{};
+  std::vector<int> components{0, 1, 2};
+  int joints() const { return static_cast<int>(offset.size()); }
+  // r (3) and, when jac is non-null, dr/dq (3 x joints(), row-major) at q.
+  void eval(const double *q, double *r, double *jac = nullptr) const;
+};
+
 struct canonical_spec {
   int n = 1;
   vecd K, center; // n x n stiffness (symmetric) and its centre; empty K is no quadratic term
+  // A pendulum's gravity per coordinate: V += sum_i cosine[i] (1 - cos q_i). Empty is none.
+  vecd cosine;
   // A capacitor curve, the same for every coordinate: charge q = sum_j capacitor[j] v^j as a
   // function of the effort v (an odd polynomial: capacitor[1] > 0, odd entries >= 0, even entries
   // 0). Its energy C(q) = sum_j capacitor[j] j / (j + 1) v^(j + 1) has dC/dq = v, found from q by
@@ -190,6 +212,10 @@ struct canonical_spec {
   double d_min = 0.0;
   int ports = 0, inputs = 0;
   vecd B, G; // 2n x ports, 2n x inputs (row-major; rows q_1..q_n then p_1..p_n)
+  // State-dependent ports and inputs at attachment points (each chain has n joints): every point
+  // adds one column per component after B's (or G's), zero in the q rows and (dr/dq)^T in the p
+  // rows. port_dim() is ports plus the port points' components, input_dim() likewise.
+  std::vector<serial_chain> port_points, input_points;
   conservative_scheme scheme = conservative_scheme::implicit_midpoint;
 };
 
@@ -200,8 +226,8 @@ public:
 
   std::string kind() const override { return "canonical"; }
   int state_dim() const override { return 2 * s_.n; }
-  int port_dim() const override { return s_.ports; }
-  int input_dim() const override { return s_.inputs; }
+  int port_dim() const override { return port_dim_; }
+  int input_dim() const override { return input_dim_; }
   double energy(const double *x) const override;
   void effort(const double *x, double *e) const override;
   void structure(const double *x, double *J, double *R) const override;
@@ -221,6 +247,39 @@ public:
 
 private:
   canonical_spec s_;
+  int port_dim_ = 0, input_dim_ = 0;
+  // Fills the point columns of a 2n x cols map (row-major) from column `first` on.
+  void point_columns(const std::vector<serial_chain> &points, const double *q, int cols, int first,
+                     double *M) const;
+};
+
+// ── contact_law: a compliant one-sided contact ──────────────────────────────────────────────────
+// One coordinate s, the compression (touching when s > 0), with H = k/2 [s]_+^2, J = R = 0 and one
+// port (B = 1): its output is the contact force k [s]_+, its input the compression rate. Paired
+// with an attachment point's normal velocity, connect(foot, port, contact, 0, -1) gives
+// ds/dt = -v and the foot the force +k [s]_+ along the normal. It is the storage of a penalty
+// contact; its loss is a damper on the foot's port gated by s (composite::connect_damper), since a
+// damper on the relative velocity has no storage of its own. attach_contact (mechanical.h) does
+// both. Like any port-integrated state, s follows the geometry only as well as the integrator does.
+class contact_law final : public block_law {
+public:
+  explicit contact_law(double stiffness); // throws std::invalid_argument unless stiffness > 0
+  double stiffness() const { return k_; }
+
+  std::string kind() const override { return "contact"; }
+  int state_dim() const override { return 1; }
+  int port_dim() const override { return 1; }
+  int input_dim() const override { return 0; }
+  double energy(const double *x) const override;
+  void effort(const double *x, double *e) const override;
+  void structure(const double *x, double *J, double *R) const override;
+  void port_map(const double *x, double *B) const override;
+  void input_map(const double *, double *) const override {}
+  void damp(double, double *) const override {}
+  int conserve(double, double *, const solve_opts &) const override { return 0; }
+
+private:
+  double k_;
 };
 
 // ── composite: components and their pairing
@@ -228,9 +287,16 @@ private:
 
 struct power_terms {
   double stored = 0;   // H_total
-  double loss = 0;     // e . R_hat e >= 0
+  double loss = 0;     // e . R_hat e plus the dampers' c y^2, >= 0
   double external = 0; // e . G_hat u, the power the external inputs supply
-  double internal = 0; // u_hat . y_hat = -y_hat . C y_hat: zero for a skew pairing
+  double internal = 0; // -y_hat . C y_hat, the pairing's power: zero for a skew pairing
+};
+
+// A damper on one port (composite::connect_damper).
+struct port_damper {
+  int port = 0;  // the composite's port index
+  double c = 0;  // >= 0
+  int gate = -1; // a block whose first coordinate s gates it (c [s]_+), or -1
 };
 
 class composite {
@@ -249,6 +315,11 @@ public:
   // A dense rule over repeated components (s x s, row-major): port `port` of blocks[a] pairs with
   // the same port of blocks[b] by (C - C^T)/2, the skew part of the matrix given.
   void connect_skew(const std::vector<int> &blocks, int port, const vecd &C);
+  // A damper on port a of block i, a resistive termination: u_hat_i[a] -= c(x) y_hat_i[a], which
+  // dissipates c(x) y_hat_i[a]^2. c(x) = c, or c [s]_+ when `gate` names a block whose first
+  // coordinate is s (a contact_law's compression: Hunt-Crossley damping, zero at touchdown).
+  void connect_damper(int i, int a, double c, int gate = -1);
+  const std::vector<port_damper> &dampers() const { return dampers_; }
 
   int blocks() const { return static_cast<int>(laws_.size()); }
   const block_law &law(int i) const { return *laws_.at(i); }
@@ -284,13 +355,29 @@ private:
   std::vector<int> xoff_, uoff_, yoff_;
   int nx_ = 0, nu_ = 0, ny_ = 0;
   vecd C_; // ny_ x ny_
+  std::vector<port_damper> dampers_;
   void grow_pairing(int new_ny);
 };
 
 // ── transitions ─────────────────────────────────────────────────────────────────────────────────
 
-enum class coupling_scheme { euler, midpoint };
+// The coupling half-step E_tau: explicit Euler, explicit midpoint, or implicit midpoint (cayley,
+// x+ = x + tau f_c((x + x+)/2), by Newton with a central-difference Jacobian). For momentum ports
+// (B zero in the q rows, as every mechanical port is) the coupling subflow holds q, is linear in
+// p, and the implicit midpoint is the Cayley map of Algorithm 2 (Eq. 64): it keeps the
+// frozen-position kinetic energy to the solve's rounding.
+enum class coupling_scheme { euler, midpoint, cayley };
 enum class step_scheme { split, rk4, implicit_midpoint };
+// Where the input kicks sit in the split step. coupling_outside (phast's typed composition API):
+// E_{d/2} o LocalStep_d o E_{d/2}, the kicks inside LocalStep. inputs_outside (Algorithm 2, the
+// mechanical realization): K_{d/2} o E_{d/2} o LocalStep_d o E_{d/2} o K_{d/2}, every block's
+// input kick around the coupling and a LocalStep without inputs. inputs_with_coupling: the port
+// subflow, coupling and inputs together (f_c + G u), by E's scheme on either side of a LocalStep
+// without inputs; the paper's remark after Algorithm 2 for forces the port subflow changes. A
+// stiff coupling that balances an input (a contact carrying a load) needs it: split apart, the
+// kick leaves a velocity inside each step that the coupling's damper dissipates unbooked, and the
+// state creeps.
+enum class split_order { coupling_outside, inputs_outside, inputs_with_coupling };
 
 struct transition_opts {
   double dt = 0.01;
@@ -298,6 +385,7 @@ struct transition_opts {
   int local_substeps = 1; // LocalStep's nsub inside L_d
   coupling_scheme coupling = coupling_scheme::midpoint;
   step_scheme scheme = step_scheme::split;
+  split_order order = split_order::coupling_outside;
   solve_opts solve;
 };
 
@@ -308,8 +396,9 @@ struct step_stats {
 
 // Advances x (state_dim) by one step of opts.dt with u (input_dim) held.
 step_stats step(const composite &s, const transition_opts &opts, const double *u, double *x);
-// The coupling half-step E_tau alone.
-void coupling_step(const composite &s, coupling_scheme c, double tau, double *x);
+// The coupling half-step E_tau alone; with u (input_dim), the port subflow f_c + G u.
+void coupling_step(const composite &s, coupling_scheme c, double tau, double *x,
+                   const double *u = nullptr);
 // Whole-field references.
 void step_rk4(const composite &s, double dt, const double *u, double *x);
 step_stats step_implicit_midpoint(const composite &s, double dt, const double *u, double *x,
@@ -389,15 +478,15 @@ void write_csv(std::ostream &out, const composite &s, const transition_opts &o,
                const rollout_result &r);
 
 // ── files ───────────────────────────────────────────────────────────────────────────────────────
-// "cvc-ph-law/1": {"format", "kind": "linear" | "canonical", ...}; "cvc-ph-system/1": {"format",
-// "laws": {name: law}, "blocks": [{"name", "law"}], "couplings": [{"type": "pair" | "incidence" |
-// "skew", ...}]}. The fields are in docs/PH_COMPOSE.md. Both throw std::runtime_error on a file
-// they cannot read.
+// "cvc-ph-law/1": {"format", "kind": "linear" | "canonical" | "contact", ...}; "cvc-ph-system/1":
+// {"format", "laws": {name: law}, "blocks": [{"name", "law"}], "couplings": [{"type": "pair" |
+// "incidence" | "skew" | "damper", ...}]}. The fields are in docs/PH_COMPOSE.md. Both throw
+// std::runtime_error on a file they cannot read.
 
 // The same formats written out: every law in full (numbers to 17 digits), each shared law once,
-// and the pairing as "pair" couplings (its upper triangle), so a file read back gives the same
-// composite. A block without a name is written as "b<index>". Laws other than linear_law and
-// canonical_law throw std::invalid_argument.
+// the pairing as "pair" couplings (its upper triangle) and the dampers as "damper" couplings, so a
+// file read back gives the same composite. A block without a name is written as "b<index>". Laws
+// other than linear_law, canonical_law and contact_law throw std::invalid_argument.
 std::string law_json(const block_law &law);
 std::string system_json(const composite &s);
 
@@ -408,8 +497,10 @@ composite parse_system(const std::string &json);
 
 const char *to_string(coupling_scheme c);
 const char *to_string(step_scheme s);
+const char *to_string(split_order o);
 coupling_scheme coupling_scheme_of(const std::string &s); // throws std::invalid_argument
 step_scheme step_scheme_of(const std::string &s);
+split_order split_order_of(const std::string &s);
 
 } // namespace ph
 } // namespace cvc
