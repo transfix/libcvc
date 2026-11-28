@@ -258,3 +258,75 @@ TEST(WorldRoadMesh, StripsEndOnThePadRim) {
     pad += std::abs(v[2] - (p.lift + p.pad_lift)) < 1e-9;
   EXPECT_GT(pad, 0);
 }
+
+// A skirt (skirt_depth): every edge of a road drops in a wall to below the ground, a shade darker
+// and wound to face out, so from the side the road is a layer of pavement in the ground, not a
+// floating ribbon. Here a straight road and a crossing on ground at z = 2: each wall runs from the
+// road's surface (lift 0.35 above the ground) to 0.5 m below the ground, and each wall triangle
+// faces away from the road. Without a skirt the mesh is as it was.
+TEST(WorldRoadMesh, ASkirtDropsTheEdgesIntoTheGround) {
+  const auto ground = [](double, double) { return 2.0; };
+  road_mesh_params p;
+  p.lift = 0.35;
+  p.centerline = false;
+  const cvc::geometry plain = extrude_roads(straight_road(11.0), p, ground);
+  p.skirt_depth = 0.5;
+  const double wall_rgb = p.arterial_rgb[0] * p.skirt_shade;
+  for (const road_network &net : {straight_road(11.0), cross_roads()}) {
+    const cvc::geometry g = extrude_roads(net, p, ground);
+    const auto &P = g.const_points();
+    const auto &C = g.const_colors();
+    // How far a point is from the road's lines (its outline is 5.5 m out).
+    const auto off_road = [&net](double x, double y) {
+      double d = 1e9;
+      for (const road_segment &s : net.segments) {
+        const road_node &a = net.nodes[s.a], &b = net.nodes[s.b];
+        const double dx = b.x - a.x, dy = b.y - a.y;
+        const double u =
+            std::clamp(((x - a.x) * dx + (y - a.y) * dy) / (dx * dx + dy * dy), 0.0, 1.0);
+        d = std::min(d, std::hypot(x - a.x - u * dx, y - a.y - u * dy));
+      }
+      return d;
+    };
+    std::size_t walls = 0;
+    double lowest = 1e9;
+    for (const auto &t : g.const_tris()) {
+      if (std::fabs(C[t[0]][0] - wall_rgb) > 1e-9)
+        continue; // the road's own surface
+      ++walls;
+      for (int k = 0; k < 3; ++k) {
+        const double z = P[t[k]][2];
+        lowest = std::min(lowest, z);
+        // From the road's edge (2.35; a pad's, a hair higher, 2.37) to below the ground.
+        EXPECT_TRUE(std::fabs(z - 1.5) < 1e-9 || std::fabs(z - 2.35) < 1e-9 ||
+                    std::fabs(z - 2.37) < 1e-9)
+            << "a wall runs from the road's edge to below the ground, not " << z;
+      }
+      // Its face's normal, from its winding: level, and out from the road where it is on the
+      // outline (a pad's rim under an arm is inside, and hidden).
+      const double ax = P[t[1]][0] - P[t[0]][0], ay = P[t[1]][1] - P[t[0]][1],
+                   az = P[t[1]][2] - P[t[0]][2];
+      const double bx = P[t[2]][0] - P[t[0]][0], by = P[t[2]][1] - P[t[0]][1],
+                   bz = P[t[2]][2] - P[t[0]][2];
+      const double nx = ay * bz - az * by, ny = az * bx - ax * bz, nz = ax * by - ay * bx;
+      const double len = std::sqrt(nx * nx + ny * ny + nz * nz);
+      if (len < 1e-12)
+        continue;
+      EXPECT_LT(std::fabs(nz) / len, 1e-6) << "a wall stands upright";
+      const double cx = (P[t[0]][0] + P[t[1]][0] + P[t[2]][0]) / 3.0;
+      const double cy = (P[t[0]][1] + P[t[1]][1] + P[t[2]][1]) / 3.0;
+      const double here = off_road(cx, cy);
+      if (here > 5.5 - 0.1)
+        EXPECT_GT(off_road(cx + 0.1 * nx / len, cy + 0.1 * ny / len), here)
+            << "facing out at (" << cx << ", " << cy << ")";
+    }
+    EXPECT_GT(walls, 0u);
+    EXPECT_NEAR(lowest, 1.5, 1e-9) << "the walls reach 0.5 m below the ground";
+  }
+  const cvc::geometry skirted = extrude_roads(straight_road(11.0), p, ground);
+  EXPECT_GT(skirted.const_tris().size(), plain.const_tris().size());
+  p.skirt_depth = 0.0;
+  EXPECT_EQ(extrude_roads(straight_road(11.0), p, ground).const_tris().size(),
+            plain.const_tris().size())
+      << "no skirt: the mesh as it was";
+}

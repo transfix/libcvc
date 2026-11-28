@@ -6464,8 +6464,9 @@ windows:
   ASSERT_NE(a, nullptr);
   EXPECT_FALSE(a->writable); // an unrecognized mode ('readonly') fails CLOSED to read-only
   ASSERT_NE(b, nullptr);
-  EXPECT_TRUE(b->writable); // no mode -> rw default
-  EXPECT_TRUE(has_warning(r, "unknown mode"));
+  EXPECT_FALSE(b->writable); // and so does a missing one (docs/ARIADNE.md §7.4)
+  EXPECT_TRUE(has_warning(r, "link 'a' has unknown mode"));
+  EXPECT_FALSE(has_warning(r, "link 'b'")); // a missing mode is no mistake: it means ro
 }
 
 TEST(AriadneMount, LinkNameLeadingSlashIsRejected) {
@@ -6836,6 +6837,7 @@ windows:
         channels:
           done: nav.done
           risk: { to: risk.overlay, mode: ro }
+          feed: { to: news.feed }
 )");
   LoadResult r = fresh_load_file(main);
   ASSERT_TRUE(r.ok) << r.error;
@@ -6845,11 +6847,14 @@ windows:
   // wire_holes plants it and resolve_channel follows it.
   const LinkHole *done = nullptr;
   const LinkHole *risk = nullptr;
+  const LinkHole *feed = nullptr;
   for (const LinkHole &h : m->links) {
     if (h.name == "channels.done")
       done = &h;
     if (h.name == "channels.risk")
       risk = &h;
+    if (h.name == "channels.feed")
+      feed = &h;
   }
   ASSERT_NE(done, nullptr);
   EXPECT_EQ(done->target, "channels.nav.done"); // resolved against the PARENT scope by wire_holes
@@ -6857,6 +6862,9 @@ windows:
   ASSERT_NE(risk, nullptr);
   EXPECT_EQ(risk->target, "channels.risk.overlay");
   EXPECT_FALSE(risk->writable); // mode: ro
+  ASSERT_NE(feed, nullptr);
+  EXPECT_FALSE(feed->writable); // a map with no mode fails closed too (docs/ARIADNE.md §7.4)
+  EXPECT_FALSE(has_warning(r, "channel grant 'feed'"));
 }
 
 // ===========================================================================

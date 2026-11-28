@@ -167,24 +167,16 @@ add_executable(terrain_lab cvcgl/terrain_lab.cpp)
 target_link_libraries(terrain_lab PRIVATE cvcGL ${VTK_LIBRARIES} Boost::program_options)
 vtk_module_autoinit(TARGETS terrain_lab MODULES ${VTK_LIBRARIES})
 
-# cvc::nav demos — the reactive swarm rendered through cvcGL. nav symbols come from
-# cvc::cvc, which cvcGL PUBLIC-links. Shared helpers (occupancy walls, merged agent
-# glyph mesh, capture camera) live in nav_common.
-add_library(nav_demo_common STATIC nav/nav_common.cpp)
-target_link_libraries(nav_demo_common PUBLIC cvcGL)
+# The rendered cvc::nav demos are Ariadne documents and hosts (ariadne/documents/nav_*.ari, and
+# nav_scrub, nav_convoy and nav_compute above; nav/NAV_DEMOS.md). The C++ programs that drew the
+# swarm through cvcGL by hand (nav_city_swarm, nav_city_drive, nav_fog_ghost, nav_finale, and
+# their nav_common) are retired: each loaded and fitted its vehicle model its own way.
 
-foreach(_demo nav_city_swarm nav_city_drive nav_fog_ghost nav_finale)
-  add_executable(${_demo} nav/${_demo}.cpp)
-  target_link_libraries(${_demo} PRIVATE nav_demo_common cvcGL ${VTK_LIBRARIES}
-                        Boost::program_options)
-  vtk_module_autoinit(TARGETS ${_demo} MODULES ${VTK_LIBRARIES})
-endforeach()
-
-# Headless ABI/consistency guard (no GL). The nav demos compile against the
+# Headless ABI/consistency guard (no GL). The nav examples compile against the
 # in-tree cvc/nav headers but link the SHARED libcvc from the deps prefix; if that
 # libcvc is older than the headers, sim_world's by-value return from
 # from_occupancy() corrupts the caller (sim_world embeds config+material_config by
-# value) and the demos segfault at startup. nav_abi_smoke exercises exactly that
+# value) and they segfault at startup. nav_abi_smoke exercises exactly that
 # path and asserts a sane read-back; the libcvc-examples recipe runs it after the
 # build so a stale libcvc fails loudly here instead of shipping a broken demo. It
 # links only cvc::cvc (no cvcGL/VTK/GL), is native-only (it must run), and is not
@@ -213,8 +205,7 @@ if(NOT EMSCRIPTEN)
 endif()
 
 # ---- WebAssembly demo builds -------------------------------------------------
-# The browser-capable examples. nav_finale is native-only (it needs assimp +
-# imagemagick + a runtime bundle the wasm toolchain lacks). Add a new browser demo
+# The browser-capable examples. Add a new browser demo
 # to _wasm_demos and it builds via the `wasm-demos` target and is auto-discovered
 # into the gallery by web/build-pages.py — no host page to hand-write.
 #
@@ -230,7 +221,7 @@ endif()
 # calls SceneRenderer::setFrameYield(FrameYield::App) in its C++, because its loop
 # yields once per frame on every path that renders.
 if(EMSCRIPTEN)
-  set(_wasm_demos lsystem_forest lsystem_coast bunny_shadow volren_bunny volslice_bunny nav_city_swarm nav_city_drive nav_fog_ghost nav_scrub)
+  set(_wasm_demos lsystem_forest lsystem_coast bunny_shadow volren_bunny volslice_bunny nav_scrub)
   set(_wasm_extra_demos ariadne_hello)
   # terrain_lab is native only: the browser gallery runs the Ariadne terrain lab (terrain_lab_ari,
   # arigl on documents/terrain_lab.ari), and web/demos.json keeps ../terrain_lab/ as a redirect to it.
@@ -240,32 +231,20 @@ if(EMSCRIPTEN)
   # arigl into this gallery with every document, the component library and data/ in its file
   # system, and a Demos menu switches between them in place.
 
-  # Optional runtime asset bundle for nav_city_swarm (Austin: terrain.json +
-  # buildings.glb + satellite.png). When CVC_WASM_BUNDLE is set to a scene dir,
-  # its contents are preloaded to /bundle and, if the sibling shared/Humvee.glb
-  # exists (installed by the vehicle-humvee cvcpkg bundle), that dir is preloaded
-  # to /shared so the demo's <bundle>/../../shared/Humvee.glb autopath resolves.
-  # If CVC_WASM_BUNDLE is empty (the default), the demo falls back to the
-  # synthetic city.
-  set(_nav_swarm_bundle_flags "")
-  set(_nav_scrub_bundle_flags "") # the bundle and the shared Humvee, not the weights
+  # Optional runtime asset bundle for nav_scrub (Austin: terrain.json + buildings.glb +
+  # satellite.png). When CVC_WASM_BUNDLE is set to a scene dir, its contents are preloaded to
+  # /bundle and, if the sibling shared/ has the vehicle-humvee package's Humvee.glb, that dir is
+  # preloaded to /shared. If CVC_WASM_BUNDLE is empty (the default), nav_scrub runs on its
+  # generated world.
+  set(_nav_scrub_bundle_flags "")
   if(CVC_WASM_BUNDLE AND EXISTS "${CVC_WASM_BUNDLE}")
-    message(STATUS "cvcGL nav_city_swarm wasm: preloading bundle from ${CVC_WASM_BUNDLE}")
-    list(APPEND _nav_swarm_bundle_flags "--preload-file=${CVC_WASM_BUNDLE}@/bundle")
+    message(STATUS "cvcGL nav_scrub wasm: preloading bundle from ${CVC_WASM_BUNDLE}")
+    list(APPEND _nav_scrub_bundle_flags "--preload-file=${CVC_WASM_BUNDLE}@/bundle")
     get_filename_component(_parent "${CVC_WASM_BUNDLE}" DIRECTORY)
     if(_parent AND EXISTS "${_parent}/shared/Humvee.glb")
-      message(STATUS "cvcGL nav_city_swarm wasm: preloading shared vehicle from ${_parent}/shared")
-      list(APPEND _nav_swarm_bundle_flags "--preload-file=${_parent}/shared@/shared")
+      message(STATUS "cvcGL nav_scrub wasm: preloading shared vehicle from ${_parent}/shared")
+      list(APPEND _nav_scrub_bundle_flags "--preload-file=${_parent}/shared@/shared")
     endif()
-    set(_nav_scrub_bundle_flags ${_nav_swarm_bundle_flags})
-  endif()
-  # Preload the trained CoefMLP weights (cvcpkg grl-snam-weights / coef_sdf.cvcnav) so the
-  # in-browser swarm drives with the PUBLISHED trained policy. nav_city_swarm loads
-  # "coef_sdf.cvcnav" from MEMFS in wasm (dladdr cannot resolve an install prefix in the
-  # browser); with none preloaded it falls back to the hand-tuned biased net.
-  if(CVC_WASM_NAV_WEIGHTS AND EXISTS "${CVC_WASM_NAV_WEIGHTS}")
-    message(STATUS "cvcGL nav_city_swarm wasm: preloading trained weights from ${CVC_WASM_NAV_WEIGHTS}")
-    list(APPEND _nav_swarm_bundle_flags "--preload-file=${CVC_WASM_NAV_WEIGHTS}@/coef_sdf.cvcnav")
   endif()
   foreach(_wt ${_wasm_demos} ${_wasm_extra_demos})
     # JSPI: each demo keeps its own while-loop in main and yields via emscripten_sleep, which
@@ -291,10 +270,6 @@ if(EMSCRIPTEN)
     if(CVC_WASM_PTHREADS)
       # Pre-spawn workers so std::thread creation doesn't stall on the busy main thread.
       target_link_options(${_wt} PRIVATE -sPTHREAD_POOL_SIZE=4)
-    endif()
-    # nav_city_swarm and nav_city_drive share the Austin bundle + trained weights.
-    if(_nav_swarm_bundle_flags AND ("${_wt}" STREQUAL "nav_city_swarm" OR "${_wt}" STREQUAL "nav_city_drive"))
-      target_link_options(${_wt} PRIVATE ${_nav_swarm_bundle_flags})
     endif()
     # nav_scrub reads its document, the component library and the Austin bundle (its world, and
     # the Humvee) from the page's file system; without the bundle it runs on the generated world.
@@ -336,7 +311,7 @@ endif()
 # the recipe's build.sh turns this OFF.
 option(LIBCVC_EXAMPLES_RPATH_USE_LINK_PATH
        "Add the link directories to the installed examples' RUNPATH (OFF for packaging)" ON)
-set(_cvcgl_example_bins lsystem_forest lsystem_coast terrain_lab bunny_shadow volren_bunny volslice_bunny nav_city_swarm nav_city_drive nav_fog_ghost nav_finale)
+set(_cvcgl_example_bins lsystem_forest lsystem_coast terrain_lab bunny_shadow volren_bunny volslice_bunny)
 # Every one of them has the gallery's Demos menu (common/demos_menu.h).
 foreach(_t ${_cvcgl_example_bins})
   target_link_libraries(${_t} PRIVATE cvc_demos_menu)
@@ -370,13 +345,3 @@ install(FILES "${CMAKE_CURRENT_BINARY_DIR}/gallery.installed.json" DESTINATION s
 # the same two files from cvcpkg/recipes/libcvc-examples-web/build-wasm.sh.)
 install(FILES "${_cvc_root}/THIRD_PARTY_NOTICES.md" "${_cvc_root}/LICENSE"
         DESTINATION share/libcvc-examples COMPONENT libcvc-examples)
-
-# Unit tests for nav_common's bounds-safe compositing (the minimap-overflow crash
-# guard) + the occupancy rasterizer. Only when GoogleTest is available (CVC_BUILD_TESTS
-# pulled it in) — the test does no rendering, so it needs no GL context to run.
-if(TARGET GTest::gtest)
-  add_executable(nav_common_test nav/nav_common_test.cpp)
-  target_link_libraries(nav_common_test PRIVATE nav_demo_common GTest::gtest GTest::gtest_main)
-  include(GoogleTest)
-  gtest_discover_tests(nav_common_test)
-endif()

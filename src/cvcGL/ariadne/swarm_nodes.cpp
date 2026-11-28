@@ -14,7 +14,7 @@
 */
 
 // The nav_swarm and swarm_layer scene node types (swarm_nodes.h). What each layer draws, and how,
-// is what examples/nav/nav_city_swarm.cpp and nav_city_drive.cpp drew by hand: one merged mesh a
+// is what the C++ nav_city_swarm and nav_city_drive (since retired) drew by hand: one merged mesh a
 // layer, every vehicle an instance of its template, streamed with updateVertices each frame.
 
 #include <algorithm>

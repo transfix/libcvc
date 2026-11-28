@@ -35,7 +35,7 @@ group per frame:
 > memory budget?
 
 It is pure arithmetic — **no VTK, no OpenGL, no I/O, and no allocation on the hot
-path** — so the Austin nav demos (`nav_city_swarm`, `nav_fog_ghost`) and the
+path** — so cvcGL's `LodGraphicsNode` (and the views built on it) and the
 L-System Laboratory both consume it from one place instead of re-deriving it.
 The vocabulary (`desired_pixel_error`, priority = *projected area / distance²*)
 is deliberately the modernization roadmap's own, so the future networked

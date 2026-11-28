@@ -21,6 +21,14 @@
 #
 # shell.allow lists the URI prefixes that may be opened (empty: any file or link), and
 # shell.apps.<id>.budget.{steps, time, memory} change one application's budget.
+#
+# Each application reaches the network as its principal (ARIADNE.md §10.3): a catalog document as
+# the launcher's, with its allowlist and credentials, a document from a file or a link only its own
+# origin, with credentials of its own. A catalog entry may give its document a network of its own,
+# as bin/nicotina gives nicotina: "net_policy" (a policy file, relative to the catalog),
+# "credential_store" and "e2ee_store" (a name in the user's config directory, or a path, relative
+# to the catalog). Such an entry opens under its slug (an id: [A-Za-z0-9_], not starting with a
+# digit), with shell.apps.<slug>.{net_policy, credential_store, e2ee_store} written first.
 
 meta:
   name: Shell
@@ -54,6 +62,10 @@ functions: |
   ; DOC as a URI: as it is when it is absolute or has a scheme, else relative to DIR.
   (defun shell-uri (dir doc)
     (if (or (string.starts-with doc "/") (string.contains doc ":")) doc (str-concat dir "/" doc)))
+  ; A store SPEC as a catalog entry gives it: a plain name as it is (a file in the user's config
+  ; directory), a path relative to DIR.
+  (defun shell-store (dir spec)
+    (if (or (= spec "") (not (string.contains spec "/"))) spec (shell-uri dir spec)))
   ; The catalog, each time it is loaded: shell.catalog.<i>.{slug title desc uri} for every entry with
   ; a doc, shell.catalog the count, and shell.catalog_uris.<i> the URIs, which the mounts: slot's
   ; catalog: reads (they run as the local principal).
@@ -80,6 +92,13 @@ functions: |
               (state-set (str-concat row "desc") (shell-text (state-get (str-concat at "desc"))))
               (state-set (str-concat row "uri") (shell-uri dir doc))
               (state-set (str-concat row "state") "")
+              ; its network of its own, if it has one (SH11)
+              (set policy (shell-text (state-get (str-concat at "net_policy"))))
+              (state-set (str-concat row "net_policy") (if (= policy "") "" (shell-uri dir policy)))
+              (state-set (str-concat row "credential_store")
+                         (shell-store dir (shell-text (state-get (str-concat at "credential_store")))))
+              (state-set (str-concat row "e2ee_store")
+                         (shell-store dir (shell-text (state-get (str-concat at "e2ee_store")))))
               (state-set (str-concat "shell.catalog_uris." (str k)) (shell-uri dir doc))
               (set k (+ k 1)))))
         (state-set "shell.catalog" (str k))
@@ -112,9 +131,28 @@ functions: |
           (if (and (= (length parts) 4) (= (state-get rel) uri)) (set found (nth parts 2)) #f))
         #f))
     found)
-  ; Open catalog entry I (a running one is the one returned), and Close it.
+  ; Open catalog entry I (a running one is the one returned), and Close it. The entry gets the
+  ; catalog flag, so it runs as `local` (ARIADNE.md §6.8) however the catalog spells its URI. One
+  ; with a network of its own opens under its slug, its flag and its network written first: the
+  ; mount reads them as it opens, and only a local one may have a network of its own.
   (defun shell-open (i)
-    (app-open (state-get (str-concat "shell.catalog." (str i) ".uri"))))
+    (set row (str-concat "shell.catalog." (str i) "."))
+    (set uri (state-get (str-concat row "uri")))
+    (set policy (shell-text (state-get (str-concat row "net_policy"))))
+    (set store (shell-text (state-get (str-concat row "credential_store"))))
+    (set keys (shell-text (state-get (str-concat row "e2ee_store"))))
+    (set slug (shell-text (state-get (str-concat row "slug"))))
+    (set id
+      (if (or (= (str-concat policy store keys) "") (not (= (shell-find uri) "")))
+        (app-open uri)
+        (begin
+          (state-set (str-concat "shell.apps." slug ".catalog") "1")
+          (state-set (str-concat "shell.apps." slug ".net_policy") policy)
+          (state-set (str-concat "shell.apps." slug ".credential_store") store)
+          (state-set (str-concat "shell.apps." slug ".e2ee_store") keys)
+          (app-open uri slug))))
+    (state-set (str-concat "shell.apps." id ".catalog") "1")
+    id)
   (defun shell-close (i)
     (set id (shell-find (state-get (str-concat "shell.catalog." (str i) ".uri"))))
     (if (= id "") #f (app-close id)))
@@ -183,7 +221,9 @@ windows:
 
 root:
   # One isolated mount per child of shell.apps (ARIADNE_SHELL.md 4.2): any file or link may be
-  # opened unless shell.allow lists prefixes, and the catalog's documents run as `local`.
+  # opened unless shell.allow lists prefixes, and the catalog's documents run as `local`: an entry
+  # shell-open writes carries the catalog flag, and catalog: lists the catalog's URIs for an entry
+  # written any other way.
   - mounts: shell.apps
     allow: { bind: shell.allow }
     catalog: { bind: shell.catalog_uris }

@@ -38,6 +38,7 @@
 #include <cvc/ariadne/mount_scene.h>  // ARIADNE_SHELL.md 4.3 a mount's scene, datasets and keys
 #include <cvc/ariadne/net_host.h>     // net_host_status (the net capability tokens)
 #include <cvc/ariadne/oidc_host.h>    // pump_oidc
+#include <cvc/ariadne/principal.h>    // set_scope_principal: what a mount runs as (SH11)
 #include <cvc/ariadne/requires.h>     // free_heads: the isolation rules' oidc check
 #include <cvc/ariadne/rich_text.h>    // §5.20 parse_text_style
 #include <cvc/ariadne/stream_intrinsics.h> // retarget_document_streams: a move takes its streams
@@ -1655,9 +1656,10 @@ struct Runtime::Impl {
   // (finish_context, the name probe): host_proxied in an `any` group, as they are elsewhere
   // (null: group 0, the init lane). `host` is the program's async host (ictx.host), which
   // (file-pick) parks it on.
+  // `scope` is the program's (its root_path): what it saves is fetched as its principal.
   void install_host_verbs(const std::shared_ptr<cvc::state_exec::environment> &env,
                           cvc::state_exec::exec_group *group, cvc::state_exec::async_host &host,
-                          const NotifyScope &notify) const;
+                          const NotifyScope &notify, const std::string &scope) const;
   // §10.8 (file-pick): whether a picker is open (one at a time), and the Runtime's own "Open
   // file" window, drawn by render() where the host has no picker. Shared with the verb, as a
   // program may outlive this Runtime. Drawn and opened on the drawing thread; `cancel` is set by a
@@ -1674,7 +1676,8 @@ struct Runtime::Impl {
   // file-pick parks its program on `host` and opens the picker on the host thread: through the
   // host-call queue of the pump_all holding `group` (null: group 0, the init lane, inline).
   void bind_file_verbs(const std::shared_ptr<cvc::state_exec::environment> &env,
-                       cvc::state_exec::exec_group *group, cvc::state_exec::async_host &host) const;
+                       cvc::state_exec::exec_group *group, cvc::state_exec::async_host &host,
+                       const std::string &scope) const;
 
   // §5.29 saving a picture or a video: a context menu's Save image... / Save video..., and
   // (save-url). A save's bytes are fetched as the widget's are (image_cache().fetch), the file is
@@ -1764,6 +1767,7 @@ struct Runtime::Impl {
     MediaSave m;
     m.url = uri;
     m.auth = w.media_auth;
+    m.scope = current_prefix(); // fetched as its principal (ARIADNE_SHELL.md 4.12)
     m.video = video;
     backend->item_save(m);
   }
@@ -2692,6 +2696,7 @@ struct Runtime::Impl {
     std::string as;
     std::string uri; // as the entry gives it
     std::vector<std::pair<std::string, std::string>> args;
+    bool catalog = false;            // the entry's catalog flag as it opened (4.12)
     std::string canonical;           // where its bytes came from
     std::string principal;           // local, file:<dir> or remote:<origin> (4.12)
     std::string name;                // its application name
@@ -2755,7 +2760,7 @@ struct Runtime::Impl {
                                       const std::string &bind, const std::string &scope) const;
   std::string mount_norm(const std::string &uri, const std::string &base) const;
   std::string mount_principal(const Widget &w, const std::string &scope, const std::string &uri,
-                              const std::string &canonical) const;
+                              const std::string &canonical, bool catalog) const;
   Runtime::MountBudget mount_budget(const MountSlot &slot) const;
   void apply_mount_budget(MountSlot &slot);
   void measure_mounts(); // their memory, their time held at the limit, the notice, the mirror
@@ -4392,6 +4397,7 @@ void Runtime::Impl::emit_node(const Widget &w) {
         // icon_size: says), so a phone's dense screen gets a sharp one.
         media::ImageRequest rq;
         rq.uri = icon;
+        rq.scope = current_prefix(); // fetched as its principal (ARIADNE_SHELL.md 4.12)
         rq.auth = w.media_auth;
         rq.w = 3 * std::max(16, static_cast<int>(std::lround(w.icon_size)));
         media::ImageView v;
@@ -4704,6 +4710,7 @@ void Runtime::Impl::emit_media_image(const Widget &w, const std::string &uri, co
   const bool fill = w.img_fill > 0.0;
   media::ImageRequest rq;
   rq.uri = uri;
+  rq.scope = current_prefix(); // fetched as its principal (ARIADNE_SHELL.md 4.12)
   rq.auth = w.media_auth;
   rq.w = fill ? fill_box(draw_w) : draw_w;
   // A box keeps its height however the width is rounded: the raster's is scaled with it.
@@ -4785,6 +4792,7 @@ bool Runtime::Impl::expand_emoji(const std::string &value, const std::string &ma
             key += "#" + to;
             media::PlayerSource ps;
             ps.uri = to;
+            ps.scope = current_prefix(); // fetched as its principal (ARIADNE_SHELL.md 4.12)
             ps.video = true;
             ps.frame_w = ps.frame_h = 64;
             ps.loop = ps.muted = true;
@@ -4809,6 +4817,7 @@ bool Runtime::Impl::expand_emoji(const std::string &value, const std::string &ma
             // shape; an animated GIF or WebP moves, as an image:'s does.
             media::ImageRequest rq;
             rq.uri = to;
+            rq.scope = current_prefix(); // fetched as its principal (ARIADNE_SHELL.md 4.12)
             rq.w = 32;
             media::ImageView v;
             pic = media_picture(rq, v);
@@ -5064,6 +5073,7 @@ bool Runtime::Impl::open_backdrop(const Widget &w, bool window, bool cell) {
     key += "#" + ref;
     media::PlayerSource ps;
     ps.uri = ref;
+    ps.scope = current_prefix(); // fetched as its principal (ARIADNE_SHELL.md 4.12)
     ps.auth = bg.auth;
     ps.video = true;
     ps.frame_w = 960;
@@ -5092,6 +5102,7 @@ bool Runtime::Impl::open_backdrop(const Widget &w, bool window, bool cell) {
     // than the cache's cap.
     media::ImageRequest rq;
     rq.uri = ref;
+    rq.scope = current_prefix(); // fetched as its principal (ARIADNE_SHELL.md 4.12)
     rq.auth = bg.auth;
     rq.w = std::max(1, image_cache().limits().max_image_px / 2);
     rq.h = 0;
@@ -5213,6 +5224,7 @@ void Runtime::Impl::emit_player(const Widget &w, const char *label) {
   const bool decorative = !w.controls;
   media::PlayerSource ps;
   ps.uri = uri;
+  ps.scope = current_prefix(); // fetched as its principal (ARIADNE_SHELL.md 4.12)
   ps.auth = w.media_auth;
   ps.video = video;
   ps.frame_w = bw;
@@ -5293,6 +5305,7 @@ void Runtime::Impl::emit_player(const Widget &w, const char *label) {
     } else if (media::is_uri(w.poster)) {
       media::ImageRequest rq;
       rq.uri = w.poster;
+      rq.scope = current_prefix(); // fetched as its principal (ARIADNE_SHELL.md 4.12)
       rq.auth = w.media_auth;
       rq.w = bw;
       rq.h = bh;
@@ -6063,6 +6076,7 @@ std::string Runtime::Impl::tray_picture(const Widget &w) {
   if (media::is_video_uri(icon)) {
     media::PlayerSource ps;
     ps.uri = icon;
+    ps.scope = current_prefix(); // fetched as its principal (ARIADNE_SHELL.md 4.12)
     ps.auth = w.media_auth;
     ps.video = true;
     ps.frame_w = ps.frame_h = kPx;
@@ -6079,6 +6093,7 @@ std::string Runtime::Impl::tray_picture(const Widget &w) {
   }
   media::ImageRequest rq;
   rq.uri = icon;
+  rq.scope = current_prefix(); // fetched as its principal (ARIADNE_SHELL.md 4.12)
   rq.auth = w.media_auth;
   rq.w = rq.h = kPx;
   rq.fit = media::Fit::Cover;
@@ -6502,17 +6517,21 @@ std::string Runtime::Impl::mount_norm(const std::string &uri, const std::string 
   return out;
 }
 
-// 4.12 who a mount runs as, from where its bytes came: `local` for a cvc:// or state:// document
-// and for one the slot's catalog: lists, `remote:<scheme>://<host>` for one fetched from the
-// network, `file:<its directory>` for any other local file.
+// 4.12 who a mount runs as, from where its bytes came: `local` for a cvc:// or state:// document,
+// and for a local file the slot's catalog: lists or whose entry's catalog flag is set;
+// `remote:<scheme>://<host>` for one fetched from the network, whatever either says;
+// `file:<its directory>` for any other local file. The slot's document writes both: a mounted
+// document cannot write outside its own scope (§7.4), so it cannot name itself a catalog's.
 std::string Runtime::Impl::mount_principal(const Widget &w, const std::string &scope,
-                                           const std::string &uri,
-                                           const std::string &canonical) const {
+                                           const std::string &uri, const std::string &canonical,
+                                           bool catalog) const {
   const Uri u = parse_uri(uri);
   if (u.scheme == "cvc" || u.scheme == "state")
     return "local";
   if (u.scheme == "http" || u.scheme == "https")
     return "remote:" + u.scheme + "://" + u.path.substr(0, u.path.find('/'));
+  if (catalog)
+    return "local";
   const MountsSpec none{}; // a slot without a spec (a local, so no static state)
   const MountsSpec &spec = w.mounts ? *w.mounts : none;
   const std::string mine = mount_norm(uri, spec.base);
@@ -6522,7 +6541,10 @@ std::string Runtime::Impl::mount_principal(const Widget &w, const std::string &s
       return "local";
   }
   const std::string path = canonical.empty() ? mine : canonical;
-  return "file:" + std::filesystem::path(path).parent_path().generic_string();
+  // A name with no directory (a loader that gave no canonical path, and no base) is in the current
+  // one: a principal names a directory, and SH11's store refuses an empty one (4.12).
+  const std::string dir = std::filesystem::path(path).parent_path().generic_string();
+  return "file:" + (dir.empty() ? std::string(".") : dir);
 }
 
 // 4.11 a mount's budget: its principal's default, each part the entry's budget.<part> when set.
@@ -6641,7 +6663,24 @@ void Runtime::Impl::open_mount(MountSlot &slot, const Widget &w) {
   slot.stamps = std::move(r.source_stamps);
   if (!r.ok)
     return refuse_mount(slot, r.error.empty() ? "it could not be loaded" : r.error);
-  slot.principal = mount_principal(w, slot.parent_scope, slot.uri, slot.canonical);
+  slot.principal = mount_principal(w, slot.parent_scope, slot.uri, slot.canonical, slot.catalog);
+  // 4.12 SH11: what its programs and widgets reach (the network, its credentials, end-to-end keys
+  // and sign-ins) is its principal's, recorded under its scope before any of them is built. The
+  // entry may give a local application a network of its own (shell.apps.<as>.net_policy,
+  // .credential_store, .e2ee_store, as a launcher's flags take them); a host check refuses one
+  // that does not open, and a sandboxed principal one at all.
+  {
+    ScopePrincipal who;
+    who.principal = slot.principal;
+    const std::string entry =
+        slot.slot_key + cvc::state::SEPARATOR + slot.as + cvc::state::SEPARATOR;
+    who.net_policy = read_string(app, entry + "net_policy");
+    who.credential_store = read_string(app, entry + "credential_store");
+    who.e2ee_store = read_string(app, entry + "e2ee_store");
+    if (const std::string why = set_scope_principal(app, sub, who); !why.empty())
+      return refuse_mount(slot, why);
+    slot.principal = scope_principal(app, sub).principal; // as the store keys it
+  }
   slot.wrapper = std::make_unique<Widget>(std::move(r.wrapper));
   if (!slot.wrapper->app_name.empty())
     slot.name = slot.wrapper->app_name;
@@ -6689,6 +6728,9 @@ void Runtime::Impl::close_mount(const std::string &sub, bool forget_init) {
     } catch (const std::exception &) {
     }
   }
+  // 4.12: its programs and their children are gone (cleared only now, so none is built in between
+  // as the scope's parent); the next open records it again.
+  clear_scope_principal(app, sub);
   for (auto q = quit_apps.begin(); q != quit_apps.end();)
     q = path_under(*q, sub) ? quit_apps.erase(q) : std::next(q);
   for (std::map<std::string, std::string> *m : {&mount_names, &mount_functions})
@@ -6730,6 +6772,7 @@ bool Runtime::Impl::reconcile_mounts_once() {
     const Widget *w;
     std::string key, scope, as, uri, sub;
     std::vector<std::pair<std::string, std::string>> args;
+    bool catalog = false; // 4.12 <entry>.catalog: the slot's document says it is its catalog's
   };
   std::vector<Want> want;
   std::set<std::string> wanted;
@@ -6761,6 +6804,7 @@ bool Runtime::Impl::reconcile_mounts_once() {
         continue;
       }
       Want x{w, key, scope, as, uri, resolve_bind(scope, "includes." + as), {}};
+      x.catalog = to_bool_int(read_string(app, entry + cvc::state::SEPARATOR + "catalog"), 0) != 0;
       try {
         if (cvc::state *args = tree.findDescendant(entry + cvc::state::SEPARATOR + "args"))
           for (const std::string &a : args->childNames())
@@ -6776,15 +6820,24 @@ bool Runtime::Impl::reconcile_mounts_once() {
     }
   }
   doc_slot_->set(doc_key);
-  // Close the mounts whose entry went, or whose document or args changed, deepest first.
+  // Close the mounts whose entry went, or whose document or args changed, deepest first. One whose
+  // catalog flag changed closes too, its state kept, when that changes its principal: it opens
+  // again as the new one (4.12). When it does not (catalog: lists it as well), it runs on.
   std::vector<std::pair<std::string, bool>> closing; // sub-prefix, a different document there
-  for (const auto &[sub, slot] : mount_slots_) {
+  for (auto &[sub, slot] : mount_slots_) {
     const auto x =
         std::find_if(want.begin(), want.end(), [&](const Want &v) { return v.sub == sub; });
-    if (x == want.end() || x->key != slot.slot_key)
+    if (x == want.end() || x->key != slot.slot_key) {
       closing.emplace_back(sub, false);
-    else if (x->uri != slot.uri || x->args != slot.args)
+    } else if (x->uri != slot.uri || x->args != slot.args) {
       closing.emplace_back(sub, true);
+    } else if (x->catalog != slot.catalog) {
+      if (mount_principal(*x->w, slot.parent_scope, slot.uri, slot.canonical, x->catalog) !=
+          slot.principal)
+        closing.emplace_back(sub, false);
+      else
+        slot.catalog = x->catalog;
+    }
   }
   if (!closing.empty()) {
     std::sort(closing.begin(), closing.end(),
@@ -6803,6 +6856,7 @@ bool Runtime::Impl::reconcile_mounts_once() {
       slot.as = x.as;
       slot.uri = x.uri;
       slot.args = x.args;
+      slot.catalog = x.catalog;
       MountSlot &s = mount_slots_.emplace(x.sub, std::move(slot)).first->second;
       open_mount(s, *x.w);
       changed = true;
@@ -7727,6 +7781,14 @@ Runtime::Impl::~Impl() {
   frame_handle_.reset();
   group_.reset();
   retired_groups_.clear();
+  // ARIADNE_SHELL.md 4.12 its mounts' principals, which the app keeps by scope, once none of their
+  // processes is left: another document at this prefix starts with none.
+  try {
+    for (const auto &[sub, slot] : mount_slots_)
+      clear_scope_principal(app, sub);
+  } catch (const std::exception &e) {
+    teardown_note("tearing down", "clearing its mounts' principals", e.what());
+  }
 }
 
 void Runtime::Impl::kill_and_reap(cvc::state_exec::async_scheduler &sched,
@@ -8173,19 +8235,19 @@ void Runtime::Impl::finish_context(ActionContext &ac, cvc::state_exec::exec_grou
   // app's, then this document's own, each by its kind.
   install_providers(app, ac.env, ac.ictx, group);
   bind_own_intrinsics(ac.env, ac.ictx, group);
-  install_host_verbs(ac.env, group, *ac.ictx.host, *ac.notify);
+  install_host_verbs(ac.env, group, *ac.ictx.host, *ac.notify, ac.ictx.root_path);
   bind_has(ac.env, program_has(group));
 }
 
 void Runtime::Impl::install_host_verbs(const cvc::state_exec::environment_ptr &env,
                                        cvc::state_exec::exec_group *group,
-                                       cvc::state_exec::async_host &host,
-                                       const NotifyScope &notify) const {
+                                       cvc::state_exec::async_host &host, const NotifyScope &notify,
+                                       const std::string &scope) const {
   namespace se = cvc::state_exec;
   // The file verbs bind into the env as they are, in every group (bind_file_verbs): (file-info)
   // and (file-forget) are thread-safe, and (file-pick) is async, which a host_proxied wrapper
   // could not park; it opens its picker on the host thread itself.
-  bind_file_verbs(env, group, host);
+  bind_file_verbs(env, group, host, scope);
   // The backend's verbs drive its window and clipboard, which are the host thread's: they are
   // host_proxied (S1-Q7). In an `any` group each native runs on the pump_all caller's thread
   // (exec_group::install), as install_providers binds a host_proxied provider; in group 0, in a
@@ -8363,7 +8425,8 @@ std::string handle_arg(const char *verb, std::span<const cvc::state_exec::value_
 
 void Runtime::Impl::bind_file_verbs(const std::shared_ptr<cvc::state_exec::environment> &env,
                                     cvc::state_exec::exec_group *group,
-                                    cvc::state_exec::async_host &host) const {
+                                    cvc::state_exec::async_host &host,
+                                    const std::string &scope) const {
   namespace se = cvc::state_exec;
   cvc::app *const app_ptr = &app;
   const std::weak_ptr<FilePickHub> weak_hub = file_pick;
@@ -8493,8 +8556,9 @@ void Runtime::Impl::bind_file_verbs(const std::shared_ptr<cvc::state_exec::envir
   if (backend)
     se::register_async_fn(
         env, host, "save-url",
-        [weak_saves, &host](std::span<const se::value_t> args) -> se::async_work {
-          const MediaSave m = save_url_request(args);
+        [weak_saves, &host, scope](std::span<const se::value_t> args) -> se::async_work {
+          MediaSave m = save_url_request(args);
+          m.scope = scope; // fetched as its program's principal (ARIADNE_SHELL.md 4.12)
           se::async_work work;
           work.start = [weak_saves, m,
                         fin = host.make_finisher()](const std::shared_ptr<se::async_call> &call) {
@@ -8579,7 +8643,7 @@ void Runtime::Impl::prepare_save(const MediaSave &m) {
   prepared_save->key = key;
   const long gen = prepared_save->gen = ++prepared_gen;
   const std::weak_ptr<SaveHub> weak = saves;
-  image_cache().fetch(m.url, m.auth, [this, weak, gen, m](media::FetchResult r) {
+  image_cache().fetch(m.url, m.auth, m.scope, [this, weak, gen, m](media::FetchResult r) {
     const std::shared_ptr<SaveHub> hub = weak.lock();
     if (!hub)
       return;
@@ -8654,7 +8718,8 @@ void Runtime::Impl::start_save(SaveJob job) {
 #endif
   const std::weak_ptr<SaveHub> weak = saves;
   auto held = std::make_shared<SaveJob>(std::move(job));
-  image_cache().fetch(held->save.url, held->save.auth, [this, weak, held](media::FetchResult r) {
+  const MediaSave &s = held->save;
+  image_cache().fetch(s.url, s.auth, s.scope, [this, weak, held](media::FetchResult r) {
     const std::shared_ptr<SaveHub> hub = weak.lock();
     if (!hub) {
       if (held->done) {
@@ -9297,7 +9362,7 @@ void Runtime::Impl::load_names() const {
     // As the document's programs get them: by kind in an `any` group, the host verbs too.
     install_providers(app, env, ictx, group_.get());
     bind_own_intrinsics(env, ictx, group_.get());
-    install_host_verbs(env, group_.get(), *ictx.host, notify);
+    install_host_verbs(env, group_.get(), *ictx.host, notify, ictx.root_path);
     for (const se::environment *e = env.get(); e; e = e->outer.get())
       for (const auto &kv : e->bindings)
         found.insert(kv.first);

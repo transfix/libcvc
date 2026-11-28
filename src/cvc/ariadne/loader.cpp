@@ -3169,7 +3169,7 @@ CVC_ARI_NOINLINE void finish_mount(Ctx &ctx, const YAML::Node &n, const std::str
              "grant them with link: {args: {to: args, mode: ro}}");
   // §12 link: parent-scope holes — each entry becomes a transparent link node the Runtime plants
   // inside the mount's sub-prefix (created there, not here — the loader is state-free). Value form
-  // `name: target` (rw); map form `name: { to: target, mode: ro|rw }`.
+  // `name: target` (rw); map form `name: { to: target, mode: ro|rw }` (no mode: ro).
   if (const YAML::Node lk = n["link"]; lk && lk.IsMap()) {
     for (const auto &kv : lk) {
       if (!kv.first.IsScalar())
@@ -3183,7 +3183,7 @@ CVC_ARI_NOINLINE void finish_mount(Ctx &ctx, const YAML::Node &n, const std::str
         // Fail CLOSED: only the exact token "rw" (case-insensitive) is writable; a missing /
         // mistyped mode is treated as read-only, and an unrecognized one warns — a security
         // field must never fail open (a typo silently granting write).
-        std::string mode = str(v, "mode", "rw");
+        std::string mode = str(v, "mode", "ro");
         std::transform(mode.begin(), mode.end(), mode.begin(),
                        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
         h.writable = (mode == "rw");
@@ -3210,7 +3210,7 @@ CVC_ARI_NOINLINE void finish_mount(Ctx &ctx, const YAML::Node &n, const std::str
   // channel its parent exposes; it LOWERS into a transparent-link hole under the reserved
   // `channels.` subtree, so wire_holes plants it and intrinsics.cpp's resolve_channel follows it (a
   // granted channel resolves to the parent's key). Value form `local: parent` (rw); map form
-  // `local: { to: parent, mode: ro|rw }`. Fail-closed on mode, like link:.
+  // `local: { to: parent, mode: ro|rw }`. Fail-closed on mode, like link: (no mode: ro).
   if (const YAML::Node ch = n["channels"]; ch && ch.IsMap()) {
     for (const auto &kv : ch) {
       if (!kv.first.IsScalar())
@@ -3222,7 +3222,7 @@ CVC_ARI_NOINLINE void finish_mount(Ctx &ctx, const YAML::Node &n, const std::str
         target = v.Scalar();
       } else if (v.IsMap()) {
         target = str(v, "to");
-        std::string mode = str(v, "mode", "rw");
+        std::string mode = str(v, "mode", "ro");
         std::transform(mode.begin(), mode.end(), mode.begin(),
                        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
         writable = (mode == "rw");

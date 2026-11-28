@@ -20,11 +20,12 @@
 // select.h -- single-process level-of-detail selection math.
 //
 // Pure arithmetic: no VTK, no GL, no I/O, and no allocation on the hot path.
-// Two consumers share it and neither may fork it:
+// Its consumers share it and none may fork it:
 //
-//   * nav_city_swarm / nav_fog_ghost -- the Austin bundle, whose merged
-//     buildings actor is 978,242 triangles and whose agent glyphs rasterize a
-//     full mesh at 2 px (docs/roadmap/RENDER_PERF_ROADMAP.md, phases 1-2);
+//   * cvcGL's LodGraphicsNode and the views built on it, first for the Austin
+//     bundle, whose merged buildings actor is 978,242 triangles and whose agent
+//     glyphs rasterize a full mesh at 2 px (docs/roadmap/RENDER_PERF_ROADMAP.md,
+//     phases 1-2);
 //   * the L-System Laboratory, which selects terrain chunks, vegetation bands,
 //     rocks and building shells against the same knobs
 //     (docs/roadmap/LSYSTEM-LABORATORY-ROADMAP.md section 8.5).
