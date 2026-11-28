@@ -411,8 +411,22 @@ public:
   void pick_context_entry(Runtime &rt, const std::string &id);
 
   // Lay out window `id`'s body (from the last walk) into width x height cells. Mouse events fed
-  // for that window hit-test against this layout.
+  // for that window hit-test against this layout. A body larger than that scrolls on each axis
+  // where it is: it keeps the focused widget in view until the wheel (feed_window) or the host's
+  // scroll bar (scroll_window_to) moves it.
   TermRows render_window(const std::string &id, int width, int height);
+  // Window `id`'s scroll as render_window last laid it out: the body's natural size, the view's,
+  // and the body's cell at the view's top-left. A host draws its scroll bars from it: the body
+  // scrolls on an axis where content_* > view_*.
+  struct HostedScroll {
+    int content_w = 0, content_h = 0;
+    int view_w = 0, view_h = 0;
+    int left = 0, top = 0;
+  };
+  HostedScroll window_scroll(const std::string &id) const;
+  // The host's scroll bar moved: from the next render_window, window `id`'s body shows from cell
+  // (left, top), as after a turn of the wheel, until Tab or an arrow key moves the focus.
+  void scroll_window_to(const std::string &id, int left, int top);
   // feed() for one window: mouse coordinates are local to that window's body, and Tab / arrow
   // focus moves stay inside it.
   bool feed_window(Runtime &rt, const std::string &id, const TermEvent &ev);

@@ -43,6 +43,7 @@
 #define Uses_TPalette
 #define Uses_TProgram
 #define Uses_TRect
+#define Uses_TScrollBar
 #define Uses_TStatusDef
 #define Uses_TStatusItem
 #define Uses_TStatusLine
@@ -212,6 +213,10 @@ public:
   void draw() override;
   void handleEvent(TEvent &ev) override;
   TPalette &getPalette() const override;
+  // A turn of the wheel over this body (or its window's frame): up and down go to the backend,
+  // which scrolls a text_view under the pointer or else the window; sideways moves the window's
+  // horizontal scroll bar.
+  void wheel(const TEvent &ev);
   // getPalette()'s answers (TVision hands out a mutable reference).
   mutable TPalette window_text_{"\x06\x07", 2};
   mutable TPalette desktop_text_{"\x01\x01", 2};
@@ -219,7 +224,26 @@ public:
 
 private:
   Host &host_;
+  bool drawing_ = false; // in draw(): a scroll bar shown or hidden from there redraws under it
   bool feed_mouse(TermEvent::Mouse kind, TPoint where, int button);
+};
+
+class ContentWindow;
+
+// One of a window's scroll bars, on its frame where tvision's standardScrollBar puts them: set from
+// the body's layout after each draw (FtxuiBackend::window_scroll), shown only while the body is
+// larger than the window on its axis. Moved by the user (its arrows, a click in its track, a drag
+// of its thumb), it scrolls the body (FtxuiBackend::scroll_window_to).
+class HostScrollBar : public TScrollBar {
+public:
+  HostScrollBar(const TRect &r, ContentWindow &win) : TScrollBar(r), win_(win) {}
+  void scrollDraw() override; // the value changed
+  // Set from the layout: on, at `value` of 0 .. `max`, a page being `page` cells; or hidden.
+  void set(bool on, int value, int max, int page);
+
+private:
+  ContentWindow &win_;
+  bool quiet_ = false; // in set(): the layout moved it, not the user
 };
 
 class ContentWindow : public TWindow {
@@ -236,8 +260,34 @@ public:
     content = new ContentView(inner, host, id);
     content->growMode = gfGrowHiX | gfGrowHiY;
     insert(content);
+    // In front of the content, over the frame's right column and bottom row (standardScrollBar's
+    // places), hidden until the body is larger than the window.
+    const TRect e = getExtent();
+    vbar = new HostScrollBar(TRect(e.b.x - 1, e.a.y + 1, e.b.x, e.b.y - 1), *this);
+    hbar = new HostScrollBar(TRect(e.a.x + 2, e.b.y - 1, e.b.x - 2, e.b.y), *this);
+    for (HostScrollBar *b : {vbar, hbar}) {
+      b->hide();
+      insert(b);
+    }
   }
   void close() override; // the close box: the document decides (tree.<id>.open)
+  // tvision hands a turn of the wheel to every window, front to back, wherever the pointer is
+  // (evMouseWheel is neither positional nor focused), and a scroll bar takes it from anywhere. So
+  // the first window under the pointer takes it here, for its body, and no other window sees it.
+  void handleEvent(TEvent &ev) override {
+    if (ev.what == evMouseWheel) {
+      if (mouseInView(ev.mouse.where)) {
+        content->wheel(ev);
+        clearEvent(ev);
+      }
+      return;
+    }
+    TWindow::handleEvent(ev);
+  }
+  // The scroll bars, from the body's layout render_window just made.
+  void update_bars();
+  // A scroll bar moved: the body shows from where the two bars say.
+  void bars_moved();
   // How the user moves and resizes a window: a drag of its frame (the corner resizes), the
   // keyboard's Ctrl-F5, the zoom box. A size they leave it at is theirs.
   void dragView(TEvent &ev, uchar mode, TRect &limits, TPoint minSize, TPoint maxSize) override {
@@ -255,6 +305,7 @@ public:
     min = kMinWindow;
   }
   ContentView *content = nullptr;
+  HostScrollBar *vbar = nullptr, *hbar = nullptr;
   std::string id;
   std::string shown_title;
   // Until the user resizes it, the host sizes the window on every walk, as the FTXUI loop does
@@ -820,6 +871,8 @@ TPalette &ContentView::getPalette() const {
 void ContentView::draw() {
   const TColorAttr normal = getColor(1);
   const TermRows rows = host_.be.render_window(id, size.x, size.y);
+  const bool outer = !drawing_;
+  drawing_ = true;
   for (int y = 0; y < size.y; ++y) {
     TDrawBuffer b;
     b.moveChar(0, ' ', normal, size.x);
@@ -840,6 +893,53 @@ void ContentView::draw() {
     }
     writeLine(0, static_cast<short>(y), static_cast<short>(size.x), 1, b);
   }
+  // The window's scroll bars follow the layout just drawn. Not from a draw that showing or hiding
+  // one of them caused (it redraws what is under it, this view included).
+  if (outer) {
+    if (auto *win = dynamic_cast<ContentWindow *>(owner))
+      win->update_bars();
+    drawing_ = false;
+  }
+}
+
+void ContentView::wheel(const TEvent &ev) {
+  const ushort turn = ev.mouse.wheel;
+  if (turn == mwUp || turn == mwDown) {
+    feed_mouse(turn == mwUp ? TermEvent::Mouse::WheelUp : TermEvent::Mouse::WheelDown,
+               ev.mouse.where, 0);
+  } else if (auto *win = dynamic_cast<ContentWindow *>(owner);
+             win && (win->hbar->state & sfVisible)) {
+    win->hbar->setValue(win->hbar->value + (turn == mwLeft ? -3 : 3)); // scrolls (scrollDraw)
+  }
+  drawView();
+}
+
+void HostScrollBar::scrollDraw() {
+  if (!quiet_)
+    win_.bars_moved();
+}
+
+void HostScrollBar::set(bool on, int value, int max, int page) {
+  quiet_ = true;
+  if (on) {
+    setParams(value, 0, max, std::max(1, page - 1), 1);
+    if (!(state & sfVisible))
+      show();
+  } else if (state & sfVisible) {
+    hide();
+  }
+  quiet_ = false;
+}
+
+void ContentWindow::update_bars() {
+  const FtxuiBackend::HostedScroll s = host_.be.window_scroll(id);
+  vbar->set(s.view_h > 0 && s.content_h > s.view_h, s.top, s.content_h - s.view_h, s.view_h);
+  hbar->set(s.view_w > 0 && s.content_w > s.view_w, s.left, s.content_w - s.view_w, s.view_w);
+}
+
+void ContentWindow::bars_moved() {
+  host_.be.scroll_window_to(id, hbar->value, vbar->value);
+  content->drawView();
 }
 
 bool ContentView::feed_mouse(TermEvent::Mouse kind, TPoint where, int button) {
@@ -868,10 +968,12 @@ void ContentView::handleEvent(TEvent &ev) {
   } else if (ev.what == evMouseMove) {
     feed_mouse(TermEvent::Mouse::Move, ev.mouse.where, 0);
   } else if (ev.what == evMouseWheel) {
-    feed_mouse(ev.mouse.wheel == mwUp ? TermEvent::Mouse::WheelUp : TermEvent::Mouse::WheelDown,
-               ev.mouse.where, 0);
-    drawView();
-    clearEvent(ev);
+    // A window's body gets the wheel from its window (ContentWindow::handleEvent); this is the
+    // background's, which tvision hands every turn to: only one over it, past every window.
+    if (mouseInView(ev.mouse.where)) {
+      wheel(ev);
+      clearEvent(ev);
+    }
   } else if (ev.what == evKeyDown) {
     TermEvent te;
     if (key_event(ev.keyDown, te) && host_.feed(id, te)) {

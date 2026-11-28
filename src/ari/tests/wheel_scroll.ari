@@ -1,0 +1,28 @@
+# wheel_scroll.ari — a window taller than it shows, beside the window in front, for
+# wheel_scroll_test.sh.
+#
+# "Feed" has 20 rows and room for 6 (ARIADNE.md §5.8: its body scrolls, with a scroll bar). It
+# opens first, so on the tvision desktop "Front" is the window in front and selected. The wheel
+# over Feed must scroll Feed, not the window in front; the wheel over Front, which fits, scrolls
+# nothing.
+
+meta:
+  name: Wheel scroll
+  author: cvc
+  min_libcvc: 4.0.0
+
+windows:
+  - window: Feed
+    id: feed
+    pos: [16, 32]
+    size: [160, 128] # 20 x 8 cells: 6 rows inside the frame
+    children:
+      - type: group
+        repeat: "20"
+        children:
+          - text: "row {i}."
+  - window: Front
+    id: front
+    pos: [400, 32]
+    children:
+      - text: "in front"

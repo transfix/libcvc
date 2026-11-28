@@ -1094,6 +1094,30 @@ TEST(AriadneFtxui, TheWheelScrollsAWindowThatOverflows) {
       << "a window that fits has nothing to scroll: the wheel is the host's";
 }
 
+// §5.8 the wheel scrolls from where the window shows: after the body followed the focus to its
+// end, a notch up shows the 3 rows above, not the top. (The body's place in its frame is read from
+// its layout, which the frame moves; FTXUI's reflect keeps only the part that shows.)
+TEST(AriadneFtxui, TheWheelGoesOnFromWhereTheFocusLeftTheWindow) {
+  REQUIRE_FTXUI();
+  std::vector<Widget> rows;
+  for (int i = 0; i < 20; ++i)
+    rows.push_back(text(std::string("r") + (i < 10 ? "0" : "") + std::to_string(i)));
+  rows.push_back(checkbox("Last", "last"));
+  Widget feed = window("Feed", rows);
+  feed.size.w = Extent{Unit::Px, 160}; // 20 columns
+  feed.size.h = Extent{Unit::Px, 128}; // 8 rows: 6 of content
+  Term t(group({feed}));
+  t.key("Tab"); // the focus on Last: the body shows its end
+  t.draw();
+  ASSERT_TRUE(t.shows("r19") && t.shows("[ ] Last") && !t.shows("r14")) << t.screen;
+  int x = 0, y = 0;
+  ASSERT_TRUE(find_cell(t.screen, "r17", x, y));
+  EXPECT_TRUE(t.mouse(TermEvent::Mouse::WheelUp, x, y));
+  t.draw();
+  EXPECT_TRUE(t.shows("r12") && t.shows("r17")) << "3 rows up from the end\n" << t.screen;
+  EXPECT_FALSE(t.shows("r11") || t.shows("r18")) << t.screen;
+}
+
 TEST(AriadneFtxui, CloseButtonClosesTheWindow) {
   REQUIRE_FTXUI();
   Widget w = window("Win", {text("body")});
@@ -1926,6 +1950,64 @@ TEST(AriadneFtxuiHosted, TheWheelScrollsAWindowBody) {
   t.be.feed_window(t.rt, "Feed", TermEvent::mouse_event(TermEvent::Mouse::WheelDown, 1, 1, 0));
   t.draw();
   EXPECT_EQ(first_row().substr(0, 3), "r08") << "stopped with the last row at the bottom";
+}
+
+// A host's scroll bars (tvision's, on the window frame) read the body's scroll from the last
+// layout and move it, on both axes; Tab puts the body back to following the focus.
+TEST(AriadneFtxuiHosted, AHostScrollBarReadsAndMovesTheBody) {
+  REQUIRE_FTXUI();
+  std::vector<Widget> rows;
+  for (int i = 0; i < 12; ++i)
+    rows.push_back(text(std::string("r") + (i < 10 ? "0" : "") + std::to_string(i) + "-abcdefgh"));
+  rows.push_back(checkbox("Last", "last"));
+  Term t(group({window("Feed", rows)}), hosted_opts());
+  const auto row = [&](int y) {
+    const TermRows r = t.be.render_window("Feed", 8, 4);
+    std::string s;
+    for (const TermCell &c : r.at(static_cast<std::size_t>(y)))
+      s += c.ch;
+    return s;
+  };
+  ASSERT_EQ(row(0), "r00-abcd");
+  FtxuiBackend::HostedScroll s = t.be.window_scroll("Feed");
+  EXPECT_EQ(s.content_h, 13);
+  EXPECT_EQ(s.view_h, 4);
+  EXPECT_EQ(s.content_w, 12) << "r00-abcdefgh";
+  EXPECT_EQ(s.view_w, 8);
+  EXPECT_EQ(s.top, 0);
+  EXPECT_EQ(s.left, 0);
+
+  t.be.scroll_window_to("Feed", 0, 5); // the vertical bar dragged
+  EXPECT_EQ(row(0), "r05-abcd");
+  EXPECT_EQ(t.be.window_scroll("Feed").top, 5);
+  t.be.scroll_window_to("Feed", 4, 5); // and the horizontal one
+  EXPECT_EQ(row(0), "abcdefgh");
+  s = t.be.window_scroll("Feed");
+  EXPECT_EQ(s.left, 4);
+  EXPECT_EQ(s.top, 5);
+  t.be.scroll_window_to("Feed", 99, 99); // past the end: held at the last row and column
+  EXPECT_EQ(row(3).substr(0, 4), "Last");
+  s = t.be.window_scroll("Feed");
+  EXPECT_EQ(s.top, 13 - 4);
+  EXPECT_EQ(s.left, 12 - 8);
+
+  // The wheel after a bar moved goes on from there; the sideways place stays.
+  t.be.scroll_window_to("Feed", 4, 0);
+  row(0);
+  t.be.feed_window(t.rt, "Feed", TermEvent::mouse_event(TermEvent::Mouse::WheelDown, 1, 1, 0));
+  t.draw();
+  EXPECT_EQ(row(0), "abcdefgh");
+  s = t.be.window_scroll("Feed");
+  EXPECT_EQ(s.top, 3);
+  EXPECT_EQ(s.left, 4);
+
+  // Tab focuses Last, the last row: the body follows the focus again, from the left edge.
+  t.be.feed_window(t.rt, "Feed", TermEvent::key_event("Tab"));
+  t.draw();
+  EXPECT_EQ(row(3).substr(0, 8), "[ ] Last");
+  s = t.be.window_scroll("Feed");
+  EXPECT_EQ(s.top, 13 - 4);
+  EXPECT_EQ(s.left, 0);
 }
 
 TEST(AriadneFtxuiHosted, MenuItemsActivateThroughTheModel) {
