@@ -209,8 +209,9 @@ std::vector<table_panel> shipped_panels() {
   };
 }
 
+// Without its ".." segments, so the cvc:// search path holds no "..".
 #ifdef CVC_REPO_DIR
-fs::path repo_dir() { return fs::path(CVC_REPO_DIR); }
+fs::path repo_dir() { return fs::path(CVC_REPO_DIR).lexically_normal(); }
 #else
 fs::path repo_dir() {
   return fs::path(__FILE__).parent_path().parent_path().parent_path().parent_path();
