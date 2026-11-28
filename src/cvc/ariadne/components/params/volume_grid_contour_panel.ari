@@ -1,0 +1,94 @@
+# volume_grid_contour_panel.ari — GENERATED from cvc::param_table<cvc::volume_grid_contour_params> (inc/cvc/volume/volume_grid_contours.h)
+# by cvc::param_panel_ari (inc/cvc/core/param_panel.h). Do not edit: src/cvc/tests/param_panel_test.cpp
+# fails when it is not current, and writes it again when run with CVC_WRITE_PARAM_PANELS=1.
+#
+# One widget per field, in table order, bound to <keys>.<field>: the keys the table's
+# params_to_state and params_from_state read and seed (docs/PORT_PARAMETERS.md).
+# On a node: volume_grid's grid.contour.*.
+#
+# Units:
+#   volume_grid_contour_panel   a window: args keys, title, id; slots before and after the widgets
+#   volume_grid_contour_params  the widgets alone, to include in a window of your own: args keys
+#
+# Args (every one has a default, so a bare include works):
+#   keys   the key root the fields sit under (default graphics.root.children.grid.grid.contour)
+#   title  the window's title (default Grid contours)
+#   id     the instance id: the window's geometry persists under tree.<id> (default volume_grid_contour_panel)
+#
+# Use it:
+#     import: cvc://components/params/volume_grid_contour_panel.ari
+#     windows:
+#       - include: volume_grid_contour_panel
+#         args: { keys: graphics.root.children.grid.grid.contour }
+#         slots:
+#           after:
+#             - button: Run
+#               on: ...
+
+units:
+  volume_grid_contour_params:
+    args: { keys: "graphics.root.children.grid.grid.contour" }
+    type: group
+    children:
+      - checkbox: "Show"
+        bind: "{keys}.show"
+        def: true
+        tooltip: "show: draw the curves on the slices"
+      - checkbox: "Control points"
+        bind: "{keys}.control_points"
+        def: true
+        tooltip: "control_points: draw the curves' control points"
+      - slider_float: "Point size"
+        bind: "{keys}.point_size"
+        lo: 0.1
+        hi: 10
+        range: key
+        fmt: "%g"
+        def: 0.6
+        tooltip: "point_size: a control point's radius; a click takes a point within 1.5 times it (voxel; 0.1 .. 10)"
+      - slider_float: "Line width"
+        bind: "{keys}.line_width"
+        lo: 0.5
+        hi: 20
+        range: key
+        fmt: "%g"
+        def: 2
+        tooltip: "line_width: the curves' width (pixel; 0.5 .. 20)"
+      - checkbox: "Snap"
+        bind: "{keys}.snap"
+        def: false
+        tooltip: "snap: put new and moved points on voxel centres"
+      - checkbox: "Show 3d"
+        bind: "{keys}.show_3d"
+        def: true
+        tooltip: "show_3d: draw every slice's curves in the 3D view"
+      - checkbox: "Show surfaces"
+        bind: "{keys}.show_surfaces"
+        def: true
+        tooltip: "show_surfaces: draw the tiled surfaces in the 3D view"
+      - slider_float: "Surface opacity"
+        bind: "{keys}.surface_opacity"
+        lo: 0
+        hi: 1
+        range: key
+        fmt: "%g"
+        def: 1
+        tooltip: "surface_opacity: the tiled surfaces' opacity (0 .. 1)"
+      - checkbox: "Auto tile"
+        bind: "{keys}.auto_tile"
+        def: false
+        tooltip: "auto_tile: tile each time the contours are replaced (a source, a session, a data write) or traced"
+      - input_text: "Source"
+        bind: "{keys}.source"
+        def: ""
+        tooltip: "source: the state key whose data channel holds contours (a contour_stack or the grid's curves): they replace the grid's each time they change"
+
+  volume_grid_contour_panel:
+    args: { keys: "graphics.root.children.grid.grid.contour", title: "Grid contours", id: volume_grid_contour_panel }
+    window: "{title}"
+    id: "{id}"
+    children:
+      - slot: before
+      - include: volume_grid_contour_params
+        args: { keys: "{keys}" }
+      - slot: after

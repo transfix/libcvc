@@ -22,6 +22,10 @@ int main() { emit<cvc::skeleton_params>(); /* ... one line per struct */ }
 
 pycvc prints the same table for the structs it wraps: `pycvc.skeleton_params.markdown()`.
 
+Each table is also an Ariadne panel, generated the same way: `cvc://components/params/<stem>_panel.ari`
+(`cvc::param_panel_ari<P>()`, [`param_panel.h`](../inc/cvc/core/param_panel.h)), with a widget per
+field bound to the keys below.
+
 **Columns.** *Range* is the field's `min .. max` (`1e+300` and `1e+09` are the table's stand-ins for
 no upper bound). An enum's choices follow its type. A list's default is written as the CLI and the
 state key take it. An empty string default prints as two backticks.

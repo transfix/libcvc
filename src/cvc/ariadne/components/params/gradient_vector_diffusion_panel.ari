@@ -1,0 +1,65 @@
+# gradient_vector_diffusion_panel.ari — GENERATED from cvc::param_table<cvc::gradient_vector_diffusion_params> (inc/cvc/volume/gradient_vector_diffusion_params.h)
+# by cvc::param_panel_ari (inc/cvc/core/param_panel.h). Do not edit: src/cvc/tests/param_panel_test.cpp
+# fails when it is not current, and writes it again when run with CVC_WRITE_PARAM_PANELS=1.
+#
+# One widget per field, in table order, bound to <keys>.<field>: the keys the table's
+# params_to_state and params_from_state read and seed (docs/PORT_PARAMETERS.md).
+#
+# Units:
+#   gradient_vector_diffusion_panel   a window: args keys, title, id; slots before and after the widgets
+#   gradient_vector_diffusion_params  the widgets alone, to include in a window of your own: args keys
+#
+# Args (every one has a default, so a bare include works):
+#   keys   the key root the fields sit under (default gradient_vector_diffusion)
+#   title  the window's title (default Gradient vector diffusion)
+#   id     the instance id: the window's geometry persists under tree.<id> (default gradient_vector_diffusion_panel)
+#
+# Use it:
+#     import: cvc://components/params/gradient_vector_diffusion_panel.ari
+#     windows:
+#       - include: gradient_vector_diffusion_panel
+#         args: { keys: gradient_vector_diffusion }
+#         slots:
+#           after:
+#             - button: Run
+#               on: ...
+
+units:
+  gradient_vector_diffusion_params:
+    args: { keys: "gradient_vector_diffusion" }
+    type: group
+    children:
+      - input_int: "Iterations"
+        bind: "{keys}.iterations"
+        lo: 0
+        hi: 100000
+        def: 10
+        tooltip: "iterations: iterations of the diffusion (SegMed: 10) (0 .. 100000)"
+      - slider_float: "K"
+        bind: "{keys}.k"
+        lo: 0
+        hi: 1000
+        range: key
+        fmt: "%g"
+        def: 2
+        tooltip: "k: Eq. 3's k: a neighbour weighs exp(k (cos a - 1)), a the angle between the two vectors (0 .. 1000)"
+      - combo: "Weights"
+        bind: "{keys}.weights"
+        options: ["Current", "Initial"]
+        values: ["current", "initial"]
+        def: "current"
+        tooltip: "weights: the field whose angles weigh the neighbours: current (the field being diffused, the paper) or initial (the field before the first iteration, SegMed)"
+      - checkbox: "Normalize"
+        bind: "{keys}.normalize"
+        def: true
+        tooltip: "normalize: divide the result by its longest vector's length"
+
+  gradient_vector_diffusion_panel:
+    args: { keys: "gradient_vector_diffusion", title: "Gradient vector diffusion", id: gradient_vector_diffusion_panel }
+    window: "{title}"
+    id: "{id}"
+    children:
+      - slot: before
+      - include: gradient_vector_diffusion_params
+        args: { keys: "{keys}" }
+      - slot: after

@@ -22,8 +22,14 @@
 //                              a field as text (param_table.h's forms; ValueError if it does not
 //                              parse)
 //   P.markdown()               the table as the Markdown a port's docs include
+//   P.ari_panel(stem, keys, title)
+//                              the table as an Ariadne panel: the .ari text with units
+//                              <stem>_params and <stem>_panel, bound under `keys`
+//                              (cvc/core/param_panel.h; the shipped ones are
+//                              cvc://components/params/<stem>_panel.ari)
 
 %{
+#include <cvc/core/param_panel.h>
 #include <cvc/core/param_table.h>
 #include <stdexcept>
 %}
@@ -58,6 +64,9 @@ def _pycvc_install_params(cls):
     validate = cls.validate
     cls.fields = staticmethod(lambda: list(fields()))
     cls.validate = lambda self: list(validate(self))
+    panel = cls.ari_panel
+    cls.ari_panel = staticmethod(
+        lambda stem, keys, title: panel(stem, keys, title, "cvc::" + cls.__name__))
     cls.__init__ = __init__
     cls.from_dict = classmethod(from_dict)
     cls.to_dict = to_dict
@@ -120,6 +129,15 @@ def _pycvc_install_params(cls):
     return out;
   }
   static std::string markdown() { return cvc::params_markdown< P >(); }
+  static std::string ari_panel(const std::string &stem, const std::string &keys,
+                               const std::string &title, const std::string &table) {
+    cvc::param_panel_spec s;
+    s.stem = stem;
+    s.keys = keys;
+    s.title = title;
+    s.table = table;
+    return cvc::param_panel_ari< P >(s);
+  }
 }
 %pythoncode %{
 _pycvc_install_params(PYNAME)

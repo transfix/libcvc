@@ -1,0 +1,81 @@
+# mol_blur_panel.ari — GENERATED from cvc::param_table<cvc::mol::blur_params> (inc/cvc/mol/blur.h)
+# by cvc::param_panel_ari (inc/cvc/core/param_panel.h). Do not edit: src/cvc/tests/param_panel_test.cpp
+# fails when it is not current, and writes it again when run with CVC_WRITE_PARAM_PANELS=1.
+#
+# One widget per field, in table order, bound to <keys>.<field>: the keys the table's
+# params_to_state and params_from_state read and seed (docs/PORT_PARAMETERS.md).
+#
+# Units:
+#   mol_blur_panel   a window: args keys, title, id; slots before and after the widgets
+#   mol_blur_params  the widgets alone, to include in a window of your own: args keys
+#
+# Args (every one has a default, so a bare include works):
+#   keys   the key root the fields sit under (default mol_blur)
+#   title  the window's title (default Molecular blur)
+#   id     the instance id: the window's geometry persists under tree.<id> (default mol_blur_panel)
+#
+# Use it:
+#     import: cvc://components/params/mol_blur_panel.ari
+#     windows:
+#       - include: mol_blur_panel
+#         args: { keys: mol_blur }
+#         slots:
+#           after:
+#             - button: Run
+#               on: ...
+
+units:
+  mol_blur_params:
+    args: { keys: "mol_blur" }
+    type: group
+    children:
+      - slider_float: "Blobbiness"
+        bind: "{keys}.blobbiness"
+        lo: -23.442
+        hi: 0
+        range: key
+        fmt: "%g"
+        def: -2.3442
+        tooltip: "blobbiness: B in exp(B (r^2/R^2 - 1)), negative; nearer 0 blurs more ( .. 0); the table sets no other end, so the slider's is a guess"
+      - slider_float: "Resolution"
+        bind: "{keys}.resolution"
+        lo: 0
+        hi: 10
+        range: key
+        fmt: "%g"
+        def: 1
+        tooltip: "resolution: the spacing of the grid's points, unless dims gives the grid (Å; 0 .. ); the table sets no other end, so the slider's is a guess"
+      - input_text: "Dims"
+        bind: "{keys}.dims"
+        def: "[]"
+        tooltip: "dims: the grid's points along x, y and z, instead of resolution (2 .. ); a list, as [1, 2.5]"
+      - slider_float: "Padding"
+        bind: "{keys}.padding"
+        lo: 0
+        hi: 40
+        range: key
+        fmt: "%g"
+        def: 4
+        tooltip: "padding: the box: the atoms' centres padded by this many of the largest radius (0 .. ); the table sets no other end, so the slider's is a guess"
+      - slider_float: "Cutoff"
+        bind: "{keys}.cutoff"
+        lo: 0
+        hi: 1
+        range: key
+        fmt: "%g"
+        def: 0.001
+        tooltip: "cutoff: an atom reaches the grid points where its blob has fallen to this (0 .. 1)"
+      - checkbox: "Snap centres"
+        bind: "{keys}.snap_centres"
+        def: true
+        tooltip: "snap_centres: move each atom's centre to its nearest grid point first, as TexMol did"
+
+  mol_blur_panel:
+    args: { keys: "mol_blur", title: "Molecular blur", id: mol_blur_panel }
+    window: "{title}"
+    id: "{id}"
+    children:
+      - slot: before
+      - include: mol_blur_params
+        args: { keys: "{keys}" }
+      - slot: after

@@ -1,0 +1,137 @@
+# skeleton_panel.ari — GENERATED from cvc::param_table<cvc::skeleton_params> (inc/cvc/geometry/skeleton_params.h)
+# by cvc::param_panel_ari (inc/cvc/core/param_panel.h). Do not edit: src/cvc/tests/param_panel_test.cpp
+# fails when it is not current, and writes it again when run with CVC_WRITE_PARAM_PANELS=1.
+#
+# One widget per field, in table order, bound to <keys>.<field>: the keys the table's
+# params_to_state and params_from_state read and seed (docs/PORT_PARAMETERS.md).
+# On a node: mesh_lab's mesh_ops.skeleton.*.
+#
+# Units:
+#   skeleton_panel   a window: args keys, title, id; slots before and after the widgets
+#   skeleton_params  the widgets alone, to include in a window of your own: args keys
+#
+# Args (every one has a default, so a bare include works):
+#   keys   the key root the fields sit under (default graphics.root.children.mesh.mesh_ops.skeleton)
+#   title  the window's title (default Skeleton)
+#   id     the instance id: the window's geometry persists under tree.<id> (default skeleton_panel)
+#
+# Use it:
+#     import: cvc://components/params/skeleton_panel.ari
+#     windows:
+#       - include: skeleton_panel
+#         args: { keys: graphics.root.children.mesh.mesh_ops.skeleton }
+#         slots:
+#           after:
+#             - button: Run
+#               on: ...
+
+units:
+  skeleton_params:
+    args: { keys: "graphics.root.children.mesh.mesh_ops.skeleton" }
+    type: group
+    children:
+      - checkbox: "Robust"
+        bind: "{keys}.robust"
+        def: false
+        tooltip: "robust: filter a noisy sample with Robust Cocone first"
+      - slider_float: "Big ball ratio"
+        bind: "{keys}.big_ball_ratio"
+        lo: 0
+        hi: 1
+        fmt: "%g"
+        def: 0.0625
+        tooltip: "big_ball_ratio: Robust Cocone: a Delaunay ball is big when its squared radius exceeds this times a corner's mean squared nearest-neighbour distance (0 .. 1e+300); the table sets no other end, so the slider's is a guess"
+      - slider_float: "Theta if"
+        bind: "{keys}.theta_if"
+        lo: 0
+        hi: 1.5707963267948966
+        range: key
+        fmt: "%g"
+        def: 0.08726646259971647
+        tooltip: "theta_if: Robust Cocone: the angle below which a big ball meets the infinite one deeply (rad; 0 .. 1.5707963267948966)"
+      - slider_float: "Theta ff"
+        bind: "{keys}.theta_ff"
+        lo: 0
+        hi: 3.141592653589793
+        range: key
+        fmt: "%g"
+        def: 0.17453292519943295
+        tooltip: "theta_ff: Robust Cocone: the angle below which two big balls meet deeply (rad; 0 .. 3.141592653589793)"
+      - slider_float: "Cocone phi"
+        bind: "{keys}.cocone_phi"
+        lo: 0
+        hi: 1.5707963267948966
+        range: key
+        fmt: "%g"
+        def: 0.39269908169872414
+        tooltip: "cocone_phi: Tight Cocone: half the cocone's opening angle around the surface (rad; 0 .. 1.5707963267948966)"
+      - slider_float: "Sharp phi"
+        bind: "{keys}.sharp_phi"
+        lo: 0
+        hi: 3.141592653589793
+        range: key
+        fmt: "%g"
+        def: 2.0943951023931953
+        tooltip: "sharp_phi: Tight Cocone: facets meeting at more than this dihedral angle make a sharp edge (hard-coded in VolumeRover2) (rad; 0 .. 3.141592653589793)"
+      - slider_float: "Flat phi"
+        bind: "{keys}.flat_phi"
+        lo: 0
+        hi: 1.5707963267948966
+        range: key
+        fmt: "%g"
+        def: 1.0471975511965976
+        tooltip: "flat_phi: Tight Cocone: the normal deviation allowed between cocone neighbours of a flat point (uninitialised in VolumeRover2's dialog) (rad; 0 .. 1.5707963267948966)"
+      - slider_float: "Flatness ratio"
+        bind: "{keys}.flatness_ratio"
+        lo: 0
+        hi: 14.4
+        fmt: "%g"
+        def: 1.44
+        tooltip: "flatness_ratio: Tight Cocone: the squared thinness factor of a flat point (0 .. 1e+300); the table sets no other end, so the slider's is a guess"
+      - slider_float: "Medial theta"
+        bind: "{keys}.medial_theta"
+        lo: 0
+        hi: 1.5707963267948966
+        range: key
+        fmt: "%g"
+        def: 0.39269908169872414
+        tooltip: "medial_theta: medial axis: a Delaunay edge within this angle of a tangent plane is not chosen by the angle condition (rad; 0 .. 1.5707963267948966)"
+      - slider_float: "Medial ratio"
+        bind: "{keys}.medial_ratio"
+        lo: 0
+        hi: 640
+        fmt: "%g"
+        def: 64
+        tooltip: "medial_ratio: medial axis: a Delaunay edge is chosen when its squared length exceeds this times both ends' umbrella diameters (0 .. 1e+300); the table sets no other end, so the slider's is a guess"
+      - checkbox: "Discard small"
+        bind: "{keys}.discard_small"
+        def: false
+        tooltip: "discard_small: sheets: keep every cluster of at least threshold times the largest area, instead of the largest sheet_count"
+      - slider_float: "Threshold"
+        bind: "{keys}.threshold"
+        lo: 0
+        hi: 1
+        range: key
+        fmt: "%g"
+        def: 0.1
+        tooltip: "threshold: sheets: the area fraction discard_small keeps (0 .. 1)"
+      - input_int: "Sheet count"
+        bind: "{keys}.sheet_count"
+        lo: 0
+        hi: 1000000000
+        def: 2
+        tooltip: "sheet_count: sheets: how many of the largest planar clusters are sheets (the others are stars) (0 .. 1000000000)"
+      - checkbox: "Helix window"
+        bind: "{keys}.helix_window"
+        def: false
+        tooltip: "helix_window: also output each strand's Voronoi vertices of cell radius in (2, 3), the legacy protein-helix filter"
+
+  skeleton_panel:
+    args: { keys: "graphics.root.children.mesh.mesh_ops.skeleton", title: "Skeleton", id: skeleton_panel }
+    window: "{title}"
+    id: "{id}"
+    children:
+      - slot: before
+      - include: skeleton_params
+        args: { keys: "{keys}" }
+      - slot: after

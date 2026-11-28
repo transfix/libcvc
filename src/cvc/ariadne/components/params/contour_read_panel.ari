@@ -1,0 +1,84 @@
+# contour_read_panel.ari — GENERATED from cvc::param_table<cvc::contour_read_params> (inc/cvc/geometry/contours.h)
+# by cvc::param_panel_ari (inc/cvc/core/param_panel.h). Do not edit: src/cvc/tests/param_panel_test.cpp
+# fails when it is not current, and writes it again when run with CVC_WRITE_PARAM_PANELS=1.
+#
+# One widget per field, in table order, bound to <keys>.<field>: the keys the table's
+# params_to_state and params_from_state read and seed (docs/PORT_PARAMETERS.md).
+# On a node: contour_lab's tiler.read.*.
+#
+# Units:
+#   contour_read_panel   a window: args keys, title, id; slots before and after the widgets
+#   contour_read_params  the widgets alone, to include in a window of your own: args keys
+#
+# Args (every one has a default, so a bare include works):
+#   keys   the key root the fields sit under (default graphics.root.children.contours.tiler.read)
+#   title  the window's title (default Contour reading)
+#   id     the instance id: the window's geometry persists under tree.<id> (default contour_read_panel)
+#
+# Use it:
+#     import: cvc://components/params/contour_read_panel.ari
+#     windows:
+#       - include: contour_read_panel
+#         args: { keys: graphics.root.children.contours.tiler.read }
+#         slots:
+#           after:
+#             - button: Run
+#               on: ...
+
+units:
+  contour_read_params:
+    args: { keys: "graphics.root.children.contours.tiler.read" }
+    type: group
+    children:
+      - input_int: "First"
+        bind: "{keys}.first"
+        lo: -1
+        hi: 2147483647
+        def: -1
+        tooltip: "first: the first slice index read (-1: the first) (-1 .. )"
+      - input_int: "Last"
+        bind: "{keys}.last"
+        lo: -1
+        hi: 2147483647
+        def: -1
+        tooltip: "last: the last slice index read (-1: the last) (-1 .. )"
+      - input_text: "Include"
+        bind: "{keys}.include"
+        def: "[]"
+        tooltip: "include: component names to keep, as regular expressions (none: every one); a list, as [1, 2.5]"
+      - input_text: "Exclude"
+        bind: "{keys}.exclude"
+        def: "[]"
+        tooltip: "exclude: component names to drop, as regular expressions; a list, as [1, 2.5]"
+      - input_int: "Min points"
+        bind: "{keys}.min_points"
+        lo: 0
+        hi: 2147483647
+        def: 3
+        tooltip: "min_points: polygons with fewer vertices are dropped (0 .. )"
+      - slider_float: "Z spacing"
+        bind: "{keys}.z_spacing"
+        lo: 0
+        hi: 1
+        range: key
+        fmt: "%g"
+        def: 0
+        tooltip: "z_spacing: the slice spacing in world units, in place of the file's (0: the file's) (0 .. ); the table sets no other end, so the slider's is a guess"
+      - checkbox: "Apply transforms"
+        bind: "{keys}.apply_transforms"
+        def: true
+        tooltip: "apply_transforms: Reconstruct: map traces through their section transforms (world coordinates)"
+      - checkbox: "Keep open"
+        bind: "{keys}.keep_open"
+        def: false
+        tooltip: "keep_open: Reconstruct: keep open traces as polygons (they are skipped by default)"
+
+  contour_read_panel:
+    args: { keys: "graphics.root.children.contours.tiler.read", title: "Contour reading", id: contour_read_panel }
+    window: "{title}"
+    id: "{id}"
+    children:
+      - slot: before
+      - include: contour_read_params
+        args: { keys: "{keys}" }
+      - slot: after

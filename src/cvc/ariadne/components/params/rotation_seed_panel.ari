@@ -1,0 +1,67 @@
+# rotation_seed_panel.ari — GENERATED from cvc::param_table<cvc::rotation_seed_params> (inc/cvc/volume/seed_generators_params.h)
+# by cvc::param_panel_ari (inc/cvc/core/param_panel.h). Do not edit: src/cvc/tests/param_panel_test.cpp
+# fails when it is not current, and writes it again when run with CVC_WRITE_PARAM_PANELS=1.
+#
+# One widget per field, in table order, bound to <keys>.<field>: the keys the table's
+# params_to_state and params_from_state read and seed (docs/PORT_PARAMETERS.md).
+#
+# Units:
+#   rotation_seed_panel   a window: args keys, title, id; slots before and after the widgets
+#   rotation_seed_params  the widgets alone, to include in a window of your own: args keys
+#
+# Args (every one has a default, so a bare include works):
+#   keys   the key root the fields sit under (default rotation_seed)
+#   title  the window's title (default Rotation seeds)
+#   id     the instance id: the window's geometry persists under tree.<id> (default rotation_seed_panel)
+#
+# Use it:
+#     import: cvc://components/params/rotation_seed_panel.ari
+#     windows:
+#       - include: rotation_seed_panel
+#         args: { keys: rotation_seed }
+#         slots:
+#           after:
+#             - button: Run
+#               on: ...
+
+units:
+  rotation_seed_params:
+    args: { keys: "rotation_seed" }
+    type: group
+    children:
+      - input_int: "Folds"
+        bind: "{keys}.folds"
+        lo: 1
+        hi: 10000
+        def: 2
+        tooltip: "folds: copies, at the angles 2 pi n / folds about the axis (1 .. 10000)"
+      - input_text: "Axis"
+        bind: "{keys}.axis"
+        def: "[0, 0, 1]"
+        tooltip: "axis: the axis's direction (x, y, z), world units; a list, as [1, 2.5]"
+      - input_text: "Center"
+        bind: "{keys}.center"
+        def: "[]"
+        tooltip: "center: a point on the axis (x, y, z), world units; [] is the volume's centre; a list, as [1, 2.5]"
+      - input_int: "Variable"
+        bind: "{keys}.variable"
+        lo: 0
+        hi: 2147483647
+        def: 0
+        tooltip: "variable: the classes of this variable rotate (0 .. )"
+      - input_int: "Timestep"
+        bind: "{keys}.timestep"
+        lo: 0
+        hi: 2147483647
+        def: 0
+        tooltip: "timestep: the classes of this timestep rotate (0 .. )"
+
+  rotation_seed_panel:
+    args: { keys: "rotation_seed", title: "Rotation seeds", id: rotation_seed_panel }
+    window: "{title}"
+    id: "{id}"
+    children:
+      - slot: before
+      - include: rotation_seed_params
+        args: { keys: "{keys}" }
+      - slot: after

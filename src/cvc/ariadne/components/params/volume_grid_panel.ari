@@ -1,0 +1,96 @@
+# volume_grid_panel.ari — GENERATED from cvc::param_table<cvc::volume_grid_params> (inc/cvc/volume/volume_grid.h)
+# by cvc::param_panel_ari (inc/cvc/core/param_panel.h). Do not edit: src/cvc/tests/param_panel_test.cpp
+# fails when it is not current, and writes it again when run with CVC_WRITE_PARAM_PANELS=1.
+#
+# One widget per field, in table order, bound to <keys>.<field>: the keys the table's
+# params_to_state and params_from_state read and seed (docs/PORT_PARAMETERS.md).
+# On a node: volume_grid's grid.view, grid.tool and grid.slice.*.
+#
+# Units:
+#   volume_grid_panel   a window: args keys, title, id; slots before and after the widgets
+#   volume_grid_params  the widgets alone, to include in a window of your own: args keys
+#   volume_grid_slice_params  the slice.* fields' widgets alone: args keys
+#
+# Args (every one has a default, so a bare include works):
+#   keys   the key root the fields sit under (default graphics.root.children.grid.grid)
+#   title  the window's title (default Volume grid)
+#   id     the instance id: the window's geometry persists under tree.<id> (default volume_grid_panel)
+#
+# Use it:
+#     import: cvc://components/params/volume_grid_panel.ari
+#     windows:
+#       - include: volume_grid_panel
+#         args: { keys: graphics.root.children.grid.grid }
+#         slots:
+#           after:
+#             - button: Run
+#               on: ...
+
+units:
+  volume_grid_params:
+    args: { keys: "graphics.root.children.grid.grid" }
+    type: group
+    children:
+      - combo: "View"
+        bind: "{keys}.view"
+        options: ["Xy", "Xz", "Zy"]
+        values: ["xy", "xz", "zy"]
+        def: "xy"
+        tooltip: "view: the slice the view switch shows: xy (down z), xz (down y) or zy (down x)"
+      - combo: "Tool"
+        bind: "{keys}.tool"
+        options: ["Navigate", "Points", "Probe", "Contours"]
+        values: ["navigate", "points", "probe", "contours"]
+        def: "points"
+        tooltip: "tool: what a click in a slice view does: navigate moves the other planes there, points marks and selects point classes, probe only reads the voxel, contours draws the current object's curves"
+      - input_int: "Slice x"
+        bind: "{keys}.slice.x"
+        lo: -1
+        hi: 2147483647
+        def: -1
+        tooltip: "slice.x: the plane looking down x (the ZY view), from 0; -1 is the middle one (voxel; -1 .. )"
+      - input_int: "Slice y"
+        bind: "{keys}.slice.y"
+        lo: -1
+        hi: 2147483647
+        def: -1
+        tooltip: "slice.y: the plane looking down y (the XZ view), from 0; -1 is the middle one (voxel; -1 .. )"
+      - input_int: "Slice z"
+        bind: "{keys}.slice.z"
+        lo: -1
+        hi: 2147483647
+        def: -1
+        tooltip: "slice.z: the plane looking down z (the XY view), from 0; -1 is the middle one (voxel; -1 .. )"
+
+  volume_grid_slice_params:
+    args: { keys: "graphics.root.children.grid.grid" }
+    type: group
+    children:
+      - input_int: "Slice x"
+        bind: "{keys}.slice.x"
+        lo: -1
+        hi: 2147483647
+        def: -1
+        tooltip: "slice.x: the plane looking down x (the ZY view), from 0; -1 is the middle one (voxel; -1 .. )"
+      - input_int: "Slice y"
+        bind: "{keys}.slice.y"
+        lo: -1
+        hi: 2147483647
+        def: -1
+        tooltip: "slice.y: the plane looking down y (the XZ view), from 0; -1 is the middle one (voxel; -1 .. )"
+      - input_int: "Slice z"
+        bind: "{keys}.slice.z"
+        lo: -1
+        hi: 2147483647
+        def: -1
+        tooltip: "slice.z: the plane looking down z (the XY view), from 0; -1 is the middle one (voxel; -1 .. )"
+
+  volume_grid_panel:
+    args: { keys: "graphics.root.children.grid.grid", title: "Volume grid", id: volume_grid_panel }
+    window: "{title}"
+    id: "{id}"
+    children:
+      - slot: before
+      - include: volume_grid_params
+        args: { keys: "{keys}" }
+      - slot: after

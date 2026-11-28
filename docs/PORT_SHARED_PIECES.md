@@ -44,10 +44,11 @@ From the table:
 | `params_from_state<P>(node)` | `param_table.h` | Reads the keys back. A missing key is seeded with its default (and its properties). A value that does not parse is an error, not replaced by the default. The result is validated, so `errors` lists all a caller must report |
 | `params_describe_state<P>(node)` | `param_table.h` | Writes the properties only |
 | `param_field_infos<P>()`, `params_markdown<P>()` | `param_table.h` | The table as data, and as a Markdown table for a port's docs ([PORT_PARAMETERS.md](PORT_PARAMETERS.md) holds the ports' tables it printed) |
+| `param_panel_ari<P>(spec)`, `param_panel_widget(info)` | `param_panel.h` | The table as an Ariadne panel: a `<stem>_params` group of widgets bound to `{keys}.<field>` and a `<stem>_panel` window with `before` and `after` slots. The shipped ones are `cvc://components/params/<stem>_panel.ari` ([VOLROVER-TEXMOL-APPS-ROADMAP.md](roadmap/VOLROVER-TEXMOL-APPS-ROADMAP.md) §7.5) |
 | `add_param_options<P>(desc)`, `params_from_options<P>(vm)` | `param_cli.h` | The CLI flags (`--smooth-iterations`; a bool flag alone is true) with their help, for a `cvc` subcommand on boost::program_options. Legacy aliases are added by hand |
 | `params_from_value<P>(v)`, `params_to_dict(p)` | `param_dsl.h` | The dict an intrinsic takes as its parameters (nil: the defaults; an unknown key names the valid ones) |
 | `register_params<P>(app, name)`, `register_param_intrinsics(env, app)` | `param_dsl.h` | The app's registry of tables, behind `(params.defaults name)` and `(params.check name dict)` |
-| `PYCVC_PARAM_TABLE(pyname, P)` | `bindings/pycvc/pycvc_params.i` | pycvc keywords (an unknown one raises `TypeError` naming the valid ones), `fields()`, `from_dict` / `to_dict`, `validate()`, `from_state` / `to_state` on a `pycvc.State`, `set_text` / `get_text`, `markdown()` |
+| `PYCVC_PARAM_TABLE(pyname, P)` | `bindings/pycvc/pycvc_params.i` | pycvc keywords (an unknown one raises `TypeError` naming the valid ones), `fields()`, `from_dict` / `to_dict`, `validate()`, `from_state` / `to_state` on a `pycvc.State`, `set_text` / `get_text`, `markdown()`, `ari_panel(stem, keys, title)` |
 
 **Values as text** (state keys and CLI flags): numbers in their shortest round-trip form, so a
 struct read back from the tree is the same bit for bit; bools as `1` / `0` (`true`, `yes`, `on`

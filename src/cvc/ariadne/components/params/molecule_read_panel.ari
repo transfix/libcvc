@@ -1,0 +1,77 @@
+# molecule_read_panel.ari — GENERATED from cvc::param_table<cvc::mol::molecule_read_params> (inc/cvc/mol/molecule.h)
+# by cvc::param_panel_ari (inc/cvc/core/param_panel.h). Do not edit: src/cvc/tests/param_panel_test.cpp
+# fails when it is not current, and writes it again when run with CVC_WRITE_PARAM_PANELS=1.
+#
+# One widget per field, in table order, bound to <keys>.<field>: the keys the table's
+# params_to_state and params_from_state read and seed (docs/PORT_PARAMETERS.md).
+#
+# Units:
+#   molecule_read_panel   a window: args keys, title, id; slots before and after the widgets
+#   molecule_read_params  the widgets alone, to include in a window of your own: args keys
+#
+# Args (every one has a default, so a bare include works):
+#   keys   the key root the fields sit under (default molecule_read)
+#   title  the window's title (default Molecule reading)
+#   id     the instance id: the window's geometry persists under tree.<id> (default molecule_read_panel)
+#
+# Use it:
+#     import: cvc://components/params/molecule_read_panel.ari
+#     windows:
+#       - include: molecule_read_panel
+#         args: { keys: molecule_read }
+#         slots:
+#           after:
+#             - button: Run
+#               on: ...
+
+units:
+  molecule_read_params:
+    args: { keys: "molecule_read" }
+    type: group
+    children:
+      - input_int: "Model"
+        bind: "{keys}.model"
+        lo: 0
+        hi: 2147483647
+        def: 1
+        tooltip: "model: which MODEL to read, counting from 1 in file order; 0 reads every model (0 .. )"
+      - checkbox: "Hetero"
+        bind: "{keys}.hetero"
+        def: true
+        tooltip: "hetero: read HETATM records"
+      - checkbox: "Water"
+        bind: "{keys}.water"
+        def: true
+        tooltip: "water: read water (HOH) residues"
+      - checkbox: "Hydrogens"
+        bind: "{keys}.hydrogens"
+        def: true
+        tooltip: "hydrogens: read hydrogen (and deuterium) atoms"
+      - checkbox: "Alt locs"
+        bind: "{keys}.alt_locs"
+        def: true
+        tooltip: "alt_locs: read every alternate location; off keeps the first one an atom gives"
+      - combo: "Radii"
+        bind: "{keys}.radii"
+        options: ["Van der waals", "Solvent enlarged"]
+        values: ["van_der_waals", "solvent_enlarged"]
+        def: "van_der_waals"
+        tooltip: "radii: the table's radius: van der Waals or solvent-enlarged (TexMol's Roux)"
+      - slider_float: "Unknown radius"
+        bind: "{keys}.unknown_radius"
+        lo: 0
+        hi: 20
+        range: key
+        fmt: "%g"
+        def: 2
+        tooltip: "unknown_radius: the radius of an atom the residue-atom table hasn't (Å; 0 .. ); the table sets no other end, so the slider's is a guess"
+
+  molecule_read_panel:
+    args: { keys: "molecule_read", title: "Molecule reading", id: molecule_read_panel }
+    window: "{title}"
+    id: "{id}"
+    children:
+      - slot: before
+      - include: molecule_read_params
+        args: { keys: "{keys}" }
+      - slot: after

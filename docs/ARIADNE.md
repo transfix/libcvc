@@ -6520,6 +6520,25 @@ scene:
 `camera_controls` and `scene_controls` also ship their widgets without the window
 (`camera_settings`, `shadow_settings`); `viewer_settings` is built from them.
 
+**Parameter panels.** `components/params/` holds a panel for each `cvc::param_table`, generated
+from the table (`cvc::param_panel_ari`, [PORT_SHARED_PIECES.md](PORT_SHARED_PIECES.md)):
+`params/<stem>_panel.ari` has a `<stem>_panel` window and a `<stem>_params` group of the same
+widgets, both taking `keys`, the key root the table's fields sit under. A port's window starts from
+one and puts its own buttons in the `before` and `after` slots:
+
+```yaml
+import: cvc://components/params/seeded_segmentation_panel.ari
+windows:
+  - include: seeded_segmentation_panel
+    args: { keys: graphics.root.children.grid.grid.segment, title: Segment }
+    slots:
+      after:
+        - { button: Segment, on: (state-set "graphics.root.children.grid.grid.request" "segment") }
+```
+
+[`params/INDEX.ari`](../src/cvc/ariadne/components/params/INDEX.ari) lists them with their default
+`keys`. They are checked in, and `param_panel_test` fails when one is not what the generator writes.
+
 The `card` is a generic social or inbox card (§5.11 pictures, slots in §6.1):
 
 ```yaml

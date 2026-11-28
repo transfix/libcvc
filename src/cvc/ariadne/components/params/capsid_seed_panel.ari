@@ -1,0 +1,79 @@
+# capsid_seed_panel.ari — GENERATED from cvc::param_table<cvc::capsid_seed_params> (inc/cvc/volume/seed_generators_params.h)
+# by cvc::param_panel_ari (inc/cvc/core/param_panel.h). Do not edit: src/cvc/tests/param_panel_test.cpp
+# fails when it is not current, and writes it again when run with CVC_WRITE_PARAM_PANELS=1.
+#
+# One widget per field, in table order, bound to <keys>.<field>: the keys the table's
+# params_to_state and params_from_state read and seed (docs/PORT_PARAMETERS.md).
+#
+# Units:
+#   capsid_seed_panel   a window: args keys, title, id; slots before and after the widgets
+#   capsid_seed_params  the widgets alone, to include in a window of your own: args keys
+#
+# Args (every one has a default, so a bare include works):
+#   keys   the key root the fields sit under (default capsid_seed)
+#   title  the window's title (default Capsid seeds)
+#   id     the instance id: the window's geometry persists under tree.<id> (default capsid_seed_panel)
+#
+# Use it:
+#     import: cvc://components/params/capsid_seed_panel.ari
+#     windows:
+#       - include: capsid_seed_panel
+#         args: { keys: capsid_seed }
+#         slots:
+#           after:
+#             - button: Run
+#               on: ...
+
+units:
+  capsid_seed_params:
+    args: { keys: "capsid_seed" }
+    type: group
+    children:
+      - slider_float: "T low"
+        bind: "{keys}.t_low"
+        lo: -1
+        hi: 1
+        range: key
+        fmt: "%g"
+        def: 0
+        tooltip: "t_low: only voxels above this count (0..255 with normalized_thresholds, the default; data units without) (data); the table sets no range, so the slider's is a guess"
+      - checkbox: "Normalized thresholds"
+        bind: "{keys}.normalized_thresholds"
+        def: true
+        tooltip: "normalized_thresholds: t_low is on the 0..255 scale the volume is rescaled to"
+      - slider_int: "H"
+        bind: "{keys}.h"
+        lo: 0
+        hi: 1000
+        range: key
+        def: 2
+        tooltip: "h: the capsid's triangulation number h (T = h^2 + hk + k^2) (0 .. 1000)"
+      - slider_int: "K"
+        bind: "{keys}.k"
+        lo: 0
+        hi: 1000
+        range: key
+        def: 1
+        tooltip: "k: the capsid's triangulation number k (0 .. 1000)"
+      - input_int: "Variable"
+        bind: "{keys}.variable"
+        lo: 0
+        hi: 2147483647
+        def: 0
+        tooltip: "variable: the variable the classes mark (0 .. )"
+      - input_int: "Timestep"
+        bind: "{keys}.timestep"
+        lo: 0
+        hi: 2147483647
+        def: 0
+        tooltip: "timestep: the timestep the classes mark (0 .. )"
+
+  capsid_seed_panel:
+    args: { keys: "capsid_seed", title: "Capsid seeds", id: capsid_seed_panel }
+    window: "{title}"
+    id: "{id}"
+    children:
+      - slot: before
+      - include: capsid_seed_params
+        args: { keys: "{keys}" }
+      - slot: after

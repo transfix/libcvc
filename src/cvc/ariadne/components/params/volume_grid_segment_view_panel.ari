@@ -1,0 +1,74 @@
+# volume_grid_segment_view_panel.ari — GENERATED from cvc::param_table<cvc::volume_grid_segment_view_params> (inc/cvc/volume/volume_grid_segment.h)
+# by cvc::param_panel_ari (inc/cvc/core/param_panel.h). Do not edit: src/cvc/tests/param_panel_test.cpp
+# fails when it is not current, and writes it again when run with CVC_WRITE_PARAM_PANELS=1.
+#
+# One widget per field, in table order, bound to <keys>.<field>: the keys the table's
+# params_to_state and params_from_state read and seed (docs/PORT_PARAMETERS.md).
+# On a node: volume_grid's grid.segment.* (how the result draws).
+#
+# Units:
+#   volume_grid_segment_view_panel   a window: args keys, title, id; slots before and after the widgets
+#   volume_grid_segment_view_params  the widgets alone, to include in a window of your own: args keys
+#
+# Args (every one has a default, so a bare include works):
+#   keys   the key root the fields sit under (default graphics.root.children.grid.grid.segment)
+#   title  the window's title (default Segmentation view)
+#   id     the instance id: the window's geometry persists under tree.<id> (default volume_grid_segment_view_panel)
+#
+# Use it:
+#     import: cvc://components/params/volume_grid_segment_view_panel.ari
+#     windows:
+#       - include: volume_grid_segment_view_panel
+#         args: { keys: graphics.root.children.grid.grid.segment }
+#         slots:
+#           after:
+#             - button: Run
+#               on: ...
+
+units:
+  volume_grid_segment_view_params:
+    args: { keys: "graphics.root.children.grid.grid.segment" }
+    type: group
+    children:
+      - checkbox: "Show"
+        bind: "{keys}.show"
+        def: true
+        tooltip: "show: draw the labels on the slices, in the classes' colours"
+      - slider_float: "Opacity"
+        bind: "{keys}.opacity"
+        lo: 0
+        hi: 1
+        range: key
+        fmt: "%g"
+        def: 0.5
+        tooltip: "opacity: how much of the slice a label hides (0: none, 1: all) (0 .. 1)"
+      - checkbox: "Show surfaces"
+        bind: "{keys}.show_surfaces"
+        def: true
+        tooltip: "show_surfaces: draw each class's surface in the 3D view"
+      - slider_float: "Surface opacity"
+        bind: "{keys}.surface_opacity"
+        lo: 0
+        hi: 1
+        range: key
+        fmt: "%g"
+        def: 1
+        tooltip: "surface_opacity: the class surfaces' opacity in the 3D view (0 .. 1)"
+      - checkbox: "Make surfaces"
+        bind: "{keys}.make_surfaces"
+        def: true
+        tooltip: "make_surfaces: a run makes each class's surface after its labels (class_surfaces)"
+      - checkbox: "Live"
+        bind: "{keys}.live"
+        def: true
+        tooltip: "live: draw the labels while the fronts advance (a copy of the labels a few times a second)"
+
+  volume_grid_segment_view_panel:
+    args: { keys: "graphics.root.children.grid.grid.segment", title: "Segmentation view", id: volume_grid_segment_view_panel }
+    window: "{title}"
+    id: "{id}"
+    children:
+      - slot: before
+      - include: volume_grid_segment_view_params
+        args: { keys: "{keys}" }
+      - slot: after

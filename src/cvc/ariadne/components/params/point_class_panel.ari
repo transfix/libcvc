@@ -1,0 +1,70 @@
+# point_class_panel.ari — GENERATED from cvc::param_table<cvc::point_class> (inc/cvc/volume/point_classes.h)
+# by cvc::param_panel_ari (inc/cvc/core/param_panel.h). Do not edit: src/cvc/tests/param_panel_test.cpp
+# fails when it is not current, and writes it again when run with CVC_WRITE_PARAM_PANELS=1.
+#
+# One widget per field, in table order, bound to <keys>.<field>: the keys the table's
+# params_to_state and params_from_state read and seed (docs/PORT_PARAMETERS.md).
+# On a node: volume_grid's grid.classes.<i>.* rows.
+#
+# Units:
+#   point_class_panel   a window: args keys, title, id; slots before and after the widgets
+#   point_class_params  the widgets alone, to include in a window of your own: args keys
+#
+# Args (every one has a default, so a bare include works):
+#   keys   the key root the fields sit under (default graphics.root.children.grid.grid.classes.0)
+#   title  the window's title (default Point class)
+#   id     the instance id: the window's geometry persists under tree.<id> (default point_class_panel)
+#
+# Use it:
+#     import: cvc://components/params/point_class_panel.ari
+#     windows:
+#       - include: point_class_panel
+#         args: { keys: graphics.root.children.grid.grid.classes.0 }
+#         slots:
+#           after:
+#             - button: Run
+#               on: ...
+
+units:
+  point_class_params:
+    args: { keys: "graphics.root.children.grid.grid.classes.0" }
+    type: group
+    children:
+      - input_text: "Name"
+        bind: "{keys}.name"
+        def: ""
+        tooltip: "name: the class's name"
+      - input_text: "Color"
+        bind: "{keys}.color"
+        def: "[1, 0, 0]"
+        tooltip: "color: its colour: r, g, b in [0, 1] (0 .. 1); a list, as [1, 2.5]"
+      - slider_float: "Radius"
+        bind: "{keys}.radius"
+        lo: 0
+        hi: 10
+        range: key
+        fmt: "%g"
+        def: 1
+        tooltip: "radius: how large its points draw (voxel; 0 .. ); the table sets no other end, so the slider's is a guess"
+      - input_int: "Variable"
+        bind: "{keys}.variable"
+        lo: 0
+        hi: 2147483647
+        def: 0
+        tooltip: "variable: the volume's variable it marks (0 .. )"
+      - input_int: "Timestep"
+        bind: "{keys}.timestep"
+        lo: 0
+        hi: 2147483647
+        def: 0
+        tooltip: "timestep: the volume's timestep it marks (0 .. )"
+
+  point_class_panel:
+    args: { keys: "graphics.root.children.grid.grid.classes.0", title: "Point class", id: point_class_panel }
+    window: "{title}"
+    id: "{id}"
+    children:
+      - slot: before
+      - include: point_class_params
+        args: { keys: "{keys}" }
+      - slot: after

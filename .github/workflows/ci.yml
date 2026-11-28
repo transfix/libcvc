@@ -470,12 +470,13 @@ jobs:
           echo "CVC_EMSDK_DIR=$RUNNER_TEMP/emsdk" >> "$GITHUB_ENV"
 
       # qhull, clipper2, cdt and shewchuk-predicates: the permissive geometry the ports build on
-      # (cvc::planar needs the last three; src/cvc/CMakeLists.txt).
-      - name: Install the wasm-mt deps (boost, pegtl, the compression libraries, the geometry packages)
+      # (cvc::planar needs the last three; src/cvc/CMakeLists.txt). yaml-cpp: the .ari loader, so
+      # the tests that load documents (param_panel_test's panels) run instead of skipping.
+      - name: Install the wasm-mt deps (boost, pegtl, yaml-cpp, the compression libraries, the geometry packages)
         if: steps.paths.outputs.run == 'true'
         run: |
           mkdir -p "$WASM_DEPS"
-          for p in zlib bzip2 xz zstd boost pegtl qhull clipper2 cdt shewchuk-predicates; do
+          for p in zlib bzip2 xz zstd boost pegtl yaml-cpp qhull clipper2 cdt shewchuk-predicates; do
             echo "=== $p ==="
             cvcpkg install "$p" --prefix "$WASM_DEPS" \
               --platform wasm-mt --arch wasm32 --config release --link static \
@@ -499,6 +500,8 @@ jobs:
             | tee configure.log
           grep -q "cvc::planar ENABLED" configure.log \
             || { echo "::error::the wasm-mt configure did not enable cvc::planar"; exit 1; }
+          grep -q "Ariadne: .ari YAML loader ENABLED" configure.log \
+            || { echo "::error::the wasm-mt configure did not find yaml-cpp (the .ari loader is a stub)"; exit 1; }
           # shellcheck disable=SC2086
           cmake --build build-wasm --target ${{ steps.paths.outputs.tests }} -j"$(nproc)"
 

@@ -1,0 +1,54 @@
+# contour_component_panel.ari — GENERATED from cvc::param_table<cvc::contour_component> (inc/cvc/geometry/contours.h)
+# by cvc::param_panel_ari (inc/cvc/core/param_panel.h). Do not edit: src/cvc/tests/param_panel_test.cpp
+# fails when it is not current, and writes it again when run with CVC_WRITE_PARAM_PANELS=1.
+#
+# One widget per field, in table order, bound to <keys>.<field>: the keys the table's
+# params_to_state and params_from_state read and seed (docs/PORT_PARAMETERS.md).
+# On a node: contour_lab's tiler.components.<i>.* rows.
+#
+# Units:
+#   contour_component_panel   a window: args keys, title, id; slots before and after the widgets
+#   contour_component_params  the widgets alone, to include in a window of your own: args keys
+#
+# Args (every one has a default, so a bare include works):
+#   keys   the key root the fields sit under (default graphics.root.children.contours.tiler.components.0)
+#   title  the window's title (default Contour component)
+#   id     the instance id: the window's geometry persists under tree.<id> (default contour_component_panel)
+#
+# Use it:
+#     import: cvc://components/params/contour_component_panel.ari
+#     windows:
+#       - include: contour_component_panel
+#         args: { keys: graphics.root.children.contours.tiler.components.0 }
+#         slots:
+#           after:
+#             - button: Run
+#               on: ...
+
+units:
+  contour_component_params:
+    args: { keys: "graphics.root.children.contours.tiler.components.0" }
+    type: group
+    children:
+      - input_text: "Name"
+        bind: "{keys}.name"
+        def: ""
+        tooltip: "name: the component's name"
+      - input_text: "Color"
+        bind: "{keys}.color"
+        def: "[1, 1, 1]"
+        tooltip: "color: its colour: r, g, b in [0, 1] (0 .. 1); a list, as [1, 2.5]"
+      - checkbox: "Visible"
+        bind: "{keys}.visible"
+        def: true
+        tooltip: "visible: whether it is drawn"
+
+  contour_component_panel:
+    args: { keys: "graphics.root.children.contours.tiler.components.0", title: "Contour component", id: contour_component_panel }
+    window: "{title}"
+    id: "{id}"
+    children:
+      - slot: before
+      - include: contour_component_params
+        args: { keys: "{keys}" }
+      - slot: after
