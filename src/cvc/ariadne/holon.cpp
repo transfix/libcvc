@@ -78,6 +78,13 @@ quat unit(quat q) {
 // The walker's jump speed (m/s) under R: its controller's jump_speed, 4 m/s (about 0.8 m) when it
 // names none.
 double jump_speed_of(const world_rules &r) { return r.controller().param("jump_speed", 4.0); }
+
+// The swimming R's controller does (OW9c): walker@2's knobs, off for anything else.
+avatar_swim swim_of(const world_rules &r) {
+  const avatar_controller &c = r.controller();
+  return c.kernel == "walker" && c.version == 2 ? avatar_swim_of(c.params) : avatar_swim{};
+}
+bool swims_under(const world_rules &r) { return swim_of(r).on; }
 } // namespace
 
 holon_config holon_config_at(holon_config cfg, double hz) {
@@ -115,6 +122,7 @@ holon::holon(holon_role role, holon_config cfg)
                                               _cfg.rules.policy.energy);
       _world->set_gravity(_cfg.rules.physics.gravity);
       _world->set_jump_speed(jump_speed_of(_cfg.rules));
+      _world->set_swim(swim_of(_cfg.rules));
       const world_physics &wp = _cfg.rules.physics; // the room's wind (O14)
       _world->set_wind(
           {wp.wind_speed, wp.wind_dir * 3.14159265358979323846 / 180.0, wp.wind_gustiness},
@@ -783,11 +791,13 @@ bool holon::attach_world(SceneWorld *world, std::string *why) {
     next = std::make_unique<avatar_world>(world->world(), _applied.avatar().body,
                                           _applied.policy.energy);
     next->set_jump_speed(jump_speed_of(_applied));
+    next->set_swim(swim_of(_applied));
   } else {
     next = std::make_unique<avatar_world>(_clock.fixed_dt(), _applied.avatar().body,
                                           _applied.policy.energy);
     next->set_gravity(_applied.physics.gravity);
     next->set_jump_speed(jump_speed_of(_applied));
+    next->set_swim(swim_of(_applied));
     const world_physics &wp = _applied.physics; // the room's wind (O14)
     next->set_wind({wp.wind_speed, wp.wind_dir * 3.14159265358979323846 / 180.0, wp.wind_gustiness},
                    wp.wind_base);
@@ -887,7 +897,7 @@ void holon::scene_step() {
             p.queued.pop_front();
           }
           if (_world->has_avatar(kv.first))
-            _world->drive(kv.first, veto(p.intent, _applied.policy));
+            _world->drive(kv.first, veto(p.intent, _applied.policy, swims_under(_applied)));
         }
       },
       [this, &drive](std::uint64_t) {
@@ -980,10 +990,10 @@ avatar_intent holon::blown(const avatar_intent &in, const cvc::physics::vec3 &fe
   return out;
 }
 
-avatar_intent holon::veto(const avatar_intent &in, const avatar_policy &p) {
+avatar_intent holon::veto(const avatar_intent &in, const avatar_policy &p, bool dives) {
   avatar_intent out = in;
   if (!p.allow_vertical)
-    out.move.z = 0.0;
+    out.move.z = dives ? std::clamp(out.move.z, -1.0, 1.0) : 0.0;
   const double h2 = out.move.x * out.move.x + out.move.y * out.move.y;
   if (h2 > p.max_speed * p.max_speed) {
     const double k = p.max_speed / std::sqrt(h2);
@@ -994,7 +1004,7 @@ avatar_intent holon::veto(const avatar_intent &in, const avatar_policy &p) {
 }
 
 avatar_intent holon::sanitize_intent(const avatar_intent &in) const {
-  return veto(finite_intent(in), rules().policy);
+  return veto(finite_intent(in), rules().policy, _world && swims_under(rules()));
 }
 
 namespace {
@@ -1138,6 +1148,7 @@ void holon::apply_world_rules(const world_rules &r) {
   if (r.policy.energy != _applied.policy.energy)
     _world->set_energy_policy(r.policy.energy);
   _world->set_jump_speed(jump_speed_of(r));
+  _world->set_swim(swim_of(r));
   _applied = r;
 }
 
@@ -1154,6 +1165,13 @@ bool holon::energy(const std::string &pid, avatar_energy &out) const {
   if (!_world || !_world->has_avatar(pid))
     return false;
   out = _world->energy(pid);
+  return true;
+}
+
+bool holon::motion(const std::string &pid, avatar_motion &out) const {
+  if (!_world || !_world->has_avatar(pid))
+    return false;
+  out = _world->motion(pid);
   return true;
 }
 
@@ -1220,7 +1238,7 @@ void holon::queue_intent(const std::string &pid, const avatar_intent &in, std::u
   if (!p.queued.empty() && at < p.queued.back().first)
     at = p.queued.back().first;
   const avatar_intent ok = finite_intent(in);
-  if (!same_intent(in, veto(ok, rules_at(at).policy)))
+  if (!same_intent(in, veto(ok, rules_at(at).policy, _world && swims_under(rules_at(at)))))
     ++_vetoes;
   p.queued.emplace_back(at, ok); // the policy's part applies at its step
 }
@@ -1501,7 +1519,7 @@ void holon::world_step_client(const std::string &self, const avatar_intent &in,
         kv.first, e.half_extents,
         cvc::physics::pose{e.at.position + e.at.linear_velocity * t, e.at.rotation});
   }
-  _world->drive(self, veto(in, _applied.policy));
+  _world->drive(self, veto(in, _applied.policy, swims_under(_applied)));
   _world->set_time(double(tick) * _clock.fixed_dt()); // the wind's gusts at the tick's time
   avatar_water_for(tick); // the water this step ends in, as the relay's (OW9a)
   _world->step();
@@ -1588,7 +1606,7 @@ void holon::on_step(const cvc::clock_driver::clock_frame &f) {
             p.intent = p.queued.front().second;
             p.queued.pop_front();
           }
-          _world->drive(kv.first, veto(p.intent, _applied.policy));
+          _world->drive(kv.first, veto(p.intent, _applied.policy, swims_under(_applied)));
         }
         _world->set_time(double(tick) * dt); // the wind's gusts at the tick's time, as the clients
         avatar_water_for(tick);              // and the water, as theirs (OW9a)

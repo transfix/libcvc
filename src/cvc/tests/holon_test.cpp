@@ -1049,7 +1049,7 @@ cvc::physics::field lake_water(cvc::app &app, double level) {
   f.inertial = true;
   return f;
 }
-lake_run walk_into_the_lake(bool client_water, bool rise) {
+lake_run walk_into_the_lake(bool client_water, bool rise, bool dive = false) {
   cvc::app app;
   // A dry floor to x = 5 (its top z = 0), then the lake's bed 3 m down.
   std::vector<cvc::ariadne::avatar_static> st(2);
@@ -1089,6 +1089,13 @@ lake_run walk_into_the_lake(bool client_water, bool rise) {
     }
     if (f == 30 + 840) { // 7 s on
       avatar_intent in;  // stop, floating
+      client.set_intent("A", in);
+      up.push_back({f + kDelay, in, client.tick() + 1, {}});
+    }
+    if (dive && (f == 900 || f == 1100 || f == 1400)) { // dive, a stroke up, let go (walker@2)
+      avatar_intent in;
+      in.move.z = f == 900 ? -1.0 : 0.0;
+      in.jump = f == 1100;
       client.set_intent("A", in);
       up.push_back({f + kDelay, in, client.tick() + 1, {}});
     }
@@ -1135,13 +1142,15 @@ TEST(HolonPhysicsTest, AClientPredictsItsAvatarInTheRoomsWater) {
   const lake_run both = walk_into_the_lake(true, false);
   const lake_run server_only = walk_into_the_lake(false, false);
   const lake_run rising = walk_into_the_lake(true, true);
+  const lake_run diving = walk_into_the_lake(true, false, true);
   for (const auto &[name, r] : {std::pair<const char *, const lake_run &>{"water in both", both},
                                 {"water in the server's only", server_only},
-                                {"the water rising, heard late", rising}})
+                                {"the water rising, heard late", rising},
+                                {"swimming, diving and surfacing (walker@2)", diving}})
     std::printf("  OW9A %s: corrected %.3f m in all; the client at x %.2f z %.3f, the server at "
                 "x %.2f z %.3f\n",
                 name, r.corrected, r.client_x, r.client_z, r.server_x, r.server_z);
-  EXPECT_GT(both.server_x, 10.0) << "it walked into the lake";
+  EXPECT_GT(both.server_x, 8.0) << "it walked into the lake (and swam on at 1 m/s, OW9c)";
   EXPECT_NEAR(both.server_z, -1.675, 0.05) << "and floats there, head-out (OW9b's 985 kg/m^3)";
   EXPECT_LT(both.corrected, 1e-3) << "the client predicted it in the same water";
   EXPECT_NEAR(both.client_z, both.server_z, 1e-3);
@@ -1150,6 +1159,9 @@ TEST(HolonPhysicsTest, AClientPredictsItsAvatarInTheRoomsWater) {
   EXPECT_NEAR(rising.server_z, both.server_z + 0.5, 0.05) << "the server's avatar rose with it";
   EXPECT_LT(rising.corrected, 0.5) << "at most a small correction when the client heard";
   EXPECT_NEAR(rising.client_z, rising.server_z, 1e-3) << "and the client's, replayed from the rise";
+  EXPECT_LT(diving.corrected, 1e-3) << "a client predicts its swimmer's dive and stroke up";
+  EXPECT_NEAR(diving.client_z, diving.server_z, 5e-3) << "the client a lead ahead, still rising";
+  EXPECT_NEAR(diving.server_z, both.server_z, 0.05) << "floating head-out again after";
 }
 
 // A person floats head-out (OW9b, ARIADNE_WORLDS.md section 18.10): the box displaces its mass
@@ -1202,6 +1214,265 @@ TEST(HolonPhysicsTest, APersonFloatsHeadOut) {
   EXPECT_NEAR(heavy, head, 0.01) << "a heavier person floats as deep";
   EXPECT_NEAR(dense, -3.0 + 1.7, 0.02) << "a denser body sinks to the bed";
   EXPECT_NEAR(cork, 1.7 - 0.28, 0.03) << "the box's own density floats like a cork";
+}
+
+// walker@2 (OW9c, ARIADNE_WORLDS.md section 18.10.2) in an avatar world of its own: a pool of
+// still water (1000 kg/m^3, C_d 1, damping 1e4, inertial: the lake's numbers), its surface at
+// z = 0, over statics the tests lay, and walker@2's default knobs.
+namespace {
+cvc::physics::field pool_water(cvc::app &app, double current = 0.0) {
+  const cvc::bounding_box box(-60.0, -50.0, -10.0, 160.0, 50.0, 0.0);
+  const auto filled = [&](double v) {
+    auto vol = std::make_shared<cvc::volume>(app, cvc::dimension(2, 2, 2), cvc::Float, box);
+    vol->fill(v);
+    return vol;
+  };
+  cvc::physics::field f;
+  f.kind = cvc::physics::field_kind::fluid;
+  f.volume = filled(1000.0);
+  if (current != 0.0)
+    f.velocity = {filled(current), filled(0.0), filled(0.0)};
+  f.drag_coefficient = 1.0;
+  f.damping = 1.0e4;
+  f.inertial = true;
+  return f;
+}
+cvc::ariadne::avatar_static box_static(vec3 center, vec3 half,
+                                       cvc::physics::quat rotation = cvc::physics::quat{}) {
+  cvc::ariadne::avatar_static s;
+  s.center = center;
+  s.half_extents = half;
+  s.rotation = rotation;
+  return s;
+}
+// A flat bed whose top is at TOP.
+cvc::ariadne::avatar_static flat_bed(double top) {
+  return box_static(vec3{50.0, 0.0, top - 0.5}, vec3{110.0, 50.0, 0.5});
+}
+struct pool {
+  cvc::app app;
+  cvc::ariadne::avatar_world w;
+  explicit pool(const std::vector<cvc::ariadne::avatar_static> &statics, double current = 0.0)
+      : w(1.0 / 120.0, cvc::ariadne::avatar_body{}) {
+    w.set_swim(cvc::ariadne::avatar_swim_of({}));
+    w.set_statics(statics);
+    w.set_water({pool_water(app, current)});
+  }
+  void add(double x, double feet_z) {
+    body_state feet;
+    feet.position = vec3{x, 0.0, feet_z};
+    w.add_avatar("A", feet, true);
+  }
+  void run(const avatar_intent &in, int steps) {
+    for (int i = 0; i < steps; ++i) {
+      w.drive("A", in);
+      w.step();
+    }
+  }
+  body_state at() const { return w.state("A"); }
+  cvc::ariadne::avatar_motion motion() const { return w.motion("A"); }
+  double top() const { return at().position.z + w.body().height; }
+};
+avatar_intent moving(double x, double z = 0.0, bool jump = false) {
+  avatar_intent in;
+  in.move = vec3{x, 0.0, z};
+  in.jump = jump;
+  return in;
+}
+bool have_jolt() {
+  holon probe(holon_role::client, physics_config());
+  return probe.physics();
+}
+} // namespace
+
+// Wading: on the bed, the walk's pace cut by the depth, to 1 - wade_slow (0.4) at swim_depth;
+// walking below wade_depth; no jump above half swim_depth.
+TEST(HolonPhysicsTest, AWaderIsSlowerTheDeeperTheWater) {
+  if (!have_jolt())
+    GTEST_SKIP() << "no Jolt backend in this build";
+  using cvc::ariadne::avatar_motion;
+  const struct {
+    double depth, share;
+    avatar_motion motion;
+  } cases[] = {{0.2, 1.0, avatar_motion::walking},
+               {0.75, 1.0 - 0.6 * (0.45 / 0.9), avatar_motion::wading},
+               {1.1, 1.0 - 0.6 * (0.8 / 0.9), avatar_motion::wading}};
+  for (const auto &c : cases) {
+    pool p({flat_bed(-c.depth)});
+    p.add(0.0, -c.depth);
+    p.run(moving(2.0), 720);
+    std::printf("  OW9C wading in %.2f m: %s at %.3f m/s (the walk's %.3f)\n", c.depth,
+                cvc::ariadne::avatar_motion_name(p.motion()), p.at().linear_velocity.x,
+                2.0 * c.share);
+    EXPECT_EQ(p.motion(), c.motion) << c.depth;
+    EXPECT_NEAR(p.at().linear_velocity.x, 2.0 * c.share, 0.05) << c.depth;
+    // A jump: in the shallows it leaves the bed; chest-deep it does not.
+    double highest = -100.0;
+    for (int i = 0; i < 60; ++i) {
+      p.run(moving(0.0, 0.0, true), 1);
+      highest = std::max(highest, p.at().position.z);
+    }
+    if (c.depth <= 0.6)
+      EXPECT_GT(highest, -c.depth + 0.1) << "a jump in " << c.depth << " m";
+    else
+      EXPECT_LT(highest, -c.depth + 0.05) << "no jump in " << c.depth << " m";
+  }
+}
+
+// Swimming: out of its depth a person swims at swim_speed (1 m/s) for a walk's intent and up to
+// swim_sprint for a run, paying swim_cost m g |v| for carrying itself through the water and the
+// work against the water's drag; the ledger books it as swimming. With no move it coasts to rest
+// and pays nothing.
+TEST(HolonPhysicsTest, ASwimmerSwimsAtASwimmersPaceAndCost) {
+  if (!have_jolt())
+    GTEST_SKIP() << "no Jolt backend in this build";
+  pool p({flat_bed(-6.0)});
+  p.add(0.0, -1.675);
+  p.run(moving(2.0), 1200);
+  const double pace = p.at().linear_velocity.x;
+  const cvc::ariadne::avatar_ledger swum = p.w.energy("A").ledger;
+  EXPECT_EQ(p.motion(), cvc::ariadne::avatar_motion::swimming);
+  p.run(moving(0.0), 1200);
+  const double coasting = p.at().linear_velocity.x;
+  const cvc::ariadne::avatar_ledger rested = p.w.energy("A").ledger;
+  p.run(moving(4.0), 360);
+  const double sprint = p.at().linear_velocity.x;
+  const cvc::ariadne::avatar_energy e = p.w.energy("A");
+  const double carry = 0.8 * 70.0 * 9.80665 * swum.swam_distance;
+  std::printf("  OW9C swimming: %.3f m/s for a walk, %.3f m/s for a run, %.3f m/s coasting; "
+              "%.1f m swum for %.0f J (carrying %.0f J)\n",
+              pace, sprint, coasting, swum.swam_distance, swum.swam, carry);
+  EXPECT_NEAR(pace, 1.0, 0.03) << "a swimmer's pace";
+  EXPECT_GT(sprint, 1.4) << "a run swims faster";
+  EXPECT_LE(sprint, 1.8 + 1e-6) << "never past swim_sprint";
+  EXPECT_LT(std::fabs(coasting), 0.2) << "the water's drag stops it";
+  EXPECT_NEAR(swum.swam_distance, swum.distance, 1e-9) << "every metre of it swum";
+  EXPECT_GT(swum.swam, carry) << "carrying it, and the work against the drag";
+  EXPECT_LT(swum.swam, 1.5 * carry);
+  EXPECT_NEAR(rested.swam, swum.swam, 1.0) << "floating still is free";
+  EXPECT_NEAR(e.ledger.residual(e.reserve), 0.0, 1e-6) << "the books balance";
+  EXPECT_NEAR(p.top(), 0.026, 0.05) << "head-out all the while";
+}
+
+// Up and down: move.z below 0 dives at up to dive_speed with swim_force (the water's damping holds
+// it to about half that); a stroke up (jump) surfaces, and once let go it floats head-out again.
+TEST(HolonPhysicsTest, ASwimmerDivesAndComesUp) {
+  if (!have_jolt())
+    GTEST_SKIP() << "no Jolt backend in this build";
+  pool p({flat_bed(-8.0)});
+  p.add(0.0, -1.675);
+  p.run(moving(0.0, -1.0), 600);
+  const double dived = p.top();
+  const cvc::ariadne::avatar_ledger before = p.w.energy("A").ledger;
+  int steps = 0;
+  while (p.top() < 0.0 && steps < 2400) {
+    p.run(moving(0.0, 0.0, true), 1);
+    ++steps;
+  }
+  const cvc::ariadne::avatar_ledger up = p.w.energy("A").ledger;
+  p.run(moving(0.0), 600);
+  std::printf("  OW9C diving 5 s: the top %.2f m under; a stroke up surfaces in %.1f s for %.0f J; "
+              "let go, the top at %.3f m\n",
+              -dived, steps / 120.0, up.work - before.work, p.top());
+  EXPECT_LT(dived, -1.5) << "it dove";
+  EXPECT_LT(steps, 2400) << "and came up";
+  EXPECT_GT(up.work, before.work) << "paying for the stroke";
+  EXPECT_NEAR(p.top(), 0.026, 0.03) << "then floats head-out";
+  EXPECT_EQ(p.motion(), cvc::ariadne::avatar_motion::swimming);
+}
+
+// The water carries a swimmer: one floating still in a 0.5 m/s current drifts with it, and one
+// swimming against it at its pace makes 0.5 m/s over the bed.
+TEST(HolonPhysicsTest, ACurrentCarriesASwimmer) {
+  if (!have_jolt())
+    GTEST_SKIP() << "no Jolt backend in this build";
+  pool p({flat_bed(-6.0)}, 0.5);
+  p.add(0.0, -1.675);
+  p.run(moving(0.0), 3600);
+  const double drift = p.at().linear_velocity.x, carried = p.at().position.x;
+  p.run(moving(-2.0), 1800);
+  const double upstream = p.at().linear_velocity.x;
+  std::printf("  OW9C a 0.5 m/s current: floating, %.3f m/s (%.1f m in 30 s); swimming against "
+              "it, %.3f m/s\n",
+              drift, carried, upstream);
+  EXPECT_GT(drift, 0.4) << "carried at nearly the current's speed";
+  EXPECT_GT(carried, 9.0);
+  EXPECT_NEAR(upstream, -0.5, 0.05) << "its pace through the water, less the current";
+}
+
+// Getting out. Where the bed rises a swimmer finds its feet, wades, and walks out up a beach; at
+// a quay 0.4 m above the water a stroke up toward it lifts it on (paying m g for the height),
+// while a quay 1 m up, over climb_height, needs a ladder.
+TEST(HolonPhysicsTest, ASwimmerGetsOutAtABeachAndAQuay) {
+  if (!have_jolt())
+    GTEST_SKIP() << "no Jolt backend in this build";
+  using cvc::ariadne::avatar_motion;
+  {
+    // A beach: the bed 3 m down to x = 0, then rising 1 in 10 to 1 m up at x = 40.
+    const double theta = std::atan(0.1), hz = 0.5;
+    const cvc::physics::quat tilt{std::cos(-0.5 * theta), 0.0, std::sin(-0.5 * theta), 0.0};
+    const vec3 n{std::sin(theta), 0.0, std::cos(theta)};
+    pool p({box_static(vec3{-50.0, 0.0, -3.5}, vec3{50.0, 50.0, 0.5}),
+            box_static(vec3{20.0 - n.x * hz, 0.0, -1.0 - n.z * hz},
+                       vec3{20.0 / std::cos(theta) + 0.2, 50.0, hz}, tilt),
+            box_static(vec3{90.0, 0.0, 0.5}, vec3{50.0, 50.0, 0.5})});
+    p.add(-5.0, -1.675);
+    std::vector<std::pair<avatar_motion, double>> seen; // each motion and where it began
+    for (int i = 0; i < 7200 && p.at().position.x < 34.0; ++i) {
+      p.run(moving(2.0), 1);
+      if (seen.empty() || seen.back().first != p.motion())
+        seen.emplace_back(p.motion(), p.at().position.x);
+    }
+    std::printf("  OW9C up a beach:");
+    for (const auto &[m, x] : seen)
+      std::printf(" %s from x %.1f;", cvc::ariadne::avatar_motion_name(m), x);
+    std::printf(" out at x %.1f z %.2f\n", p.at().position.x, p.at().position.z);
+    ASSERT_EQ(seen.size(), 3u) << "swimming, wading, walking";
+    EXPECT_EQ(seen[0].first, avatar_motion::swimming);
+    EXPECT_EQ(seen[1].first, avatar_motion::wading);
+    EXPECT_EQ(seen[2].first, avatar_motion::walking);
+    EXPECT_GE(p.at().position.x, 34.0) << "it walked out";
+    EXPECT_GT(p.at().position.z, 0.3) << "above the water";
+  }
+  for (const double quay : {0.4, 1.0}) {
+    // A quay wall at x = 2, its top QUAY above the water, the bed 3 m down.
+    pool p({flat_bed(-3.0),
+            box_static(vec3{26.0, 0.0, 0.5 * (quay - 3.0)}, vec3{24.0, 50.0, 0.5 * (quay + 3.0)})});
+    p.add(0.0, -1.675);
+    const double work = p.w.energy("A").ledger.work;
+    for (int i = 0; i < 600; ++i) { // toward the quay, stroking up, until it is out
+      p.run(moving(2.0, 0.0, true), 1);
+      if (p.motion() == avatar_motion::walking)
+        break;
+    }
+    p.run(moving(0.0), 120);
+    const double paid = p.w.energy("A").ledger.work - work;
+    std::printf("  OW9C a quay %.1f m up: %s at x %.2f, feet at z %.2f, %.0f J of work\n", quay,
+                cvc::ariadne::avatar_motion_name(p.motion()), p.at().position.x, p.at().position.z,
+                paid);
+    if (quay < 0.6) {
+      EXPECT_EQ(p.motion(), avatar_motion::walking) << "it climbed out";
+      EXPECT_NEAR(p.at().position.z, quay, 0.02) << "onto the quay";
+      EXPECT_GE(p.at().position.x, 2.0 + 0.25) << "wholly on it";
+      EXPECT_GT(paid, 70.0 * 9.80665 * quay) << "paying for the height";
+    } else {
+      EXPECT_EQ(p.motion(), avatar_motion::swimming) << "too high to climb";
+      EXPECT_LT(p.at().position.x, 2.0);
+    }
+  }
+}
+
+// walker@1 ignores the water: a walker@1 avatar in the pool walks at the walk's pace, its motion
+// always walking, as before OW9c.
+TEST(HolonPhysicsTest, Walker1IgnoresTheWater) {
+  if (!have_jolt())
+    GTEST_SKIP() << "no Jolt backend in this build";
+  pool p({flat_bed(-1.0)});
+  p.w.set_swim(cvc::ariadne::avatar_swim{});
+  p.add(0.0, -1.0);
+  p.run(moving(2.0), 720);
+  EXPECT_EQ(p.motion(), cvc::ariadne::avatar_motion::walking);
+  EXPECT_NEAR(p.at().linear_velocity.x, 2.0, 0.05) << "no wading";
 }
 
 // A peer the host registered before its pose arrived (client_pump does, from the roster) is a

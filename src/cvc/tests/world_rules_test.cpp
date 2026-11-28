@@ -79,16 +79,20 @@ TEST(WorldRulesTest, TheDefaultsAreWhatTheConferenceHadCompiledIn) {
   EXPECT_EQ(r.avatar().body.mass, 70.0);
   EXPECT_EQ(r.avatar().body.width, 0.5);
   EXPECT_EQ(r.avatar().body.height, 1.7);
-  EXPECT_EQ(r.controller().id, "walker@1");
+  EXPECT_EQ(r.controller().id, "walker@2") << "walker@1 on land, swimming in water (OW9c)";
   EXPECT_EQ(r.controller().kernel, "walker");
-  EXPECT_EQ(r.controller().version, 1);
+  EXPECT_EQ(r.controller().version, 2);
   EXPECT_EQ(r.controller().param("walk_speed", 0.0), 2.0);
+  EXPECT_TRUE(ca::avatar_swim_of(r.controller().params) == ca::avatar_swim_of({}))
+      << "its params state walker@2's defaults";
+  EXPECT_EQ(r.controller().param("swim_speed", 0.0), 1.0);
   EXPECT_EQ(r.policy.max_speed, 4.0);
   EXPECT_FALSE(r.policy.allow_vertical);
   EXPECT_TRUE(r.policy.energy == ca::avatar_energy_policy{});
   EXPECT_EQ(r.physics.gravity.z, -9.80665);
   EXPECT_TRUE(ca::controller_kernel_known("walker", 1));
-  EXPECT_FALSE(ca::controller_kernel_known("walker", 2));
+  EXPECT_TRUE(ca::controller_kernel_known("walker", 2));
+  EXPECT_FALSE(ca::controller_kernel_known("walker", 3));
 }
 
 TEST(WorldRulesTest, TheWorldBlockSetsTheRules) {
@@ -103,7 +107,7 @@ world:
   avatars:
     archetypes:
       pilot: { body: { mass: 90, width: 0.6, height: 1.9, density: 1010 },
-               controllers: [stroll@1, walker@1] }
+               controllers: [stroll@1, walker@2] }
       child: { body: { mass: 30, height: 1.2 } }
     policy:
       max_speed: 6
@@ -123,9 +127,10 @@ world:
   EXPECT_EQ(r.avatar().body.density, 1010.0) << "the water it displaces (OW9b)";
   EXPECT_EQ(r.archetypes[1].body.density, 985.0) << "a person's when left out";
   EXPECT_EQ(r.archetypes[1].body.width, 0.5) << "a body key left out keeps the default";
-  EXPECT_EQ(r.archetypes[1].controllers, std::vector<std::string>{"walker@1"})
+  EXPECT_EQ(r.archetypes[1].controllers, std::vector<std::string>{"walker@2"})
       << "and so do controllers left out";
-  ASSERT_EQ(r.controllers.size(), 2u) << "the document's controllers join the default walker@1";
+  ASSERT_EQ(r.controllers.size(), 3u)
+      << "the document's controllers join the defaults walker@1 and walker@2";
   EXPECT_EQ(r.controller().id, "stroll@1") << "the avatar's: the first its archetype allows";
   EXPECT_EQ(r.controller().kernel, "walker");
   EXPECT_EQ(r.controller().version, 1) << "the version from the id";
@@ -197,7 +202,13 @@ world:
       {"world: { avatars: { archetypes: { a: { controllers: [runner@1] } } } }",
        "allows controller 'runner@1', which controllers: does not define"},
       {"world: { controllers: { runner@1: {} } }", "this build has no kernel runner@1"},
-      {"world: { controllers: { walker@2: {} } }", "this build has no kernel walker@2"},
+      {"world: { controllers: { walker@3: {} } }", "this build has no kernel walker@3"},
+      {"world: { controllers: { walker@2: { params: { wade_slow: 2 } } } }",
+       "walker@2's wade_slow must be at most 1"},
+      {"world: { controllers: { walker@2: { params: { swim_depth: 0.2 } } } }",
+       "walker@2's wade_depth must be below its swim_depth"},
+      {"world: { controllers: { walker@2: { params: { swim_force: -1 } } } }",
+       "walker@2's knobs must be >= 0"},
       {"world: { avatars: { archetypes: { a: { body: { mass: -1 } } } } }",
        "body mass, width, height and density must be positive"},
       {"world: { avatars: { archetypes: { a: { body: { density: 0 } } } } }",
@@ -390,15 +401,15 @@ TEST(RoomRulesTest, AShorterListLeavesNothingBehind) {
   ca::avatar_archetype extra;
   extra.id = "extra";
   r.archetypes.push_back(extra);
-  r.controllers[0].params = {{"walk_speed", 2.0}, {"turn", 1.0}};
+  r.controllers.back().params = {{"walk_speed", 2.0}, {"turn", 1.0}}; // walker@2, the person's
   rc::write_room_rules(app, "r", r);
   r.archetypes.pop_back();
-  r.controllers[0].params = {{"walk_speed", 2.5}};
+  r.controllers.back().params = {{"walk_speed", 2.5}};
   rc::write_room_rules(app, "r", r);
   const ca::world_rules back = rc::read_room_rules(app, "r");
   EXPECT_EQ(back.archetypes.size(), 1u);
-  ASSERT_EQ(back.controllers.size(), 1u);
-  EXPECT_EQ(back.controllers[0].params.size(), 1u);
+  ASSERT_EQ(back.controllers.size(), 2u) << "walker@1 and walker@2";
+  EXPECT_EQ(back.controllers.back().params.size(), 1u);
   EXPECT_EQ(back.controller().param("walk_speed", 0.0), 2.5);
   EXPECT_TRUE(back == r);
 }

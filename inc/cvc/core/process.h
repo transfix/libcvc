@@ -12,8 +12,9 @@
 namespace cvc {
 namespace process {
 
-// The running program's own file: GetModuleFileNameW, _NSGetExecutablePath, the FreeBSD sysctl, or
-// /proc/self/exe (Linux) and /proc/curproc/exe (NetBSD). Empty where the platform can't say.
+// The running program's own file: GetModuleFileNameW, _NSGetExecutablePath, the FreeBSD and NetBSD
+// sysctls, argv[0] resolved against the working directory or PATH (OpenBSD, which keeps no path),
+// Haiku's app image, or /proc/self/exe (Linux). Empty where the platform can't say.
 std::filesystem::path self_path();
 
 // Start argv[0] with the rest of argv as its arguments, and don't wait for it. argv[0] is a path

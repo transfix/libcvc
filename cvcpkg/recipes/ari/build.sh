@@ -9,7 +9,13 @@ set -euo pipefail
 : "${CVC_INSTALL_DIR:?CVC_INSTALL_DIR must be set}"
 
 CVC_BUILD_TYPE="${CVC_BUILD_TYPE:-Release}"
-CVC_JOBS="${CVC_JOBS:-$(nproc 2>/dev/null || echo 4)}"
+# OpenBSD has no nproc; sysctl hw.ncpu answers on every BSD and macOS.
+CVC_JOBS="${CVC_JOBS:-$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)}"
+
+# NetBSD: pkgsrc's clang, which built cvcpkg's NetBSD deps (_common/env-netbsd.sh), not base GCC 10.
+if [[ "$(uname -s)" == NetBSD && -z "${CXX:-}" && -x /usr/pkg/bin/clang++ ]]; then
+  export CC=/usr/pkg/bin/clang CXX=/usr/pkg/bin/clang++
+fi
 
 case "$(echo "$CVC_BUILD_TYPE" | tr '[:upper:]' '[:lower:]')" in
   debug) CMAKE_BUILD_TYPE=Debug ;;
