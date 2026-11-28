@@ -3423,7 +3423,8 @@ read. The document is held to the allocation limit as it grows.
   as the process's own frames, so its body's steps are eval steps. The job goes on in the data
   step after it returns, even with `data.step_nodes` = 0. Another native function can do the
   same with `call_function(args.context(), fn, args, who)`.
-- **Cost.** `collections.sort` is a stable merge sort, n log n nodes.
+- **Cost.** `collections.sort` is a stable merge sort, n log n nodes, and `collections.sort-by`
+  the same after a node per element to take its key, and one per element to copy it out.
   `collections.unique` costs a node per comparison, and compares lists and dicts with a sliced
   equality walk. `collections.dict-merge` keeps a key index, so it is linear. Every job polls the
   evaluation deadline (`max_time`) about every 64 nodes, and throws `evaluation_timeout` once it
@@ -3518,6 +3519,17 @@ builtin, a stdlib function, a host function (pycvc's `register_fn`) or a DSL fun
 `return` in it returns from it. C++ that calls the registry's function directly, with no
 running program, can pass only a native function.
 
+`(collections.sort-by list key [desc])` sorts a list of rows by a key: a string key is a dict
+element's field, an integer key a list element's index. It is stable both ways: elements with
+equal keys keep their order, ascending and, with `desc` truthy, descending. Numbers compare by
+value and come before strings. Strings compare naturally: a run of digits compares with a run of
+digits as the number it is, so `"1.9"` comes before `"1.10"` and `"build2"` before `"build10"`;
+anything else compares by bytes (and two strings that differ only in leading zeros, by bytes). A
+missing key (a dict without the field, an index past a list's end, a key of the other kind) or a
+nil one sorts first ascending and last descending; any other value sorts after the strings. It is
+on Ariadne's read lane, as `collections.sort` is, and an Ariadne table's sort (docs/ARIADNE.md,
+*Tables* in §5.3) gives the key and `desc` straight from its `"name"` / `"-name"` value.
+
 ```lisp
 (collections.map (list 1 4 9) math.sqrt)          ;; => (1 2 3)
 (collections.map (list 1 2 3) (lambda (x) (* x x))) ;; => (1 4 9)
@@ -3528,6 +3540,8 @@ running program, can pass only a native function.
 (collections.zip (list 1 2) (list "a" "b"))       ;; => ((1 "a") (2 "b"))
 (collections.flatten (list (list 1 2) 3 (list 4))) ;; => (1 2 3 4)   one level
 (collections.sort (list 3 1 2))                   ;; => (1 2 3)   numbers by value, strings by bytes; stable
+(collections.sort-by (list (dict "v" "1.10") (dict "v" "1.9")) "v")      ;; => ({"v": "1.9"} {"v": "1.10"})
+(collections.sort-by (list (list 1 "a") (list 2 "b")) 0 t)              ;; => ((2 "b") (1 "a"))   descending
 (collections.reverse (list 1 2 3))                ;; => (3 2 1)
 (collections.range 1 5)                           ;; => (1 2 3 4)
 (collections.range 5 0 -2)                        ;; => (5 3 1)

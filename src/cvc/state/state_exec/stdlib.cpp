@@ -117,6 +117,89 @@ bool sort_less(const value_t &a, const value_t &b) {
   return false;
 }
 
+// Strings in natural order: a run of digits compares with a run of digits as the number it is
+// ("1.9" < "1.10", "build2" < "build10"), anything else byte by byte. Strings equal so (only
+// their leading zeros differ) compare by their bytes. <0, 0 or >0, as compare does.
+int natural_compare(std::string_view a, std::string_view b) {
+  const auto digit = [](char c) { return c >= '0' && c <= '9'; };
+  std::size_t i = 0, j = 0;
+  while (i < a.size() && j < b.size()) {
+    if (digit(a[i]) && digit(b[j])) {
+      std::size_t ie = i, je = j;
+      while (ie < a.size() && digit(a[ie]))
+        ++ie;
+      while (je < b.size() && digit(b[je]))
+        ++je;
+      std::size_t i0 = i, j0 = j; // past the leading zeros
+      while (i0 + 1 < ie && a[i0] == '0')
+        ++i0;
+      while (j0 + 1 < je && b[j0] == '0')
+        ++j0;
+      if (ie - i0 != je - j0) // more digits: the larger number
+        return ie - i0 < je - j0 ? -1 : 1;
+      if (const int c = a.substr(i0, ie - i0).compare(b.substr(j0, je - j0)); c != 0)
+        return c;
+      i = ie;
+      j = je;
+      continue;
+    }
+    if (a[i] != b[j])
+      return static_cast<unsigned char>(a[i]) < static_cast<unsigned char>(b[j]) ? -1 : 1;
+    ++i;
+    ++j;
+  }
+  if (i < a.size() || j < b.size())
+    return i < a.size() ? 1 : -1; // the one with more left after the same start is later
+  return a.compare(b);
+}
+
+// collections.sort-by's order on keys: nil (a missing key) first, then numbers by value, then
+// strings in natural order, then anything else, unordered among itself (the sort keeps such keys
+// in the order they came, as it does equal ones).
+int sort_by_rank(const value_t &v) {
+  if (v.is_nil())
+    return 0;
+  if (std::holds_alternative<int64_t>(v.v) || std::holds_alternative<double>(v.v))
+    return 1;
+  if (std::holds_alternative<std::string>(v.v))
+    return 2;
+  return 3;
+}
+
+bool sort_by_less(const value_t &a, const value_t &b) {
+  const int ra = sort_by_rank(a), rb = sort_by_rank(b);
+  if (ra != rb)
+    return ra < rb;
+  if (ra == 1) {
+    const auto *ai = std::get_if<int64_t>(&a.v), *bi = std::get_if<int64_t>(&b.v);
+    if (ai && bi)
+      return *ai < *bi;
+    const double x = ai ? static_cast<double>(*ai) : std::get<double>(a.v);
+    const double y = bi ? static_cast<double>(*bi) : std::get<double>(b.v);
+    return x < y;
+  }
+  if (ra == 2)
+    return natural_compare(std::get<std::string>(a.v), std::get<std::string>(b.v)) < 0;
+  return false;
+}
+
+// The key collections.sort-by sorts `element` by: a dict's field `key` names (a string key), or
+// a list's element at index `key` (an integer key); nil when the element has none.
+value_t sort_by_key(const value_t &element, const value_t &key) {
+  if (const auto *field = std::get_if<std::string>(&key.v)) {
+    if (const auto *d = std::get_if<dict_ptr>(&element.v); d && *d)
+      for (const auto &kv : **d)
+        if (kv.first == *field)
+          return kv.second;
+    return value_t();
+  }
+  const int64_t index = std::get<int64_t>(key.v);
+  if (const auto *l = std::get_if<list_ptr>(&element.v);
+      l && *l && index >= 0 && static_cast<uint64_t>(index) < (*l)->size())
+    return (**l)[static_cast<std::size_t>(index)];
+  return value_t();
+}
+
 // ---------------------------------------------------------------------------
 // Sliced work. The functions that build a result, scan a string or call a function do it as a
 // data_job (data_job.h), a slice at a time: on an evaluator that slices (data.step_nodes > 0) a
@@ -785,6 +868,90 @@ private:
   std::size_t width_ = 1, lo_ = 0, mid_ = 0, hi_ = 0, i_ = 0, j_ = 0, k_ = 0;
 };
 
+// collections.sort-by: each element's key taken once, then the same stable bottom-up merge sort
+// as collections.sort on the keys (one node per element moved), descending by the reversed
+// comparison so equal keys keep their order either way, then the elements copied out.
+class sort_by_job final : public stdlib_job {
+public:
+  sort_by_job(list_ptr list, value_t key, bool desc)
+      : stdlib_job("collections.sort-by"), list_(std::move(list)), key_(std::move(key)),
+        desc_(desc) {}
+
+  bool step(std::size_t budget) override {
+    slice sl = begin(budget);
+    if (!keyed_) {
+      for (; next_ < list_->size(); ++next_) {
+        if (sl.spent())
+          return false;
+        const value_t &e = (*list_)[next_];
+        a_.push_back({sort_by_key(e, key_), e});
+        sl.count(1);
+      }
+      keyed_ = true;
+      n_ = a_.size();
+      if (n_ > 1) {
+        b_.resize(n_);
+        start_run();
+      }
+    }
+    while (width_ < n_) {
+      if (k_ == hi_) { // this pair of runs is merged
+        lo_ = hi_;
+        if (lo_ >= n_) { // and so is this pass
+          std::swap(a_, b_);
+          width_ *= 2;
+          lo_ = 0;
+          if (width_ >= n_)
+            break;
+        }
+        start_run();
+        continue;
+      }
+      if (sl.spent())
+        return false;
+      if (i_ < mid_ && (j_ >= hi_ || !less(a_[j_], a_[i_])))
+        b_[k_++] = std::move(a_[i_++]);
+      else
+        b_[k_++] = std::move(a_[j_++]);
+      sl.count(1);
+    }
+    while (out_.size() < n_) {
+      if (sl.spent())
+        return false;
+      out_.push_back(std::move(a_[out_.size()].second));
+      sl.count(1);
+    }
+    return true;
+  }
+
+  value_t result() override { return make_list(std::move(out_)); }
+
+private:
+  using entry = std::pair<value_t, value_t>; // the key, the element
+
+  bool less(const entry &x, const entry &y) const {
+    return desc_ ? sort_by_less(y.first, x.first) : sort_by_less(x.first, y.first);
+  }
+
+  void start_run() {
+    mid_ = std::min(lo_ + width_, n_);
+    hi_ = std::min(lo_ + 2 * width_, n_);
+    i_ = lo_;
+    j_ = mid_;
+    k_ = lo_;
+  }
+
+  list_ptr list_;
+  value_t key_;
+  bool desc_ = false;
+  bool keyed_ = false;
+  std::size_t next_ = 0;
+  std::size_t n_ = 0;
+  std::vector<entry> a_, b_; // a_ is sorted in runs of width_; a pass merges them into b_
+  std::size_t width_ = 1, lo_ = 0, mid_ = 0, hi_ = 0, i_ = 0, j_ = 0, k_ = 0;
+  std::vector<value_t> out_;
+};
+
 class reverse_job final : public stdlib_job {
 public:
   explicit reverse_job(list_ptr list)
@@ -1372,6 +1539,24 @@ void stdlib_registry::register_collections_module() {
     expect_exact(args, 1, "collections.sort");
     return run_data_job(args.context(),
                         std::make_unique<sort_job>(as_list_ptr(args[0], "collections.sort")));
+  });
+
+  // (collections.sort-by list key [desc]): the elements by a key, a dict's field (a string key) or
+  // a list's element (an integer key); stable; descending when `desc` is truthy.
+  register_function("collections", "collections.sort-by", [](call_args args) -> value_t {
+    expect_min(args, 2, "collections.sort-by");
+    if (args.size() > 3)
+      throw std::runtime_error("collections.sort-by: expected 2 or 3 argument(s), got " +
+                               std::to_string(args.size()));
+    list_ptr lst = as_list_ptr(args[0], "collections.sort-by");
+    if (!std::holds_alternative<std::string>(args[1].v) &&
+        !std::holds_alternative<int64_t>(args[1].v))
+      throw std::runtime_error("collections.sort-by: the key must be a string (a dict's field) or "
+                               "an integer (a list's index), got " +
+                               args[1].type_name());
+    const bool desc = args.size() > 2 && args[2].is_truthy();
+    return run_data_job(args.context(),
+                        std::make_unique<sort_by_job>(std::move(lst), args[1], desc));
   });
 
   register_function("collections", "collections.reverse", [](call_args args) -> value_t {

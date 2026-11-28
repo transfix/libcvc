@@ -467,6 +467,10 @@ const char *const kSlicedScripts[] = {
     "(collections.flatten (list (collections.range 300) 1 (list) (collections.range 3)))",
     "(collections.sort (collections.map (collections.range 300) (lambda (x) (% (* x 37) 101))))",
     "(collections.sort (list \"pear\" \"apple\" \"fig\" 3 1.5 2))",
+    "(collections.sort-by (collections.map (collections.range 300) (lambda (x) (list (% (* x 37) "
+    "101) x))) 0)",
+    "(collections.sort-by (collections.map (collections.range 300) (lambda (x) (dict \"v\" "
+    "(string.join (list \"b\" (str (% x 17))) \"\")))) \"v\" t)",
     "(collections.reverse (collections.range 300))",
     "(collections.unique (collections.map (collections.range 300) (lambda (x) (% x 17))))",
     "(collections.unique (list (list 1 2) (list 1 2) (list 1 (list 2)) (list 1 (list 2))))",
@@ -669,5 +673,106 @@ TEST(StdlibSlicedTest, ADslFunctionNeedsARunningProgram) {
   EXPECT_NE(thrown([&] {
               call_function(nullptr, value_t{int64_t(1)}, std::span(&arg, 1), "test");
             }).find("test: not a function"),
+            std::string::npos);
+}
+
+// --- collections.sort-by -------------------------------------------------------------------
+
+namespace {
+// (collections.sort-by ...) run on a scheduler that slices a few nodes at a time, as text.
+std::string sort_by(const std::string &script) {
+  sliced_scheduler three(3);
+  return three.run(script).first;
+}
+} // namespace
+
+// A dict element by its field, a list element by its index; the elements come back whole.
+TEST(StdlibSortByTest, ByADictFieldOrAListIndex) {
+  EXPECT_EQ(sort_by("(collections.sort-by (list (dict \"n\" \"b\" \"v\" 1) (dict \"n\" \"a\" \"v\" "
+                    "2)) \"n\")"),
+            "({\"n\": \"a\", \"v\": 2} {\"n\": \"b\", \"v\": 1})");
+  EXPECT_EQ(sort_by("(collections.sort-by (list (list 3 \"c\") (list 1 \"a\") (list 2 \"b\")) 0)"),
+            "((1 \"a\") (2 \"b\") (3 \"c\"))");
+  EXPECT_EQ(sort_by("(collections.sort-by (list (list 3 \"c\") (list 1 \"a\") (list 2 \"b\")) 1 "
+                    "t)"),
+            "((3 \"c\") (2 \"b\") (1 \"a\"))");
+  EXPECT_EQ(sort_by("(collections.sort-by (list) \"n\")"), "()");
+  EXPECT_EQ(sort_by("(collections.sort-by (list (dict \"n\" 1)) \"n\" t)"), "({\"n\": 1})");
+}
+
+// Digit runs compare as numbers ("1.9" < "1.10", "build2" < "build10"); the rest by bytes.
+TEST(StdlibSortByTest, StringsSortNaturally) {
+  const std::string names =
+      "(collections.map (collections.sort-by (list (dict \"v\" \"1.10\") "
+      "(dict \"v\" \"1.9\") (dict \"v\" \"1.2\") (dict \"v\" \"0.10.1\") "
+      "(dict \"v\" \"build10\") (dict \"v\" \"build2\") (dict \"v\" "
+      "\"Build3\") (dict \"v\" \"build02\")) \"v\"%s) (lambda (d) (get-attr d "
+      "\"v\")))";
+  const auto with = [&](const char *desc) {
+    std::string s = names;
+    s.replace(s.find("%s"), 2, desc);
+    return sort_by(s);
+  };
+  EXPECT_EQ(with(""), "(\"0.10.1\" \"1.2\" \"1.9\" \"1.10\" \"Build3\" \"build02\" \"build2\" "
+                      "\"build10\")")
+      << "upper case before lower (bytes); build02 and build2 the same number, then by bytes";
+  EXPECT_EQ(with(" t"), "(\"build10\" \"build2\" \"build02\" \"Build3\" \"1.10\" \"1.9\" \"1.2\" "
+                        "\"0.10.1\")");
+}
+
+// Equal keys keep the order they came in, ascending and descending.
+TEST(StdlibSortByTest, IsStableBothWays) {
+  const std::string rows = "(list (list 1 \"a\") (list 0 \"b\") (list 1 \"c\") (list 0 \"d\") "
+                           "(list 1 \"e\") (list 0 \"f\"))";
+  EXPECT_EQ(
+      sort_by("(collections.map (collections.sort-by " + rows + " 0) (lambda (r) (nth r 1)))"),
+      "(\"b\" \"d\" \"f\" \"a\" \"c\" \"e\")");
+  EXPECT_EQ(
+      sort_by("(collections.map (collections.sort-by " + rows + " 0 t) (lambda (r) (nth r 1)))"),
+      "(\"a\" \"c\" \"e\" \"b\" \"d\" \"f\")");
+  // A long run of equal keys across many slices.
+  EXPECT_EQ(sort_by("(collections.map (collections.sort-by (collections.map (collections.range 200)"
+                    " (lambda (i) (list (% i 2) i))) 0 t) (lambda (r) (nth r 1)))"),
+            sort_by("(collections.flatten (list (collections.filter (collections.range 200) "
+                    "(lambda (i) (= (% i 2) 1))) (collections.filter (collections.range 200) "
+                    "(lambda (i) (= (% i 2) 0)))))"));
+}
+
+// Numbers (ints and floats together) before strings; a missing or nil key first ascending and
+// last descending; an index past the end, or a key of the wrong kind for the element, is missing.
+TEST(StdlibSortByTest, NumbersBeforeStringsAndMissingKeysAtTheEnds) {
+  const std::string mixed =
+      "(list (dict \"k\" \"b\" \"id\" 1) (dict \"k\" 10 \"id\" 2) (dict \"id\" "
+      "3) (dict \"k\" 2.5 \"id\" 4) (dict \"k\" \"a\" \"id\" 5) (dict \"k\" "
+      "nil \"id\" 6) (dict \"k\" -1 \"id\" 7))";
+  const auto ids = [&](const char *desc) {
+    return sort_by("(collections.map (collections.sort-by " + mixed + " \"k\"" + desc +
+                   ") (lambda (d) (get-attr d \"id\")))");
+  };
+  EXPECT_EQ(ids(""), "(3 6 7 4 2 5 1)");
+  EXPECT_EQ(ids(" t"), "(1 5 2 4 7 3 6)");
+  EXPECT_EQ(sort_by("(collections.sort-by (list (dict \"k\" 1) (list 5) (dict \"k\" 0)) \"k\")"),
+            "((5) {\"k\": 0} {\"k\": 1})")
+      << "a list has no field: its key is missing";
+  EXPECT_EQ(sort_by("(collections.sort-by (list (list 2) (list 1 0) (list)) 1)"), "((2) () (1 0))")
+      << "no element 1: missing, so first, in the order they came";
+}
+
+TEST(StdlibSortByTest, TheKeyIsAStringOrAnInteger) {
+  const value_t lst = make_list({make_dict({{"a", value_t(int64_t(1))}})});
+  EXPECT_NE(thrown([&] {
+              call("collections.sort-by", {lst, value_t(1.5)});
+            }).find("collections.sort-by: the key must be a string"),
+            std::string::npos);
+  EXPECT_NE(thrown([&] { call("collections.sort-by", {lst}); }).find("collections.sort-by"),
+            std::string::npos);
+  EXPECT_NE(thrown([&] {
+              call("collections.sort-by",
+                   {lst, value_t(std::string("a")), value_t(true), value_t(true)});
+            }).find("expected 2 or 3"),
+            std::string::npos);
+  EXPECT_NE(thrown([&] {
+              call("collections.sort-by", {value_t(int64_t(1)), value_t(int64_t(0))});
+            }).find("expected list"),
             std::string::npos);
 }

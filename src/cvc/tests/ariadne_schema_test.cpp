@@ -250,6 +250,13 @@ const Mistake kMistakes[] = {
      8},
     {"a map in a state: list", "state:\n  a: [1, {b: 2}]\n", "/state/a/1",
      "a map is the wrong type here", 2, 10},
+    {"a misspelt key in a table's column",
+     "windows:\n  - window: W\n    children:\n      - type: table\n        columns:\n          "
+     "- {label: a, wdth: 9}\n",
+     "/windows/0/children/0/columns/0", "unknown key 'wdth'", 0, 0},
+    {"a table's cells: that is not a list",
+     "windows:\n  - window: W\n    children:\n      - type: table\n        cells: {text: a}\n",
+     "/windows/0/children/0/cells", "a map is the wrong type here", 5, 16},
 };
 
 const char *const kValid[] = {
@@ -290,6 +297,19 @@ const char *const kValid[] = {
     "root:\n  - load: cvc://components/conference.ari\n    as: site\n    name: (state-get "
     "\"site_name\")\n",
     "scene:\n  clock: {hz: 60, max_lag: 0.5}\n",
+    // a table: its columns (a map, or a label alone), cells, rows, sort bind and on:, resizable
+    // and borders; and its short form
+    "windows:\n  - window: W\n    children:\n      - type: table\n        id: results\n"
+    "        bind: search.sort\n        on: (state-set \"req.search\" \"1\")\n"
+    "        rows: (state-get \"search.count\")\n        resizable: true\n"
+    "        borders: { show: inner }\n        columns:\n          - { label: \"\", width: 64 }\n"
+    "          - { label: name, width: 232, sort: name }\n"
+    "          - { label: size, width: \"20%\" }\n          - plain\n        cells:\n"
+    "          - type: button\n            label: Open\n"
+    "            on: (state-set \"nav.open\" \"{i}\")\n          - text: \"\"\n"
+    "            bind: search.res.packages.{i}.name\n          - text: x\n          - text: y\n",
+    "root:\n  - table: T\n    rows: 3\n    columns: [a, b]\n    cells: [{text: \"{i}\"}, {text: "
+    "b}]\n",
     // state: (§5.3): nested and dotted keys, an app-root one, a list, nothing, a flag
     "state:\n  run: {crop: 600, paused: 0, name: x}\n  view.camera: follow\n  /app.theme: dark\n"
     "  pos: [1, 2, 3]\n  empty:\n  ready: true\n",

@@ -221,14 +221,15 @@ namespace {
 // ORDER MATTERS: the short-form dispatch (widget_type) takes the FIRST of these present as a key,
 // so color comes last — a tf_editor's own config may carry a `color:` node list, and a text, radio,
 // button or menu item a `color:` of its own (§5.26) — and progress and plot precede overlay, their
-// caption. A chart's keys name no widget type, nor do a heatmap's or a settings editor's.
+// caption. A chart's keys name no widget type, nor do a heatmap's, a settings editor's or a
+// table's.
 constexpr const char *kBuiltinWidgetTypes[] = {
     "group",        "menubar",    "menu",         "menu_item", "window",    "progress",
     "plot",         "chart",      "settings",     "overlay",   "panel",     "text",
     "checkbox",     "slider_int", "slider_float", "combo",     "radio",     "radio_row",
     "input_text",   "input_int",  "tf_editor",    "image",     "button",    "separator",
     "windows_menu", "spinner",    "video",        "audio",     "text_view", "message_input",
-    "tray_icon",    "tabs",       "list",         "heatmap",   "color"};
+    "tray_icon",    "tabs",       "list",         "heatmap",   "table",     "color"};
 } // namespace
 
 bool is_builtin_widget_type(const std::string &type) {
@@ -1203,6 +1204,26 @@ Size parse_size(const YAML::Node &n) {
   return sz;
 }
 
+// A layout's (or a table's) `borders: { show, color }` onto `L`.
+void parse_borders(const YAML::Node &b, Layout &L) {
+  if (!b || !b.IsMap())
+    return;
+  const std::string show = str(b, "show");
+  if (show == "inner")
+    L.borders = BorderShow::Inner;
+  else if (show == "outer")
+    L.borders = BorderShow::Outer;
+  else if (show == "all")
+    L.borders = BorderShow::All;
+  const YAML::Node col = b["color"];
+  if (col && col.IsSequence() && col.size() >= 3) {
+    L.has_border_color = true;
+    L.border_color[3] = 1.0f;
+    for (std::size_t i = 0; i < 4 && i < col.size(); ++i)
+      L.border_color[i] = static_cast<float>(col[i].as<double>());
+  }
+}
+
 Layout parse_layout(const YAML::Node &n) {
   Layout L;
   if (!n || !n.IsMap())
@@ -1227,23 +1248,7 @@ Layout parse_layout(const YAML::Node &n) {
   tracks(n["col_widths"], L.col_widths);
   tracks(n["row_heights"], L.row_heights);
   L.resizable = flag(n, "resizable");
-  const YAML::Node b = n["borders"];
-  if (b && b.IsMap()) {
-    const std::string show = str(b, "show");
-    if (show == "inner")
-      L.borders = BorderShow::Inner;
-    else if (show == "outer")
-      L.borders = BorderShow::Outer;
-    else if (show == "all")
-      L.borders = BorderShow::All;
-    const YAML::Node col = b["color"];
-    if (col && col.IsSequence() && col.size() >= 3) {
-      L.has_border_color = true;
-      L.border_color[3] = 1.0f;
-      for (std::size_t i = 0; i < 4 && i < col.size(); ++i)
-        L.border_color[i] = static_cast<float>(col[i].as<double>());
-    }
-  }
+  parse_borders(n["borders"], L);
   return L;
 }
 
@@ -1981,6 +1986,60 @@ CVC_ARI_NOINLINE void parse_tabs(Ctx &ctx, const YAML::Node &n, const std::strin
   }
 }
 
+// A table's keys besides its cells: the sort's bind and on:, its columns (each a label, a width as
+// a col_widths entry takes it, and a sort key), rows:, and the grid they make (resizable: by
+// default, borders:, the header row).
+CVC_ARI_NOINLINE void table_keys(Ctx &ctx, const YAML::Node &n, const std::string &label,
+                                 Widget &w) {
+  const std::string name = "ari: table '" + (has(n, "id") ? str(n, "id") : label) + "'";
+  std::vector<TableColumn> columns;
+  if (const YAML::Node cols = n["columns"]; cols && cols.IsSequence()) {
+    for (const YAML::Node &c : cols) {
+      TableColumn col;
+      if (c.IsMap()) {
+        col.label = str(c, "label");
+        const Extent e = parse_extent(c["width"]);
+        col.width.unit = e.unit;
+        col.width.value = e.value;
+        col.sort = str(c, "sort");
+      } else if (c.IsScalar()) {
+        col.label = c.Scalar(); // a column with only its label
+      } else {
+        ctx.warn(name + " has a column that is not { label, width, sort } — an empty one");
+      }
+      columns.push_back(std::move(col));
+    }
+  }
+  if (columns.empty())
+    ctx.warn(name + " has no columns: — it draws nothing");
+  w = table(std::string(), std::move(columns), str(n, "rows"), {}, str(n, "bind"), action(n),
+            flag(n, "resizable", true));
+  w.label = label;
+  parse_borders(n["borders"], w.layout);
+  if (!has(n, "rows"))
+    ctx.warn(name + " has no rows: — it draws its header alone");
+}
+
+// A table: its keys, then its cells (the row template, one per column), as many as it has columns.
+CVC_ARI_NOINLINE void parse_table(Ctx &ctx, const YAML::Node &n, const std::string &label,
+                                  Widget &w) {
+  table_keys(ctx, n, label, w);
+  parse_seq(ctx, n["cells"], w.children);
+  const std::size_t cols = w.table->columns.size(), cells = w.children.size();
+  const std::string name = "ari: table '" + (has(n, "id") ? str(n, "id") : label) + "'";
+  if (cells != cols && cols > 0)
+    ctx.warn(name + " has " + std::to_string(cells) + " cells: for " + std::to_string(cols) +
+             " columns: — " +
+             (cells > cols ? "the extra cells are dropped" : "the missing cells are empty"));
+  if (cells > cols)
+    w.children.erase(w.children.begin() + static_cast<std::ptrdiff_t>(cols), w.children.end());
+  for (Widget &c : w.children)
+    if (!c.repeat.empty()) {
+      ctx.warn(name + ": a cell's repeat: is ignored — rows: repeats the cells");
+      c.repeat.clear();
+    }
+}
+
 // A custom widget's props: every key the loader does not read itself, for its emit fn; and a
 // warning when no handler is registered for `type`.
 CVC_ARI_NOINLINE void custom_props(Ctx &ctx, const YAML::Node &n, const std::string &type,
@@ -2090,6 +2149,8 @@ void parse_widget_impl(Ctx &ctx, const YAML::Node &n, Widget &w) {
     parse_window(ctx, n, label, w);
   else if (type == "tabs")
     parse_tabs(ctx, n, label, w);
+  else if (type == "table")
+    parse_table(ctx, n, label, w);
   else if (parse_leaf(ctx, n, type, label, w))
     return;
   else if (!type.empty() && type != "group" && type != "panel")

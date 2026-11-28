@@ -1703,6 +1703,7 @@ bool ImGuiBackend::begin_grid(const ariadne::Layout &layout, const char *id) {
   const bool open = ImGui::BeginTable(tid.c_str(), gs.cols, flags);
   if (open) {
     gs.resizable = layout.resizable;
+    gs.header = layout.header_row;
     for (int i = 0; i < gs.cols; ++i) {
       ImGuiTableColumnFlags cf = ImGuiTableColumnFlags_WidthStretch;
       float w = 1.0f;
@@ -1813,7 +1814,8 @@ void ImGuiBackend::grid_next_cell() {
   const int row = g.cell / g.cols;
   if (col == 0) {
     const float h = (row < static_cast<int>(g.row_px.size())) ? g.row_px[row] : 0.0f;
-    ImGui::TableNextRow(ImGuiTableRowFlags_None, h);
+    ImGui::TableNextRow(row == 0 && g.header ? ImGuiTableRowFlags_Headers : ImGuiTableRowFlags_None,
+                        h);
   }
   ImGui::TableSetColumnIndex(col);
   ++g.cell;
@@ -2305,6 +2307,23 @@ void ImGuiBackend::spinner(const char *label, double seconds, bool ascii) {
 #endif
 }
 bool ImGuiBackend::button(const char *label) { return ui::Button(label); }
+
+// A header cell as ImGui's TableHeadersRow draws one: under the column's own id, so two columns
+// with the same label (or none) are two items.
+bool ImGuiBackend::table_header(const std::string &label, int dir, bool sortable) {
+#ifdef CVC_ENABLE_IMGUI
+  if (!ImGui::GetCurrentTable())
+    return Backend::table_header(label, dir, sortable);
+  const std::string text = cvc::ariadne::table_header_text(label, dir, unicode_glyphs());
+  ImGui::PushID(ImGui::TableGetColumnIndex());
+  ImGui::TableHeader(text.c_str());
+  const bool clicked = sortable && ImGui::IsItemClicked();
+  ImGui::PopID();
+  return clicked;
+#else
+  return Backend::table_header(label, dir, sortable);
+#endif
+}
 
 bool ImGuiBackend::view_is_phone() const {
 #ifdef CVC_ENABLE_IMGUI

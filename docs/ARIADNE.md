@@ -869,7 +869,8 @@ Three backends ship:
   once), a text field commits on Enter or when focus leaves it. Authored px convert to cells by a nominal cell
   size (`Options::cell_px_w/h`, 8 × 16), and reported geometry converts back, so a layout
   persisted under one backend holds under the other. Grid seams drag: a row split's
-  panes and a `resizable` table's columns resize with the mouse; a row split persists
+  panes and a `resizable` table's columns resize with the mouse (a `type: table`'s too,
+  whose sortable headers are Tab stops: Enter or Space sorts); a row split persists
   its pane sizes to `tree.<id>.tracks` and a resizable table its column widths to
   `tree.<id>.columns` (§11.4; *Grid sizes* in §7.1). What a terminal cannot do it
   degrades: no GLSL, no `view_embed`, no scene (`AppRuntime` drops a `scene:` with a
@@ -1258,6 +1259,94 @@ after an edit, `rows:` (6) is how many rows show at once.
 A backend with no tab bar draws `tabs:` as a row of radio buttons, and one with no list draws a
 `list:` as stacked radio buttons with the two buttons under them, so a terminal host shows both.
 (`tabs_list_test`, `cvcgl_imgui_tabs_list`.)
+
+**Tables.** A `type: table` is one grid: a header row of `columns:` over `rows:` rows of `cells:`.
+A click on a column's header sorts by that column, and the columns' seams drag. Every row is a
+row of the same grid (one ImGui table, one FTXUI gridbox), so a column dragged on any row moves
+in every row, the header's too, where a header grid over a `repeat:` of grid rows is a grid a
+row, and a drag resizes one of them.
+
+```yaml
+      - type: table
+        id: results                       # the table's id: its widths persist in tree.results.columns
+        bind: search.sort                 # where the sort is kept; default tree.<id>.sort
+        on: (state-set "req.search" "1")  # runs after the user changes the sort (not on load)
+        rows: (state-get "search.count")  # how many rows: a count, as repeat: takes one
+        resizable: true                   # the default: the columns' seams drag
+        borders: { show: inner }          # optional, as a grid layout's borders:
+        columns:                          # one entry per column
+          - { label: "", width: 64 }                # no sort: key: its header does not sort
+          - { label: name, width: 232, sort: name }
+          - { label: version, width: 144, sort: version }
+          - { label: size, width: 80, sort: size }
+        cells:                            # the row template: one widget per column, {i} the row
+          - type: button
+            label: Open
+            on: (state-set "nav.open" (state-get "search.res.packages.{i}.name"))
+          - text: ""
+            bind: search.res.packages.{i}.name
+          - text: ""
+            bind: search.res.packages.{i}.version
+          - text: ""
+            bind: search.res.packages.{i}.size_text
+```
+
+- **Columns.** `label:` is the header's text. `width:` takes what a `col_widths` entry takes:
+  px, `"N%"` (a share of the spare width), or nothing for the width of the content. `sort:` is
+  the key a click on the header sorts by; a column without one does not sort, and a click on its
+  header does nothing. A column may be its label alone (`columns: [name, size]`).
+- **Cells.** `cells:` has one widget per column, the template of every row: `{i}` in it is the
+  row, from 0, as in a `repeat:`'s copies, and each row is drawn under its own id. A cell whose
+  `visible_when:` is false is drawn empty and keeps its place, so the cells after it stay under
+  their headers (a grid's hidden child takes no cell, and the cells after it move up one). With
+  fewer cells than columns, the rest of each row is empty; extra cells are dropped. Both are a
+  load warning. A cell has no `repeat:` of its own: `rows:` repeats them. A table's own
+  `on_click:`, `on_hover:` and `tooltip:` do nothing: put them on its cells.
+- **The sort** is a string at `bind:` (else at `tree.<id>.sort`, as tabs keep `tree.<id>.tab`):
+  `""` for none, `"name"` for ascending by `name`, `"-name"` for descending. A click on a
+  sortable header makes it that column ascending, or descending when it was already that column
+  ascending. The click writes the key and then runs `on:`, so `on:` sees the new sort; a write
+  from anywhere else changes what the header shows, and runs no `on:`. The sorted column's
+  header shows ` ▲` (ascending) or ` ▼` (descending) after its label (` ^` / ` v` on a terminal
+  with no such glyphs).
+- **Where it sorts.** The format is the one cvcpkg's `/v1/search` takes as `sort=`, so a table
+  over paged results passes the key straight through: `on:` asks for the first page again, and
+  the request sends `sort=` + `(state-get "search.sort")`. A table over rows a document holds
+  whole sorts them itself, with `collections.sort-by` (docs/STATE_EXEC_DEVELOPER_GUIDE.md, the
+  stdlib), in `on:` and wherever the rows arrive:
+
+  ```yaml
+  - type: table
+    id: builds
+    bind: pkg.builds_sort
+    rows: (state-get "pkg.view")          # the sorted rows' count
+    on: (let ((s (state-get "pkg.builds_sort")))
+          (let ((desc (string.starts-with s "-")))
+            (state-set-tree "pkg.view"
+              (collections.sort-by (json-parse (state-get "pkg.builds_json"))
+                                   (if desc (string.substring s 1) s) desc))))
+    columns: [{ label: version, sort: version }, { label: built, sort: built }]
+    cells:
+      - { text: "", bind: pkg.view.{i}.version }
+      - { text: "", bind: pkg.view.{i}.built }
+  ```
+
+  With no sort (`""`) the key names no field, every key is missing, and the rows keep their
+  order.
+- **Its id.** A table's widths persist as a resizable grid's do (*Grid sizes* in §7.1), under
+  its id: its `id:`, else its label (`table: Results`), else one made from where it sits in the
+  document, which moves when the document above it changes. Give a table an `id:`.
+- **Inside a `repeat:`**, the outer index reaches the table's own keys (`id:`, `bind:`, `rows:`,
+  its headers), not its cells: their `{i}` is the row.
+- **Rows don't resize.** Only the columns have seams. ImGui's tables size a row to its tallest
+  cell and have no drag for a row's height, and a terminal's rows are lines of text, one cell
+  high, so a row's height is what its cells need on every backend. (A row split,
+  `layout: { row_heights, resizable }`, is a stack of panes, not a table's rows.)
+- **Backends.** The ImGui backend draws the header as ImGui's own header row (`TableHeader`:
+  lit under the pointer). The FTXUI and tvision backends draw a header in bold; a sortable one
+  is a stop in Tab order, and a click on it, or Enter or Space while it has focus, sorts by it.
+  Any other backend draws each header as a line of text (`Backend::table_header`'s default).
+  (`ariadne_runtime_test` `AriadneTable.*`, `ariadne_ftxui_test` `*Table*`.)
 
 ### 5.4 `scene:` sources and custom node types
 
@@ -6920,7 +7009,8 @@ Widgets and scene binds use the same rule, which is why a widget `bind:` and a s
 
 **Grid sizes (§11.4).** A grid the user can resize keeps its sizes under its id, the way a
 window keeps `tree.<id>.geometry`: a row split's pane heights in `tree.<id>.tracks`, a
-resizable table's column widths in `tree.<id>.columns`. A grid's id is its `id:`, else its
+resizable table's column widths in `tree.<id>.columns`. A `type: table` (*Tables* in §5.3) is
+such a grid: its columns' widths persist the same way, under the table's id. A grid's id is its `id:`, else its
 `label:`, else one the walk makes from where the grid sits in the document (`~0_2_1`, the child
 index at each level), so two unnamed grids in one window never share a backend table or a key.
 That id moves when the document's structure above the grid changes, so give a grid whose sizes

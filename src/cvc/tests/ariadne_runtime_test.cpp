@@ -170,6 +170,13 @@ struct MockBackend : Backend {
   }
   bool item_clicked_flag = false; // §4.6: report the last item as clicked (widget on_click test)
   bool item_clicked() override { return item_clicked_flag; }
+  // Kind::Table: each header as "table_header:<label>:<dir>[:s]" (s: it sorts), and a click on the
+  // one labelled `click_header`.
+  std::string click_header;
+  bool table_header(const std::string &l, int dir, bool sortable) override {
+    rec("table_header:" + l + ":" + std::to_string(dir) + (sortable ? ":s" : ""));
+    return !click_header.empty() && l == click_header;
+  }
   bool item_hovered_flag = false; // §4.6: report the last item as hovered (widget on_hover test)
   bool item_hovered() override { return item_hovered_flag; }
   bool item_dragged_flag = false; // §4.6: report the last item as dragged (widget on_drag test)
@@ -2973,6 +2980,209 @@ TEST(AriadneRuntime, GridDispatchesBeginGridAndCells) {
   EXPECT_TRUE(mb.saw("text_line:b"));
 }
 
+// --- Kind::Table --------------------------------------------------------------------------------
+
+namespace {
+// A three-column table "t": name and size sort, the first column does not; two rows of cells.
+Widget sample_table(std::string rows = "2", std::string bind = std::string(),
+                    std::string on = std::string()) {
+  return table("t",
+               {TableColumn{"", Track{Unit::Px, 64.0f}, ""},
+                TableColumn{"name", Track{Unit::Px, 200.0f}, "name"},
+                TableColumn{"size", Track{}, "size"}},
+               std::move(rows), {text("open{i}"), text("name{i}"), text("size{i}")},
+               std::move(bind), std::move(on));
+}
+std::string state_value(cvc::app &app, const std::string &path) {
+  return cvc::state::instance(app)(path).value();
+}
+std::ptrdiff_t log_at(const MockBackend &mb, const std::string &s) {
+  const auto it = std::find(mb.log.begin(), mb.log.end(), s);
+  return it == mb.log.end() ? -1 : it - mb.log.begin();
+}
+} // namespace
+
+// One grid for the whole table: the header's cells, then rows x columns cells, each row under its
+// own id with {i} the row.
+TEST(AriadneTable, OneGridHoldsTheHeaderAndEveryRow) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_root(group({sample_table()}));
+  rt.render();
+  EXPECT_EQ(mb.times("begin_grid:cols=3"), 1) << ::testing::PrintToString(mb.log);
+  EXPECT_EQ(mb.times("end_grid"), 1);
+  EXPECT_EQ(mb.times("next_cell"), 3 + 2 * 3) << "the header, then two rows of three";
+  ASSERT_EQ(mb.grid_ids.size(), 1u);
+  EXPECT_EQ(mb.grid_ids[0], "t");
+  EXPECT_TRUE(mb.saw("table_header::0"));
+  EXPECT_TRUE(mb.saw("table_header:name:0:s"));
+  EXPECT_TRUE(mb.saw("table_header:size:0:s"));
+  for (const char *cell : {"open0", "name0", "size0", "open1", "name1", "size1"})
+    EXPECT_TRUE(mb.saw(std::string("text_line:") + cell)) << cell;
+  // In order: the header, row 0 under its id, row 1 under its id.
+  const std::ptrdiff_t header = log_at(mb, "table_header:size:0:s"), row0 = log_at(mb, "push_id:0"),
+                       first = log_at(mb, "text_line:open0"), row1 = log_at(mb, "push_id:1"),
+                       last = log_at(mb, "text_line:size1");
+  EXPECT_LT(header, row0);
+  EXPECT_LT(row0, first);
+  EXPECT_LT(first, row1);
+  EXPECT_LT(row1, last);
+  EXPECT_LT(last, log_at(mb, "end_grid"));
+}
+
+// A hidden cell keeps its cell (drawn empty), so the cells after it stay in their columns; a
+// table with fewer cells than columns leaves the rest empty.
+TEST(AriadneTable, AHiddenCellKeepsItsSlot) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  Widget t = sample_table();
+  t.children[1].visible_when = "(= {i} 1)"; // the name only on row 1
+  t.children.pop_back();                    // and no cell for the size column
+  rt.set_root(group({t}));
+  rt.render();
+  EXPECT_EQ(mb.times("next_cell"), 3 + 2 * 3) << "every row still has three cells";
+  EXPECT_FALSE(mb.saw("text_line:name0"));
+  EXPECT_TRUE(mb.saw("text_line:name1"));
+  EXPECT_TRUE(mb.saw("text_line:open0"));
+  EXPECT_TRUE(mb.saw("text_line:open1"));
+}
+
+// A click on a sortable header: that column ascending, then descending, then ascending again; a
+// click on another column sorts by it, ascending. The header after shows the arrow's way.
+TEST(AriadneTable, HeaderClicksToggleTheSort) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_root(group({sample_table()}));
+  const auto click = [&](const std::string &label) {
+    mb.click_header = label;
+    rt.render();
+    mb.click_header.clear();
+  };
+  click("name");
+  EXPECT_EQ(state_value(app, "tree.t.sort"), "name") << "no bind: tree.<id>.sort";
+  mb.log.clear();
+  rt.render();
+  EXPECT_TRUE(mb.saw("table_header:name:1:s")) << ::testing::PrintToString(mb.log);
+  EXPECT_TRUE(mb.saw("table_header:size:0:s"));
+  click("name");
+  EXPECT_EQ(state_value(app, "tree.t.sort"), "-name");
+  mb.log.clear();
+  rt.render();
+  EXPECT_TRUE(mb.saw("table_header:name:-1:s"));
+  click("name");
+  EXPECT_EQ(state_value(app, "tree.t.sort"), "name");
+  click("size");
+  EXPECT_EQ(state_value(app, "tree.t.sort"), "size");
+  click("name");
+  EXPECT_EQ(state_value(app, "tree.t.sort"), "name") << "another column: it, ascending";
+  // A write from anywhere is the sort the header shows.
+  cvc::state::instance(app)("tree.t.sort").value(std::string("-size"));
+  mb.log.clear();
+  rt.render();
+  EXPECT_TRUE(mb.saw("table_header:size:-1:s"));
+  EXPECT_TRUE(mb.saw("table_header:name:0:s"));
+}
+
+// on: runs after the user changes the sort, seeing the new value; never on load. A header that
+// does not sort ignores a click.
+TEST(AriadneTable, OnRunsAfterTheWriteAndNotOnLoad) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  rt.set_root(group(
+      {sample_table("2", "search.sort", "(state-set \"seen\" (state-get \"search.sort\"))")}));
+  rt.render();
+  rt.drain();
+  rt.render();
+  rt.drain();
+  EXPECT_EQ(state_value(app, "seen"), "") << "not on load";
+  mb.click_header = "size";
+  rt.render();
+  mb.click_header.clear();
+  rt.drain();
+  EXPECT_EQ(state_value(app, "search.sort"), "size") << "the bind holds the sort";
+  EXPECT_EQ(state_value(app, "seen"), "size") << "on: ran after the write";
+  EXPECT_EQ(state_value(app, "tree.t.sort"), "") << "a bind: replaces tree.<id>.sort";
+}
+
+TEST(AriadneTable, AHeaderWithoutASortKeyDoesNothing) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  Widget t = sample_table("1", "", "(state-set \"seen\" \"1\")");
+  auto spec = std::make_shared<TableSpec>(*t.table);
+  spec->columns[0].label = "open"; // a label to click, still no sort: key
+  t.table = spec;
+  rt.set_root(group({t}));
+  mb.click_header = "open";
+  rt.render();
+  rt.drain();
+  EXPECT_TRUE(mb.saw("table_header:open:0"));
+  EXPECT_EQ(state_value(app, "tree.t.sort"), "");
+  EXPECT_EQ(state_value(app, "seen"), "") << "no on: either";
+}
+
+// The columns' widths persist as a resizable grid's do: seeded from tree.<id>.columns before the
+// grid opens, written back from what the backend reports after it closes.
+TEST(AriadneTable, ColumnWidthsPersistUnderItsId) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  cvc::state::instance(app)("tree.t.columns").value(std::string("90,100,0"));
+  mb.grid_columns_ret = {64.0f, 230.0f, 0.0f};
+  rt.set_root(group({sample_table()}));
+  rt.render();
+  ASSERT_TRUE(mb.seeded_columns_called);
+  EXPECT_EQ(mb.seeded_columns, (std::vector<float>{90.0f, 100.0f, 0.0f}));
+  EXPECT_EQ(state_value(app, "tree.t.columns"), "64,230,0");
+}
+
+// rows: is a count as repeat: takes it (here an expression), and a table that is itself repeated
+// keeps its cells' {i} for its rows: the outer index reaches its own keys (id:, rows:), not them.
+TEST(AriadneTable, RowsCountAndARepeatedTable) {
+  cvc::app app;
+  Runtime rt(app, "");
+  MockBackend mb;
+  rt.set_backend(&mb);
+  cvc::state::instance(app)("n0").value(std::string("1"));
+  cvc::state::instance(app)("n1").value(std::string("2"));
+  Widget t = sample_table("(state-get \"n{i}\")");
+  t.id = "t{i}";
+  t.repeat = "2";
+  rt.set_root(group({t}));
+  rt.render();
+  ASSERT_EQ(mb.grid_ids.size(), 2u);
+  EXPECT_EQ(mb.grid_ids[0], "t0");
+  EXPECT_EQ(mb.grid_ids[1], "t1");
+  EXPECT_EQ(mb.times("next_cell"), (3 + 1 * 3) + (3 + 2 * 3));
+  EXPECT_EQ(mb.times("text_line:name0"), 2) << "row 0 of each table";
+  EXPECT_EQ(mb.times("text_line:name1"), 1) << "row 1 of the second";
+}
+
+// The default header (FTXUI, tvision, any backend without one): the label and the arrow as a line
+// of text, a click on it the backend's item_clicked.
+TEST(AriadneTable, TheDefaultHeaderIsATextLine) {
+  MockBackend mb;
+  mb.item_clicked_flag = true;
+  EXPECT_TRUE(mb.Backend::table_header("name", 1, true));
+  EXPECT_FALSE(mb.Backend::table_header("open", 0, false)) << "a click on it does not sort";
+  EXPECT_TRUE(mb.saw("text_line:name \xE2\x96\xB2"));
+  EXPECT_TRUE(mb.saw("text_line:open"));
+  mb.Backend::table_header("name", -1, true);
+  EXPECT_TRUE(mb.saw("text_line:name \xE2\x96\xBC"));
+  EXPECT_EQ(table_header_text("name", 1, false), "name ^");
+  EXPECT_EQ(table_header_text("name", -1, false), "name v");
+}
+
 TEST(AriadneRuntime, VerticalGroupDoesNotOpenAGrid) {
   cvc::app app;
   Runtime rt(app, "");
@@ -3951,6 +4161,8 @@ TEST(AriadneStdlib, PredicateRunsTheMaterializersButNotRandom) {
       {"reduce", "(= (collections.reduce (collections.range 5) (lambda (a x) (+ a x)) 0) 10)"},
       {"unique", "(= (collections.unique (string.split (state-get \"csv\") \",\")) "
                  "(list \"b\" \"a\" \"c\"))"},
+      {"sort-by", "(= (collections.sort-by (list (list \"v10\") (list \"v9\")) 0) "
+                  "(list (list \"v9\") (list \"v10\")))"},
       {"dicts", "(= (collections.dict-keys (collections.dict-merge (dict \"a\" 1) (dict \"b\" 2))) "
                 "(list \"a\" \"b\"))"},
       {"shape", "(= (collections.flatten (collections.zip (list 1 2) (collections.reverse (list 3 "
