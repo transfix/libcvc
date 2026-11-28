@@ -1,5 +1,5 @@
 # nav_city_drive.ari — the cvc::nav reactive drive in a city, as an Ariadne document: the port of
-# examples/nav/nav_city_drive.cpp (docs/ARIADNE.md §5.4, "Swarms"). A handful of vehicle CONVOYS
+# the retired C++ nav_city_drive (docs/ARIADNE.md §5.4, "Swarms"). A handful of vehicle CONVOYS
 # cross real downtown Austin to SIX colour-coded rally points with NO global plan: pure local
 # reaction, the published trained CoefMLP driving each one (the built-in biased net where none is
 # installed). Where nav_city_swarm.ari proves "many hundreds of agents on one machine", this is its

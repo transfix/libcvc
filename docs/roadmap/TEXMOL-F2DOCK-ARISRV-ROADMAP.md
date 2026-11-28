@@ -40,6 +40,8 @@ twins in different rooms with different scenes, in the conference mode cyprty us
 - cy-pca/cyconv `docs/plan/PLAN.md` revision 2.
 
 **Companions, and how this fits with them:**
+- [VOLROVER-TEXMOL-APPS-ROADMAP.md](VOLROVER-TEXMOL-APPS-ROADMAP.md): what is left of this plan, each
+  phase ending in a component in the `mol/` collection, and arimol as an Ariadne application.
 - [VOLROVER-LIBRARY-PORTS-ROADMAP.md](VOLROVER-LIBRARY-PORTS-ROADMAP.md) (merged in #1074). Its §1
   rules govern every port here too:
   - no GPL code;

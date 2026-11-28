@@ -125,12 +125,20 @@ public:
     // and GUARANTEES agents never visibly overlap regardless of what the routing asks for.
     float min_gap = 0.0f;
     int min_gap_iters = 4; // relaxation sweeps per step (a few converge a short column)
+    // With min_gap: the agents at rest (arrived, parked) are kept apart too, pushed like the
+    // others, so a crowd at one goal spreads instead of stacking. Default false: only the agents
+    // still driving (byte-unchanged runs).
+    bool min_gap_parked = false;
+    // With min_gap: the gap is measured between points this far ahead of each agent along its
+    // heading (normalized units): a vehicle's middle, its position being its rear axle. Default 0:
+    // between the positions themselves.
+    float min_gap_ahead = 0.0f;
 
     // Where scatter_free() places agent starts and goals. `scattered` (default)
     // picks each uniformly at random from every free cell — the original look.
     // `opposed` clusters every start into a band on one edge of the map and every
     // goal into the opposite edge, so the swarm reads as a deliberate cross-map
-    // migration instead of a random tangle (used by nav_city_swarm).
+    // migration instead of a random tangle (a fleet's `spawn: opposed`).
     enum class spawn { scattered, opposed };
     spawn spawn_layout = spawn::scattered;
   };
@@ -587,6 +595,8 @@ public:
     cfg_.ttl_s = c.ttl_s;
     cfg_.min_gap = c.min_gap;
     cfg_.min_gap_iters = c.min_gap_iters;
+    cfg_.min_gap_parked = c.min_gap_parked;
+    cfg_.min_gap_ahead = c.min_gap_ahead;
     cfg_.sep_radius = c.sep_radius;
     cfg_.sep_gain = c.sep_gain;
   }

@@ -807,6 +807,100 @@ TEST(AriadneHostVerbs, AModulesInitAsksHas) {
   EXPECT_TRUE(warnings.empty()) << warnings.front();
 }
 
+// ── state: (§5.3) ───────────────────────────────────────────────────────────────────────────────
+
+// The document's state: is on the tree under its prefix before init: runs: init: reads a seed and
+// overrides another, an app-root key lands at the root, and a widget's def: does not replace a
+// seed.
+TEST(AriadneState, AppRuntimeWritesItBeforeInit) {
+  REQUIRE_YAML();
+  const fs::path doc = write(test_dir("state_doc"), "s.ari",
+                             "meta: {min_libcvc: 3.4.0}\n"
+                             "state:\n"
+                             "  run: {crop: 600, paused: 0}\n"
+                             "  view.camera: follow\n"
+                             "  /state_test_theme: dark\n"
+                             "  pos: [1, 2, 3]\n"
+                             "  empty:\n"
+                             "init: |\n"
+                             "  (begin (state-set \"got.crop\" (state-get \"run.crop\"))\n"
+                             "         (state-set \"run.paused\" \"1\"))\n"
+                             "windows:\n"
+                             "  - window: W\n"
+                             "    children:\n"
+                             "      - slider_int: Crop\n"
+                             "        bind: run.crop\n"
+                             "        def: 5\n");
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.s");
+  art.set_backend(be);
+  const std::vector<std::string> warns = art.load(doc.string());
+  EXPECT_TRUE(warns.empty()) << warns.front();
+  EXPECT_EQ(val(app, "ui.docs.s.got.crop"), "600"); // init: read the seed
+  EXPECT_EQ(val(app, "ui.docs.s.run.paused"), "1"); // and overrode this one
+  EXPECT_EQ(val(app, "ui.docs.s.view.camera"), "follow");
+  EXPECT_EQ(val(app, "state_test_theme"), "dark");
+  EXPECT_EQ(cvc::state::instance(app).findDescendant("ui.docs.s.state_test_theme"), nullptr);
+  EXPECT_EQ(val(app, "ui.docs.s.pos"), "1,2,3");
+  ASSERT_NE(cvc::state::instance(app).findDescendant("ui.docs.s.empty"), nullptr);
+  EXPECT_EQ(val(app, "ui.docs.s.empty"), "");
+  art.runtime().render();
+  EXPECT_EQ(val(app, "ui.docs.s.run.crop"), "600"); // the slider's def: did not replace it
+}
+
+// Like init:, it is written on every load: a reload puts back a seed the user changed.
+TEST(AriadneState, AReloadWritesItAgain) {
+  REQUIRE_YAML();
+  const fs::path doc = write(test_dir("state_reload"), "r.ari",
+                             "meta: {min_libcvc: 3.4.0}\n"
+                             "state: {run: {cars: 6}}\n"
+                             "root: [ { text: hi } ]\n");
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.r");
+  art.set_backend(be);
+  art.load(doc.string());
+  EXPECT_EQ(val(app, "ui.docs.r.run.cars"), "6");
+  cvc::state::instance(app)("ui.docs.r.run.cars").value("9");
+  art.load(doc.string());
+  EXPECT_EQ(val(app, "ui.docs.r.run.cars"), "6");
+}
+
+// A load:ed module's state: is written at its mount's sub-prefix just before its init: (which
+// reads it), and a module with a state: and no init: is seeded too; neither touches the parent's
+// keys of the same name.
+TEST(AriadneState, AModulesStateIsWrittenAtItsMountBeforeItsInit) {
+  REQUIRE_YAML();
+  const fs::path dir = test_dir("state_mount");
+  write(dir, "mod.ari",
+        "state:\n  run: {crop: 600}\n"
+        "init: (state-set \"got\" (state-get \"run.crop\"))\n"
+        "root: [ { text: m } ]\n");
+  write(dir, "bare.ari", "state: {view.camera: follow}\nroot: [ { text: b } ]\n");
+  const fs::path doc =
+      write(dir, "p.ari",
+            "meta: {min_libcvc: 3.4.0}\n"
+            "state: {run: {crop: 1}}\n"
+            "root:\n  - load: mod.ari\n    as: m\n  - load: bare.ari\n    as: b\n");
+  cvc::app app;
+  FtxuiBackend be;
+  AppRuntime art(app, "ui.docs.sm");
+  art.set_backend(be);
+  art.load(doc.string());
+  art.runtime().render(); // mounts the modules: their state: and init: run
+  EXPECT_EQ(val(app, "ui.docs.sm.includes.m.run.crop"), "600");
+  EXPECT_EQ(val(app, "ui.docs.sm.includes.m.got"), "600");
+  EXPECT_EQ(val(app, "ui.docs.sm.includes.b.view.camera"), "follow");
+  EXPECT_EQ(val(app, "ui.docs.sm.run.crop"), "1"); // the parent's own
+  // Once: a second frame does not seed again.
+  cvc::state::instance(app)("ui.docs.sm.includes.m.run.crop").value("7");
+  art.runtime().render();
+  EXPECT_EQ(val(app, "ui.docs.sm.includes.m.run.crop"), "7");
+  const std::vector<std::string> warnings = art.take_warnings();
+  EXPECT_TRUE(warnings.empty()) << warnings.front();
+}
+
 TEST(AriadneHostVerbs, EveryRegisteredVerbIsBound) {
   REQUIRE_YAML();
   const fs::path doc = write(test_dir("verbs"), "v.ari",

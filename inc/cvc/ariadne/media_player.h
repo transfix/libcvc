@@ -53,6 +53,9 @@ struct PlayerSource {
   bool loop = false;
   bool muted = false;
   bool audio = true; // false: a silent picture (a decorative video): open no sound device at all
+  // The scope of the widget that plays it: an http(s) source is fetched as its principal
+  // (media.h fetch_bytes; docs/roadmap/ARIADNE_SHELL.md 4.12). "" = the launcher's.
+  std::string scope;
 };
 
 // One source being played. Created by a PlayerFactory, driven from the frame thread: every method

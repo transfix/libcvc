@@ -882,9 +882,11 @@ value_t intrinsic_spawn(intrinsics_context *ctx, std::span<const value_t> args) 
   if (running) {
     opts.owner = running->owner;
     opts.owner_root = running->owner_root;
+    opts.account = running->account; // and its frame budget (an Ariadne mount's)
   } else if (ctx->proc) {
     opts.owner = ctx->proc->owner;
     opts.owner_root = ctx->proc->owner_root;
+    opts.account = ctx->proc->account;
   }
   // Its parent, and its priority and floor (design 7.2). A host's spawn, with no process
   // stepping, is unchecked, as a host's calls are.

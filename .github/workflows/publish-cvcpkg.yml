@@ -62,7 +62,8 @@
 #   * Linux   — libcvc + cvcgl + libcvc-examples + ari + ari-media + arisrv + arigl +
 #               pycvc-cp311/312/313 + pycvc-gl-cp311/312/313 (release config; the 312/313
 #               columns on x86_64 only; libcvc-examples, ari, ari-media, arisrv and arigl
-#               from the pyver-311 column only).
+#               from the pyver-311 column only). libcvc, ari, ari-media and arisrv in
+#               debug too.
 #   * Windows — libcvc + cvcgl + ari + ari-media + arisrv + arigl always; pycvc-cp312 +
 #               pycvc-gl-cp312 + arix + ariglx + arisrvx from the cp312 job;
 #               pycvc-cp311/pycvc-gl-cp311 only behind the `windows_pycvc` dispatch
@@ -70,9 +71,22 @@
 #   * macOS   — libcvc + ari + ari-media + arisrv, and where the catalog has macOS VTK (arm64)
 #               cvcgl + arigl + pycvc-cp311; pycvc-cp312 + arix + arisrvx from the cp312
 #               jobs, and pycvc-gl-cp312 + ariglx there once vtk-python-cp312 has a macOS
-#               bundle (cy-pca/cvcpkg#638).
-# The family packages are built in the RELEASE matrix jobs only (they pack
-# with `--config release` against the release Python/numpy/VTK bundles).
+#               bundle (cy-pca/cvcpkg#638). libcvc, ari, ari-media and arisrv in debug too.
+#   * Windows has no debug row (see the matrix exclude): a debug build there needs debug
+#               builds of its C++ deps, which the catalog lacks.
+#   * FreeBSD, OpenBSD, NetBSD — libcvc + ari + arisrv + ari-media + arisrvx + cvcgl + arigl +
+#               pycvc-cp312, release only (Haiku: libcvc + ari have rows, not submitted yet;
+#               see fleet-bsd-haiku). Built by the cvcpkg.org fleet, not here
+#               (GitHub has no such runners): push-recipes pushes the recipes with this run's
+#               tarball as their source, and fleet-bsd-haiku submits them as one DAG, for the
+#               columns each recipe's matrix names.
+# ari, ari-media and arisrv also build in the DEBUG jobs (Linux and macOS: the rows
+# with a debug libcvc), packed `--config debug` against that job's debug libcvc and
+# the release public deps it links. A `cvcpkg install <pkg> --config debug` installs
+# that same closure: the cvc org's packages in debug, other orgs' in release, where
+# debug and release share an ABI (every platform but Windows; cy-pca/cvcpkg#645).
+# The rest of the family builds in the RELEASE jobs only (they pack with
+# `--config release` against the release Python/numpy/VTK bundles).
 #
 # Requires two repository secrets:
 #   CVCPKG_TOKEN       — publisher token for the cvc org. IMPORTANT: in prod
@@ -181,10 +195,21 @@ jobs:
   # --no-default-recipes is important: without it push-all would also push
   # whatever recipe set the installed cvcpkg carries (all ~557 libcvc-deps
   # recipes), which this repo does not own and must not overwrite.
+  #
+  # The recipes are pushed with their source pinned to this run's tarball (the
+  # tag's, or the commit's on a dispatch) and each family package's +cvc.N from
+  # compute-revisions, by .github/scripts/pin-recipe-source.py. In the repository
+  # they build from the checkout (`source: vendored`), which a cvcpkg.org builder
+  # does not have; pinned, the fleet can build them, and the fleet-bsd-haiku job
+  # below has it build the columns GitHub has no runners for.
+  #
+  # A dry run pins too (so it checks the tarball and the rewrite) and stops before the push.
   push-recipes:
-    needs: ensure-org
+    needs: [ensure-org, compute-revisions]
     runs-on: ubuntu-latest
-    if: ${{ github.event_name == 'push' || github.event.inputs.dry_run == 'false' }}
+    outputs:
+      source_url: ${{ steps.pin.outputs.url }}
+      source_sha256: ${{ steps.pin.outputs.sha256 }}
     steps:
       - uses: actions/checkout@v5
       - name: Install cvcpkg
@@ -193,7 +218,38 @@ jobs:
           set -euo pipefail
           python -m pip install --upgrade pip
           pip install 'cvcpkg[publish] @ git+https://github.com/cy-pca/cvcpkg@master'
+      - name: Pin the recipes' source to this run's tarball
+        id: pin
+        shell: bash
+        env:
+          REVISIONS: ${{ toJSON(needs.compute-revisions.outputs) }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            url="https://github.com/$GITHUB_REPOSITORY/archive/refs/tags/$GITHUB_REF_NAME.tar.gz"
+          else
+            url="https://github.com/$GITHUB_REPOSITORY/archive/$GITHUB_SHA.tar.gz"
+          fi
+          # GitHub makes the archive on request: hash two downloads, and pin only a
+          # tarball that came out the same both times.
+          sums=()
+          for i in 1 2; do
+            code=$(curl -sSL --retry 5 --retry-all-errors -o "src$i.tar.gz" -w '%{http_code}' "$url")
+            [ "$code" = 200 ] || { echo "::error::$url answered HTTP $code"; exit 1; }
+            sums+=("$(sha256sum "src$i.tar.gz" | cut -d' ' -f1)")
+          done
+          if [ "${sums[0]}" != "${sums[1]}" ]; then
+            echo "::error::$url hashed ${sums[0]} then ${sums[1]}"
+            exit 1
+          fi
+          rm -f src1.tar.gz src2.tar.gz
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "sha256=${sums[0]}" >> "$GITHUB_OUTPUT"
+          python3 .github/scripts/pin-recipe-source.py --recipes cvcpkg/recipes \
+            --out "$RUNNER_TEMP/recipes" --url "$url" --sha256 "${sums[0]}" \
+            --revisions-json "$REVISIONS"
       - name: Push libcvc's recipes
+        if: ${{ github.event_name == 'push' || github.event.inputs.dry_run == 'false' }}
         shell: bash
         env:
           CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
@@ -206,9 +262,80 @@ jobs:
           cvcpkg recipe push-all \
             --server "$CVCPKG_SERVER" \
             --org "$CVCPKG_ORG" \
-            --recipes-dir cvcpkg/recipes \
+            --recipes-dir "$RUNNER_TEMP/recipes" \
             --no-default-recipes \
             --token "$CVCPKG_TOKEN"
+
+  # The BSD and Haiku columns, built by the cvcpkg.org fleet: GitHub has no BSD or
+  # Haiku runners, and the fleet's builders made every dependency those bundles
+  # link (OpenBSD keeps no ABI between releases, so libcvc there has to build on
+  # the same 7.7 the deps did). push-recipes put the pinned recipes on the server;
+  # this submits them as one DAG in the cvc org, so the builders fetch them and
+  # publish under it, at compute-revisions' +cvc.N.
+  #
+  # A recipe builds only on the columns its matrix names (submit-dag skips the
+  # rest). Haiku is not submitted yet: libcvc and ari have rows, but the fleet's
+  # Haiku box is unreachable and their Haiku deps wait on cy-pca/cvcpkg#644; add
+  # haiku to --platform when both are back.
+  # --no-deps: every dependency comes from the catalog, which cy-pca/cvcpkg
+  # populates; an auto-added dep job would publish under the cvc org, where it
+  # does not belong. A missing one fails that column's install-deps, by name.
+  # --skip-existing: a rerun builds only what is not published yet.
+  # A wait past --wait-timeout with nothing failed exits 75: the builds go on on
+  # the fleet and publish when they finish, so this job passes with a notice.
+  fleet-bsd-haiku:
+    needs: [compute-revisions, push-recipes]
+    if: ${{ github.event_name == 'push' || github.event.inputs.dry_run == 'false' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install cvcpkg
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install 'cvcpkg[publish] @ git+https://github.com/cy-pca/cvcpkg@master'
+      - name: Pin the recipes as push-recipes did
+        shell: bash
+        env:
+          REVISIONS: ${{ toJSON(needs.compute-revisions.outputs) }}
+          SOURCE_URL: ${{ needs.push-recipes.outputs.source_url }}
+          SOURCE_SHA256: ${{ needs.push-recipes.outputs.source_sha256 }}
+        run: |
+          python3 .github/scripts/pin-recipe-source.py --recipes cvcpkg/recipes \
+            --out "$RUNNER_TEMP/recipes" --url "$SOURCE_URL" --sha256 "$SOURCE_SHA256" \
+            --revisions-json "$REVISIONS"
+      - name: Build the family's BSD and Haiku columns on the fleet
+        id: dag
+        shell: bash
+        run: |
+          set -uo pipefail
+          dag="libcvc-${GITHUB_REF_NAME//[^A-Za-z0-9._-]/-}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          dag="${dag:0:64}"
+          echo "DAG_ID=$dag" >> "$GITHUB_ENV"
+          echo "DAG $dag: $CVCPKG_SERVER/v1/builds?dag_id=$dag"
+          cvcpkg builds submit-dag \
+            --server "$CVCPKG_SERVER" --token "$CVCPKG_TOKEN" --org "$CVCPKG_ORG" \
+            --platform freebsd,openbsd,netbsd --arch x86_64 \
+            --config release --link shared \
+            --recipes-dir "$RUNNER_TEMP/recipes" \
+            --dag-id "$dag" --no-deps --skip-existing \
+            --wait --wait-timeout 6000 \
+            libcvc ari arisrv ari-media arisrvx cvcgl arigl pycvc-cp312
+          rc=$?
+          if [ "$rc" = 75 ]; then
+            echo "::notice::Still building on the fleet after 100 min, nothing failed; the bundles publish when they finish ($CVCPKG_SERVER/v1/builds?dag_id=$dag)."
+            exit 0
+          fi
+          exit "$rc"
+      # A cancelled run cancels its queued fleet jobs; running ones finish and publish.
+      - name: Cancel this run's queued fleet jobs
+        if: cancelled() && env.DAG_ID != ''
+        shell: bash
+        run: cvcpkg builds cancel-dag "$DAG_ID" --server "$CVCPKG_SERVER" --token "$CVCPKG_TOKEN" || true
 
   compute-revisions:
     needs: ensure-org
@@ -1014,8 +1141,8 @@ jobs:
           bash cvcpkg/recipes/libcvc-examples/build.sh
           # Every program the recipe lists, and the documents arigl and ari run.
           for b in lsystem_forest lsystem_coast terrain_lab bunny_shadow volren_bunny \
-                   volslice_bunny nav_city_swarm nav_city_drive nav_fog_ghost nav_finale \
-                   nav_swarm_demo nav_train_demo nav_material_demo libcvc-examples-web; do
+                   volslice_bunny nav_swarm_demo nav_train_demo nav_material_demo \
+                   libcvc-examples-web; do
             test -x "stage-libcvc-examples/bin/$b" \
               || { echo "::error::libcvc-examples did not install bin/$b"; exit 1; }
           done
@@ -1047,7 +1174,9 @@ jobs:
         # against the libcvc just installed into $STAGE, so the published ari always
         # matches the libcvc built from this tree (its FTXUI backend and .ari loader
         # live in libcvc).  The macOS and Windows twins are at the end of this job.
-        if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'linux' && matrix.config == 'release' && matrix.pyver == '311' }}
+        # In a debug row it is a Debug build against the debug libcvc there, packed
+        # `--config debug`; so are ari-media and arisrv, on Linux and macOS.
+        if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'linux' && matrix.pyver == '311' }}
         shell: bash
         env:
           CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
@@ -1061,7 +1190,7 @@ jobs:
           export CVC_BUILD_DIR="$GITHUB_WORKSPACE/build-ari"
           export CVC_INSTALL_DIR="$GITHUB_WORKSPACE/stage-ari"
           export CVC_DEPS_PREFIX="$STAGE;$DEPS"
-          export CVC_BUILD_TYPE=Release
+          export CVC_BUILD_TYPE="${{ matrix.config }}"
           export CVC_JOBS="$(nproc)"
           bash cvcpkg/recipes/ari/build.sh
           test -x stage-ari/bin/ari
@@ -1073,7 +1202,7 @@ jobs:
           cvcpkg pack cvcpkg/recipes/ari \
             --from-prefix stage-ari \
             --platform "${{ matrix.target.platform }}" \
-            --config release --link shared --local \
+            --config "${{ matrix.config }}" --link shared --local \
             --cvc-revision ${{ needs.compute-revisions.outputs.ari }} \
             --output-dir dist
           if [ "$DO_PUBLISH" = "1" ]; then
@@ -1083,7 +1212,7 @@ jobs:
             cvcpkg publish ari \
               --server "$CVCPKG_SERVER" --org "$CVCPKG_ORG" \
               --platform "${{ matrix.target.platform }}" \
-              --config release --link shared --output-dir dist \
+              --config "${{ matrix.config }}" --link shared --output-dir dist \
               --token "$CVCPKG_TOKEN"
           else
             echo "dry-run: skipping ari publish"
@@ -1097,7 +1226,7 @@ jobs:
         # so no host FFmpeg stands in for it. Without FFmpeg it would still build and pack, with no
         # player, so it must say it has one, play the clip the player test plays, and link
         # ffmpeg-lgpl's libavformat. The macOS and Windows twins are at the end of this job.
-        if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'linux' && matrix.config == 'release' && matrix.pyver == '311' }}
+        if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'linux' && matrix.pyver == '311' }}
         shell: bash
         env:
           CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
@@ -1114,7 +1243,7 @@ jobs:
           export CVC_INSTALL_DIR="$GITHUB_WORKSPACE/stage-ari-media"
           export CVC_DEPS_PREFIX="$STAGE;$DEPS;$MEDIA"
           export CVC_FFMPEG_PREFIX="$MEDIA"
-          export CVC_BUILD_TYPE=Release
+          export CVC_BUILD_TYPE="${{ matrix.config }}"
           export CVC_JOBS="$(nproc)"
           bash cvcpkg/recipes/ari-media/build.sh
           test -x stage-ari-media/bin/ari-media
@@ -1145,7 +1274,7 @@ jobs:
           cvcpkg pack cvcpkg/recipes/ari-media \
             --from-prefix stage-ari-media \
             --platform "${{ matrix.target.platform }}" \
-            --config release --link shared --local \
+            --config "${{ matrix.config }}" --link shared --local \
             --cvc-revision ${{ needs.compute-revisions.outputs.ari_media }} \
             --output-dir dist
           if [ "$DO_PUBLISH" = "1" ]; then
@@ -1155,7 +1284,7 @@ jobs:
             cvcpkg publish ari-media \
               --server "$CVCPKG_SERVER" --org "$CVCPKG_ORG" \
               --platform "${{ matrix.target.platform }}" \
-              --config release --link shared --output-dir dist \
+              --config "${{ matrix.config }}" --link shared --output-dir dist \
               --token "$CVCPKG_TOKEN"
           else
             echo "dry-run: skipping ari-media publish"
@@ -1171,7 +1300,7 @@ jobs:
         # (PRIVATE to cvc, so only the binary can say). So it must open a room on loopback and report
         # each of them, then stop cleanly on SIGTERM, the way a service manager stops it. The macOS
         # and Windows twins are at the end of this job.
-        if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'linux' && matrix.config == 'release' && matrix.pyver == '311' }}
+        if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'linux' && matrix.pyver == '311' }}
         shell: bash
         env:
           CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
@@ -1185,7 +1314,7 @@ jobs:
           export CVC_BUILD_DIR="$GITHUB_WORKSPACE/build-arisrv"
           export CVC_INSTALL_DIR="$GITHUB_WORKSPACE/stage-arisrv"
           export CVC_DEPS_PREFIX="$STAGE;$DEPS"
-          export CVC_BUILD_TYPE=Release
+          export CVC_BUILD_TYPE="${{ matrix.config }}"
           export CVC_JOBS="$(nproc)"
           bash cvcpkg/recipes/arisrv/build.sh
           test -x stage-arisrv/bin/arisrv
@@ -1208,7 +1337,7 @@ jobs:
           cvcpkg pack cvcpkg/recipes/arisrv \
             --from-prefix stage-arisrv \
             --platform "${{ matrix.target.platform }}" \
-            --config release --link shared --local \
+            --config "${{ matrix.config }}" --link shared --local \
             --cvc-revision ${{ needs.compute-revisions.outputs.arisrv }} \
             --output-dir dist
           if [ "$DO_PUBLISH" = "1" ]; then
@@ -1218,7 +1347,7 @@ jobs:
             cvcpkg publish arisrv \
               --server "$CVCPKG_SERVER" --org "$CVCPKG_ORG" \
               --platform "${{ matrix.target.platform }}" \
-              --config release --link shared --output-dir dist \
+              --config "${{ matrix.config }}" --link shared --output-dir dist \
               --token "$CVCPKG_TOKEN"
           else
             echo "dry-run: skipping arisrv publish"
@@ -1860,7 +1989,7 @@ jobs:
           tools: cmake ninja
 
       - name: Build, pack & publish ari [macOS]
-        if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'macos' && matrix.config == 'release' && matrix.pyver == '311' }}
+        if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'macos' && matrix.pyver == '311' }}
         shell: bash
         env:
           CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
@@ -1874,7 +2003,7 @@ jobs:
           export CVC_BUILD_DIR="$GITHUB_WORKSPACE/build-ari"
           export CVC_INSTALL_DIR="$GITHUB_WORKSPACE/stage-ari"
           export CVC_DEPS_PREFIX="$STAGE;$DEPS"
-          export CVC_BUILD_TYPE=Release
+          export CVC_BUILD_TYPE="${{ matrix.config }}"
           export CVC_JOBS="$(sysctl -n hw.ncpu)"
           bash cvcpkg/recipes/ari/build.sh
           test -x stage-ari/bin/ari
@@ -1897,7 +2026,7 @@ jobs:
           cvcpkg pack cvcpkg/recipes/ari \
             --from-prefix stage-ari \
             --platform macos \
-            --config release --link shared --local \
+            --config "${{ matrix.config }}" --link shared --local \
             --cvc-revision ${{ needs.compute-revisions.outputs.ari }} \
             --output-dir dist
           if [ "$DO_PUBLISH" = "1" ]; then
@@ -1907,7 +2036,7 @@ jobs:
             cvcpkg publish ari \
               --server "$CVCPKG_SERVER" --org "$CVCPKG_ORG" \
               --platform macos \
-              --config release --link shared --output-dir dist \
+              --config "${{ matrix.config }}" --link shared --output-dir dist \
               --token "$CVCPKG_TOKEN"
           else
             echo "dry-run: skipping ari publish"
@@ -1915,7 +2044,7 @@ jobs:
 
       - name: Build, pack & publish ari-media [macOS]
         # The twin of "... ari-media [Linux]", with otool in place of readelf.
-        if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'macos' && matrix.config == 'release' && matrix.pyver == '311' }}
+        if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'macos' && matrix.pyver == '311' }}
         shell: bash
         env:
           CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
@@ -1932,7 +2061,7 @@ jobs:
           export CVC_INSTALL_DIR="$GITHUB_WORKSPACE/stage-ari-media"
           export CVC_DEPS_PREFIX="$STAGE;$DEPS;$MEDIA"
           export CVC_FFMPEG_PREFIX="$MEDIA"
-          export CVC_BUILD_TYPE=Release
+          export CVC_BUILD_TYPE="${{ matrix.config }}"
           export CVC_JOBS="$(sysctl -n hw.ncpu)"
           bash cvcpkg/recipes/ari-media/build.sh
           test -x stage-ari-media/bin/ari-media
@@ -1961,7 +2090,7 @@ jobs:
           cvcpkg pack cvcpkg/recipes/ari-media \
             --from-prefix stage-ari-media \
             --platform macos \
-            --config release --link shared --local \
+            --config "${{ matrix.config }}" --link shared --local \
             --cvc-revision ${{ needs.compute-revisions.outputs.ari_media }} \
             --output-dir dist
           if [ "$DO_PUBLISH" = "1" ]; then
@@ -1971,7 +2100,7 @@ jobs:
             cvcpkg publish ari-media \
               --server "$CVCPKG_SERVER" --org "$CVCPKG_ORG" \
               --platform macos \
-              --config release --link shared --output-dir dist \
+              --config "${{ matrix.config }}" --link shared --output-dir dist \
               --token "$CVCPKG_TOKEN"
           else
             echo "dry-run: skipping ari-media publish"
@@ -1980,7 +2109,7 @@ jobs:
       - name: Build, pack & publish arisrv [macOS]
         # The same checks as on Linux. macOS has no GNU timeout, so the relay runs in the background
         # and gets its SIGTERM by pid, with a SIGKILL 30 s later if it has not stopped by then.
-        if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'macos' && matrix.config == 'release' && matrix.pyver == '311' }}
+        if: ${{ !cancelled() && steps.build-libcvc.outcome == 'success' && matrix.target.platform == 'macos' && matrix.pyver == '311' }}
         shell: bash
         env:
           CVCPKG_TOKEN: ${{ secrets.CVCPKG_TOKEN }}
@@ -1994,7 +2123,7 @@ jobs:
           export CVC_BUILD_DIR="$GITHUB_WORKSPACE/build-arisrv"
           export CVC_INSTALL_DIR="$GITHUB_WORKSPACE/stage-arisrv"
           export CVC_DEPS_PREFIX="$STAGE;$DEPS"
-          export CVC_BUILD_TYPE=Release
+          export CVC_BUILD_TYPE="${{ matrix.config }}"
           export CVC_JOBS="$(sysctl -n hw.ncpu)"
           bash cvcpkg/recipes/arisrv/build.sh
           test -x stage-arisrv/bin/arisrv
@@ -2026,7 +2155,7 @@ jobs:
           cvcpkg pack cvcpkg/recipes/arisrv \
             --from-prefix stage-arisrv \
             --platform macos \
-            --config release --link shared --local \
+            --config "${{ matrix.config }}" --link shared --local \
             --cvc-revision ${{ needs.compute-revisions.outputs.arisrv }} \
             --output-dir dist
           if [ "$DO_PUBLISH" = "1" ]; then
@@ -2036,7 +2165,7 @@ jobs:
             cvcpkg publish arisrv \
               --server "$CVCPKG_SERVER" --org "$CVCPKG_ORG" \
               --platform macos \
-              --config release --link shared --output-dir dist \
+              --config "${{ matrix.config }}" --link shared --output-dir dist \
               --token "$CVCPKG_TOKEN"
           else
             echo "dry-run: skipping arisrv publish"

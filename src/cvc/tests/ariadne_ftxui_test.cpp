@@ -1218,6 +1218,157 @@ TEST(AriadneFtxui, AMaximizedWindowDraggedByItsTitleIsRestored) {
   EXPECT_GT(wx, 30) << "the pointer still on its title bar\n" << t.screen;
 }
 
+// Drags with the left button from (x0, y0) to (x1, y1), then redraws.
+static void drag(Term &t, int x0, int y0, int x1, int y1) {
+  t.mouse(TermEvent::Mouse::Press, x0, y0);
+  t.mouse(TermEvent::Mouse::Move, x1, y1);
+  t.mouse(TermEvent::Mouse::Release, x1, y1);
+  t.draw();
+}
+
+// §5.9: the user resizes a window by its right, left or bottom edge, or a bottom corner (its title
+// bar moves it). The other edges stay put, and the size it is left at is its own: persisted in
+// tree.<id>.geometry. A press on an edge alone changes nothing.
+TEST(AriadneFtxui, AWindowResizesByAnEdgeOrACorner) {
+  REQUIRE_FTXUI();
+  Widget post = window("Post", {text("body")});
+  post.id = "post";
+  post.has_pos = true;
+  post.pos_x = 80.0f;                     // 10 columns
+  post.pos_y = 64.0f;                     // 4 rows
+  post.size.w = Extent{Unit::Px, 240.0f}; // 30 columns
+  post.size.h = Extent{Unit::Px, 96.0f};  // 6 rows
+  Term t(group({post}));
+  if (!t.be.unicode_glyphs())
+    GTEST_SKIP() << "the corners are found by their box-drawing glyphs";
+  const std::string tl = "\xE2\x95\xAD", bl = "\xE2\x95\xB0", br = "\xE2\x95\xAF"; // ╭ ╰ ╯
+  int x0 = 0, y0 = 0, lx = 0, by = 0, rx = 0, ry = 0;
+  ASSERT_TRUE(find_cell(t.screen, tl, x0, y0)) << t.screen;
+  ASSERT_TRUE(find_cell(t.screen, br, rx, by)) << t.screen;
+  ASSERT_EQ(rx - x0 + 1, 30) << t.screen;
+  ASSERT_EQ(by - y0 + 1, 6) << t.screen;
+  const std::string geometry = val(t.app, "tree.post.geometry");
+
+  t.mouse(TermEvent::Mouse::Press, rx, by);
+  t.mouse(TermEvent::Mouse::Release, rx, by);
+  t.draw();
+  ASSERT_TRUE(find_cell(t.screen, br, rx, ry)) << t.screen;
+  EXPECT_EQ(ry, by) << "a press alone\n" << t.screen;
+  EXPECT_EQ(val(t.app, "tree.post.geometry"), geometry);
+
+  drag(t, rx, by, rx + 10, by + 3); // the bottom-right corner: wider and taller
+  int nx = 0, ny = 0;
+  ASSERT_TRUE(find_cell(t.screen, br, nx, ny)) << t.screen;
+  EXPECT_EQ(nx, rx + 10) << t.screen;
+  EXPECT_EQ(ny, by + 3) << t.screen;
+  ASSERT_TRUE(find_cell(t.screen, tl, lx, ry)) << t.screen;
+  EXPECT_EQ(lx, x0) << "its top-left stays\n" << t.screen;
+  EXPECT_EQ(ry, y0) << t.screen;
+  EXPECT_EQ(val(t.app, "tree.post.geometry"),
+            std::to_string(x0 * 8) + "," + std::to_string(y0 * 16) + "," + std::to_string(40 * 8) +
+                "," + std::to_string(9 * 16))
+      << "the user's size, persisted (8 x 16 px a cell)";
+
+  drag(t, x0, y0 + 2, x0 - 4, y0 + 2); // the left edge, out: the right edge stays
+  ASSERT_TRUE(find_cell(t.screen, tl, lx, ry)) << t.screen;
+  EXPECT_EQ(lx, x0 - 4) << t.screen;
+  ASSERT_TRUE(find_cell(t.screen, br, rx, ry)) << t.screen;
+  EXPECT_EQ(rx, nx) << t.screen;
+
+  drag(t, x0 + 5, ny, x0 + 5, ny - 2); // the bottom edge, up
+  ASSERT_TRUE(find_cell(t.screen, bl, lx, ry)) << t.screen;
+  EXPECT_EQ(ry, ny - 2) << t.screen;
+  EXPECT_TRUE(t.shows("body")) << t.screen;
+}
+
+// §5.9: `resizable: false` keeps a window at its size: a drag on its edge does nothing.
+TEST(AriadneFtxui, AWindowThatIsNotResizableKeepsItsSize) {
+  REQUIRE_FTXUI();
+  Widget post = window("Post", {text("body")});
+  post.id = "post";
+  post.resizable = false;
+  post.has_pos = true;
+  post.pos_x = 80.0f;
+  post.pos_y = 64.0f;
+  post.size.w = Extent{Unit::Px, 240.0f};
+  post.size.h = Extent{Unit::Px, 96.0f};
+  Term t(group({post}));
+  if (!t.be.unicode_glyphs())
+    GTEST_SKIP() << "the corners are found by their box-drawing glyphs";
+  const std::string br = "\xE2\x95\xAF";
+  int rx = 0, ry = 0, nx = 0, ny = 0;
+  ASSERT_TRUE(find_cell(t.screen, br, rx, ry)) << t.screen;
+  drag(t, rx, ry, rx + 10, ry + 3);
+  ASSERT_TRUE(find_cell(t.screen, br, nx, ny)) << t.screen;
+  EXPECT_EQ(nx, rx) << t.screen;
+  EXPECT_EQ(ny, ry) << t.screen;
+}
+
+// §5.9: resized by an edge or a corner, a maximized window is no longer maximized: it keeps the
+// size it was given, where it was drawn.
+TEST(AriadneFtxui, AMaximizedWindowResizedByItsCornerKeepsThatSize) {
+  REQUIRE_FTXUI();
+  Widget post = window("Post", {text("body")});
+  post.id = "post";
+  post.has_pos = true;
+  post.pos_x = 80.0f;
+  post.pos_y = 64.0f;
+  post.size.w = Extent{Unit::Px, 240.0f};
+  post.size.h = Extent{Unit::Px, 96.0f};
+  Term t(group({post}));
+  if (!t.be.unicode_glyphs())
+    GTEST_SKIP() << "the corners are found by their box-drawing glyphs";
+  ASSERT_TRUE(t.click("[\xE2\x86\x91]")); // [↑]
+  t.draw();
+  ASSERT_EQ(val(t.app, "tree.post.maximized"), "1");
+  const std::string tl = "\xE2\x95\xAD", br = "\xE2\x95\xAF";
+  int x0 = 0, y0 = 0, rx = 0, ry = 0;
+  ASSERT_TRUE(find_cell(t.screen, tl, x0, y0)) << t.screen;
+  ASSERT_TRUE(find_cell(t.screen, br, rx, ry)) << t.screen;
+  ASSERT_EQ(rx, t.width - 1) << t.screen;
+
+  drag(t, rx, ry, rx - 20, ry - 6);
+  t.draw();
+  EXPECT_EQ(val(t.app, "tree.post.maximized"), "0") << t.screen;
+  int nx = 0, ny = 0, lx = 0, ly = 0;
+  ASSERT_TRUE(find_cell(t.screen, br, nx, ny)) << t.screen;
+  EXPECT_EQ(nx, rx - 20) << t.screen;
+  EXPECT_EQ(ny, ry - 6) << t.screen;
+  ASSERT_TRUE(find_cell(t.screen, tl, lx, ly)) << t.screen;
+  EXPECT_EQ(lx, x0) << "where it was drawn, not where it was before the maximize\n" << t.screen;
+  EXPECT_EQ(ly, y0) << t.screen;
+}
+
+// §5.8: a window with no size is as wide as its content. A clickable group (a feed's card) and a
+// message field stretch to the window's width, but don't widen the window to the screen's edge.
+// Resized by the user, it keeps the user's width, and its content stretches to that.
+TEST(AriadneFtxui, AWindowWithNoSizeIsAsWideAsItsContent) {
+  REQUIRE_FTXUI();
+  Widget card = group({text("A card of thirty-two characters.")});
+  card.on_click = "(state-set \"opened\" \"1\")";
+  Widget feed = window("Feed", {card, message_input("Say", "draft")});
+  feed.id = "feed";
+  Term t(group({feed}));
+  if (!t.be.unicode_glyphs())
+    GTEST_SKIP() << "the corners are found by their box-drawing glyphs";
+  const std::string tl = "\xE2\x95\xAD", br = "\xE2\x95\xAF";
+  int x0 = 0, y0 = 0, rx = 0, ry = 0;
+  ASSERT_TRUE(find_cell(t.screen, tl, x0, y0)) << t.screen;
+  ASSERT_TRUE(find_cell(t.screen, br, rx, ry)) << t.screen;
+  EXPECT_LT(rx, t.width - 1) << "not to the screen's edge\n" << t.screen;
+  EXPECT_LE(rx - x0 + 1, 32 + 6) << "the card's width, its gutter and the frame\n" << t.screen;
+  EXPECT_TRUE(t.shows("A card of thirty-two characters.")) << t.screen;
+
+  drag(t, rx, ry - 1, rx + 12, ry - 1); // the right edge
+  int nx = 0, ny = 0;
+  ASSERT_TRUE(find_cell(t.screen, br, nx, ny)) << t.screen;
+  EXPECT_EQ(nx, rx + 12) << t.screen;
+  t.type("hi");
+  t.draw();
+  ASSERT_TRUE(find_cell(t.screen, br, nx, ny)) << t.screen;
+  EXPECT_EQ(nx, rx + 12) << "the user's width holds\n" << t.screen;
+}
+
 // §5.9: a window closed with its [x] comes back from the built-in Windows menu.
 TEST(AriadneFtxui, AClosedWindowReopensFromTheWindowsMenu) {
   REQUIRE_FTXUI();

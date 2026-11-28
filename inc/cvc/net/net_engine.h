@@ -1,11 +1,11 @@
 #ifndef CVC_NET_NET_ENGINE_H
 #define CVC_NET_NET_ENGINE_H
 
-// cvc::net — the native connection engine (docs/roadmap/ARIADNE_NET_ENGINE.md, part N1).
+// cvc::net — the native connection engine (docs/roadmap/ARIADNE_NET_ENGINE.md, parts N1 and N3).
 //
-// A caller-owned engine that holds raw TCP connections on I/O threads of its own: it accepts
-// them, splits their input into frames, queues their output with a bound, and sends one buffer to
-// a group of connections without a copy per receiver. It knows no protocol.
+// A caller-owned engine that holds raw TCP and TLS connections on I/O threads of its own: it
+// accepts them, splits their input into frames, queues their output with a bound, and sends one
+// buffer to a group of connections without a copy per receiver. It knows no protocol.
 //
 //   - Threads. `io_threads` Asio io_contexts, each run by one thread. A connection lives on one of
 //     them for its whole life (its id says which), so nothing inside a connection takes a lock.
@@ -21,9 +21,14 @@
 //   - Backpressure. A connection whose queued output passes `max_queued` closes (slow_reader);
 //     nothing is dropped from the middle of a stream. want_writable() asks for one `writable`
 //     event once the queue drains to a low mark.
+//   - TLS (N3). A listener with a certificate and key speaks TLS (OpenSSL, 1.2 and 1.3), or, with
+//     `detect_tls`, both TLS and plain on one port. The handshake (and the detection) happens
+//     before `accepted` is posted, so the program's first send goes out on the right layer. Output
+//     stays one refcounted buffer a message; each TLS connection encrypts its own copy as it
+//     writes. reload_tls() takes new files for new connections; open ones keep theirs.
 //
-// Plain TCP only. TLS (N3), the pycvc binding (N2), client connections and UDP (N4) build on this.
-// Not available in a browser build: listen() fails there.
+// The pycvc binding is N2 (bindings/pycvc/pycvc_net.i). Client connections, with client TLS, and
+// UDP are N4. Not available in a browser build: listen() fails there.
 
 #include <array>
 #include <chrono>
@@ -90,6 +95,30 @@ struct inbound_limits {
   std::chrono::milliseconds first_frame_timeout{0};
 };
 
+// TLS versions, as a minimum (§2.5). The maximum is the highest the OpenSSL in use has.
+enum class tls_protocol : std::uint8_t { tls1_2, tls1_3 };
+
+// A listener's TLS (§2.5, N3). A certificate file makes the listener speak TLS.
+struct tls_options {
+  std::string certificate_file; // PEM: the certificate, then any intermediates. Empty: no TLS.
+  std::string key_file;         // PEM: its private key (unencrypted)
+  tls_protocol min_version = tls_protocol::tls1_2;
+  std::string ciphers;      // TLS 1.2's cipher list, in OpenSSL's syntax; empty: OpenSSL's default
+  std::string ciphersuites; // TLS 1.3's; empty: OpenSSL's default
+  // Ask each client for a certificate. Any certificate is accepted, and so is none: its SHA-256
+  // goes in conn_info for the program to judge (DC clients' certificates are self-signed).
+  bool request_peer_certificate = true;
+  // A handshake not done by then closes the connection (close_reason::tls_handshake).
+  std::chrono::milliseconds handshake_timeout{10000};
+  // >0: check the two files' modification times this often, and reload (reload_tls) when either
+  // has changed and both have then kept their times for one more check (so a certificate and its
+  // key can be replaced one after the other). A failed reload posts the listener's `error` once
+  // and keeps the certificate in use; the next change tries again.
+  std::chrono::milliseconds watch{0};
+
+  bool enabled() const { return !certificate_file.empty(); }
+};
+
 struct listener_options {
   std::string address = "0.0.0.0"; // an IPv4 or IPv6 literal ("::" listens on both where the
                                    // system allows it)
@@ -103,8 +132,13 @@ struct listener_options {
   bool no_delay = true; // TCP_NODELAY on accepted connections
   // How long close(conn, flush) waits for the queue to drain before it closes anyway.
   std::chrono::milliseconds flush_timeout{10000};
-  // N3 adds TLS here (certificate, key, detection on a plain port); the registry tie-in (§2.6)
-  // adds register_clients.
+  tls_options tls; // a certificate file: TLS on this listener
+  // With `tls`: >0 makes this a plain port that also speaks TLS. The engine waits this long for
+  // the client's first byte: a TLS record (0x16) starts TLS, anything else, or nothing in time,
+  // stays plain. Either way `accepted` comes after the decision, so a protocol whose server speaks
+  // first (NMDC's $Lock) greets a waiting plain client once the wait is over.
+  std::chrono::milliseconds detect_tls{0};
+  // The registry tie-in (§2.6) adds register_clients.
 };
 
 enum class close_reason : std::uint8_t {
@@ -117,8 +151,11 @@ enum class close_reason : std::uint8_t {
   frames_limit,        // inbound_limits::frames_per_window
   first_frame_timeout, // inbound_limits::first_frame_timeout
   engine_stopped,      // stop() or the engine's destruction
+  // The TLS handshake failed (the event's `message` says how) or timed out. Only counted: the
+  // program never heard of the connection, so no `closed` event is posted for it.
+  tls_handshake,
 };
-constexpr std::size_t kCloseReasons = 9;
+constexpr std::size_t kCloseReasons = 10;
 const char *to_string(close_reason reason);
 
 struct conn_info {
@@ -128,16 +165,27 @@ struct conn_info {
   std::uint16_t peer_port = 0;
   std::string local_address;
   std::uint16_t local_port = 0;
-  // N3: the TLS version, cipher, SNI and the peer certificate's SHA-256.
+  // TLS, as the handshake left it; all empty on a plain connection.
+  std::string tls_version; // "TLSv1.2", "TLSv1.3"
+  std::string tls_cipher; // OpenSSL's name: "TLS_AES_256_GCM_SHA384", "ECDHE-RSA-AES128-GCM-SHA256"
+  std::string tls_sni;    // the server name the client asked for, if it did
+  // The client's certificate, if it sent one: the SHA-256 of its DER, as 64 lowercase hex digits,
+  // and the same as a keyprint ("SHA256/" and 52 base32 digits; tls_keyprint below).
+  std::string tls_peer_sha256;
+  std::string tls_peer_keyprint;
+
+  bool tls() const { return !tls_version.empty(); }
 };
 
 struct net_event {
   enum class type : std::uint8_t {
-    accepted, // `info`
-    frames,   // `frames`, in arrival order; one event may hold several reads' frames
-    closed,   // `reason`, and `message` for close_reason::error
-    writable, // the queue drained to the mark want_writable() asked for
-    error,    // a listener's: `message` (an accept failed; the listener keeps trying)
+    accepted,     // `info`
+    frames,       // `frames`, in arrival order; one event may hold several reads' frames
+    closed,       // `reason`, and `message` for close_reason::error
+    writable,     // the queue drained to the mark want_writable() asked for
+    error,        // a listener's: `message` (an accept failed, and the listener keeps trying; or a
+                  // watched TLS reload failed, and the certificate in use stays)
+    tls_reloaded, // a listener's TLS was reloaded: `message` is its new keyprint
   };
   type kind = type::frames;
   conn_id conn = 0;
@@ -163,18 +211,19 @@ struct net_batch {
 // One block of counters (§2.10): the engine's, or one listener's.
 struct net_counters {
   std::uint64_t open = 0;
-  std::uint64_t accepted = 0;
+  std::uint64_t accepted = 0; // TCP accepts, before any TLS handshake or detection
   std::array<std::uint64_t, kCloseReasons> closed{}; // by close_reason
-  std::uint64_t bytes_in = 0;
+  std::uint64_t bytes_in = 0; // the program's bytes (on TLS, what it decrypted to)
   std::uint64_t frames_in = 0;
-  std::uint64_t bytes_out = 0;    // written to sockets
+  std::uint64_t bytes_out = 0;    // written to sockets (on TLS, the records)
   std::uint64_t messages_out = 0; // buffers queued to connections (one a receiver)
   // broadcast() calls: the engine's only (a listener's block reads 0), since one broadcast's
   // receivers can come from several listeners.
   std::uint64_t broadcasts = 0;
   std::uint64_t broadcast_receivers = 0; // the receivers broadcasts reached (a listener's: its own)
-  std::uint64_t queued_bytes = 0;        // output queued now
+  std::uint64_t queued_bytes = 0;        // output queued now (before TLS: the program's bytes)
   std::uint64_t max_queued_bytes = 0;    // the most one connection has had queued
+  std::uint64_t tls_accepted = 0;        // connections whose TLS handshake completed
   std::uint64_t slow_reader() const {
     return closed[static_cast<std::size_t>(close_reason::slow_reader)];
   }
@@ -219,6 +268,19 @@ public:
   std::uint16_t port(listener_id listener) const; // the bound port (0: no such listener)
   // Stop accepting; its open connections stay.
   void stop_listening(listener_id listener);
+
+  // ── TLS (§2.5, N3) ─────────────────────────────────────────────────────────────────────────────
+  // Whether this build has TLS (OpenSSL's libssl); without it a listener with TLS fails to listen.
+  static bool tls_available();
+  // Load the listener's certificate and key files again, or `tls`'s (which replace its TLS
+  // options), for the connections it accepts from now on; open connections keep what they had.
+  // On success a `tls_reloaded` event follows. False, with `error` saying why, when the listener
+  // has no TLS or the files do not load; the certificate in use then stays.
+  bool reload_tls(listener_id listener, std::string *error = nullptr);
+  bool reload_tls(listener_id listener, const tls_options &tls, std::string *error = nullptr);
+  // The listener's certificate as a keyprint, [ADC-EXT] KEYP's form: "SHA256/" and the unpadded
+  // base32 of the SHA-256 of its DER. Empty without TLS.
+  std::string tls_keyprint(listener_id listener) const;
 
   // ── commands (any thread; each queues and returns) ──────────────────────────────────────────
   using payload = std::shared_ptr<const std::string>;

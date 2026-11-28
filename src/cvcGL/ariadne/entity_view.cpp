@@ -118,6 +118,7 @@ struct member {
   unsigned char c1[3] = {0, 0, 0}, c2[3] = {0, 0, 0};
   bool promoted = false;
   bool posed = false;   // a pose since the layers were made (draw draws it)
+  bool moved = false;   // a pose other than the last since the last draw
   bool located = false; // x, y, z known (promote ranks it)
   double m[16] = {};    // its pose (row-major), the last given
   double x = 0.0, y = 0.0, z = 0.0;
@@ -206,7 +207,8 @@ std::string rung_name(const layer_spec &s, const arch_draw &a, std::size_t k) {
   return s.id + "_" + a.id + "_lod" + std::to_string(k);
 }
 
-// The rungs of one archetype under `group`: a fitted model's four (the finest textured), else one.
+// The rungs of one archetype under `group`: a fitted model's or a boat's hull's four (the finest
+// textured), else one.
 void make_rungs(cvc::app &app, bodies_layer &L, arch_draw &a, const vehicle_look_mesh &mesh,
                 GraphicsNode &group) {
   const int n = static_cast<int>(a.members.size());
@@ -215,7 +217,7 @@ void make_rungs(cvc::app &app, bodies_layer &L, arch_draw &a, const vehicle_look
     int cap;
   };
   std::vector<spec> specs;
-  if (mesh.model && L.spec.lod)
+  if ((mesh.model || mesh.hull) && L.spec.lod)
     specs = {{0.00, std::max(1, std::min(n, L.spec.near_cap))},
              {0.62, std::min(n, 28)},
              {0.88, std::min(n, 72)},
@@ -223,6 +225,8 @@ void make_rungs(cvc::app &app, bodies_layer &L, arch_draw &a, const vehicle_look
   else
     specs = {{0.0, n}};
   a.rungs.assign(specs.size(), rung{});
+  // Each colour role's coarsest decimation yet (the rungs go from finer to coarser).
+  role_decimations coarsest;
   for (std::size_t k = 0; k < specs.size(); ++k) {
     rung &r = a.rungs[k];
     r.cap = std::max(1, specs[k].cap);
@@ -236,54 +240,14 @@ void make_rungs(cvc::app &app, bodies_layer &L, arch_draw &a, const vehicle_look
       r.uv = mesh.uvs;
     if (specs[k].reduction > 0.0) {
       // Each colour role's triangles decimated on their own, so a wheeled look's wheels keep a
-      // tyre's dark; a role's that collapse are kept as they are.
+      // tyre's dark. A role that collapses at this rung's reduction keeps its coarsest yet (a small
+      // mesh, a boat's hull, at the coarsest rung), and one that collapses at every rung is kept as
+      // it is.
       std::vector<double> rv;
       std::vector<std::uint32_t> rt;
       std::vector<unsigned char> rrole, rown;
-      bool coarser = false;
-      std::vector<unsigned char> roles;
-      for (std::size_t t = 0; t + 2 < mesh.tris.size(); t += 3) {
-        const unsigned char q = mesh.role[mesh.tris[t]];
-        if (std::find(roles.begin(), roles.end(), q) == roles.end())
-          roles.push_back(q);
-      }
-      for (const unsigned char q : roles) {
-        std::vector<std::int64_t> at(mesh.verts.size() / 3, -1);
-        std::vector<std::uint32_t> from; // each of the part's points, its point in the mesh
-        std::vector<double> pv;
-        std::vector<std::uint32_t> pt;
-        for (std::size_t t = 0; t + 2 < mesh.tris.size(); t += 3) {
-          if (mesh.role[mesh.tris[t]] != q)
-            continue;
-          for (int c = 0; c < 3; ++c) {
-            const std::uint32_t v = mesh.tris[t + c];
-            if (at[v] < 0) {
-              at[v] = static_cast<std::int64_t>(from.size());
-              from.push_back(v);
-              pv.insert(pv.end(),
-                        {mesh.verts[3 * v], mesh.verts[3 * v + 1], mesh.verts[3 * v + 2]});
-            }
-            pt.push_back(static_cast<std::uint32_t>(at[v]));
-          }
-        }
-        std::vector<double> dv;
-        std::vector<std::uint32_t> dt;
-        const bool ok = decimate_mesh(pv, pt, specs[k].reduction, dv, dt);
-        coarser = coarser || ok;
-        const std::vector<double> &uv = ok ? dv : pv;
-        const std::vector<std::uint32_t> &ut = ok ? dt : pt;
-        const auto base = static_cast<std::uint32_t>(rv.size() / 3);
-        rv.insert(rv.end(), uv.begin(), uv.end());
-        for (const std::uint32_t i : ut)
-          rt.push_back(base + i);
-        const std::size_t n = uv.size() / 3;
-        rrole.insert(rrole.end(), n, q);
-        for (std::size_t i = 0; i < n; ++i) { // a decimated part's points take its first's colour
-          const std::uint32_t v = from[ok ? 0 : i];
-          rown.insert(rown.end(), {mesh.own[3 * v], mesh.own[3 * v + 1], mesh.own[3 * v + 2]});
-        }
-      }
-      if (coarser) {
+      if (decimate_mesh_by_role(mesh.verts, mesh.tris, mesh.role, mesh.own, specs[k].reduction, rv,
+                                rt, rrole, rown, &coarsest)) {
         r.tv = std::move(rv);
         r.tt = std::move(rt);
         r.tn = normals_of(r.tv, r.tt);
@@ -455,9 +419,18 @@ struct entity_view::impl {
       std::sort(r.slots.begin(), r.slots.end());
       stats.instanced += r.slots.size();
       std::shared_ptr<GeometryNode> node = r.node.lock();
-      if (!node || (r.slots.empty() && r.shown == 0))
-        continue; // an empty rung that was empty: nothing to send
+      if (!node)
+        continue;
+      // A rung drawing the members it drew, none of them moved (an empty rung that was empty, a
+      // still fleet, a paused world), is left as it was sent: nothing to pack or upload, and its
+      // shadows not baked again.
+      bool stale = r.slots != r.prev || r.slots.size() != r.shown;
+      for (std::size_t j = 0; !stale && j < r.slots.size(); ++j)
+        stale = L.members[static_cast<std::size_t>(r.slots[j])].moved;
+      if (!stale)
+        continue;
       r.shown = r.slots.size();
+      ++stats.sent;
       pack(L, r);
       node->updateVertices(r.xyz);
       node->updateNormals(r.nrm);
@@ -588,12 +561,13 @@ void entity_view::set_entities(SceneGraph &sg, vehicle_model_cache &models,
         fit.length = e.fit_length;
       const bool fitted = e.look.kind == "data" || (e.look.kind == "file" && e.look.fit);
       vehicle_model_status st = vehicle_look_mesh_of(app, models, e.look, fitted ? fit : e.shape,
-                                                     e.base_z, lk.mesh, nullptr);
-      if (st == vehicle_model_status::pending) { // its boxes while its model loads
+                                                     e.base_z, lk.mesh, nullptr, e.boat.get());
+      if (st == vehicle_model_status::pending) { // its boxes (a boat's hull) while it loads
         d.pending.push_back({e.look, fit.length});
         cvc::ariadne::vehicle_look box;
         box.kind = "box";
-        st = vehicle_look_mesh_of(app, models, box, e.shape, e.base_z, lk.mesh, nullptr);
+        st = vehicle_look_mesh_of(app, models, box, e.shape, e.base_z, lk.mesh, nullptr,
+                                  e.boat.get());
       }
       lk.ok = st == vehicle_model_status::ready;
       it = looks.emplace(e.archetype, std::move(lk)).first;
@@ -610,8 +584,8 @@ void entity_view::set_entities(SceneGraph &sg, vehicle_model_cache &models,
       arch_draw a;
       a.id = aid;
       const vehicle_shape &s = e.shape;
-      a.radius =
-          0.5 * std::sqrt(s.length * s.length + s.width * s.width + 4.0 * s.height * s.height);
+      const double l = std::max(s.length, e.fit_length); // a boat's model spans its length overall
+      a.radius = 0.5 * std::sqrt(l * l + s.width * s.width + 4.0 * s.height * s.height);
       L.archs.push_back(std::move(a));
       ai = static_cast<int>(L.archs.size()) - 1;
     }
@@ -738,7 +712,10 @@ void entity_view::pose(std::size_t k, const double m[16]) {
     return;
   const auto [l, i] = d.posed_at[k];
   member &mb = d.layers[static_cast<std::size_t>(l)].members[static_cast<std::size_t>(i)];
-  std::copy(m, m + 16, mb.m);
+  if (!mb.posed || !std::equal(m, m + 16, mb.m)) {
+    std::copy(m, m + 16, mb.m);
+    mb.moved = true;
+  }
   mb.x = m[3];
   mb.y = m[7];
   mb.z = m[11];
@@ -749,10 +726,14 @@ void entity_view::pose(std::size_t k, const double m[16]) {
 void entity_view::draw() {
   impl &d = *_impl;
   d.stats.instanced = 0;
-  for (bodies_layer &L : d.layers)
+  d.stats.sent = 0;
+  for (bodies_layer &L : d.layers) {
     if (L.instancing)
       for (arch_draw &a : L.archs)
         d.draw_arch(L, a);
+    for (member &m : L.members)
+      m.moved = false;
+  }
 }
 
 entity_view_stats entity_view::stats() const { return _impl->stats; }
@@ -789,10 +770,18 @@ std::shared_ptr<GraphicsNode> realize_entity_layer(SceneGraph &sg, const ari::Sc
   return group;
 }
 
-// The world's entities as the view draws them: each placed one but a boat, its look and size its
-// archetype's.
+// The world's entities as the view draws them: each placed one, its look and size its archetype's.
+// A boat (a floating plant's) is drawn about its hull body's origin, as its own node draws it
+// (sync_vehicle_markers): its model fitted to its length overall, its keel on its hull's bottom,
+// and its box look its hull; each boat archetype's preset made once (the view's template is made
+// from an archetype's first entity). A boat in a parted look keeps its own node.
 std::vector<entity_draw_info> world_entities(const ari::WorldVehicles &v,
                                              const std::vector<ari::entity_info> &ents) {
+  struct boat_draw {
+    boat_fit fit;
+    std::shared_ptr<const ph::boat_desc> boat;
+  };
+  std::unordered_map<std::string, boat_draw> boats;
   std::vector<entity_draw_info> out;
   out.reserve(ents.size());
   for (const ari::entity_info &e : ents) {
@@ -802,8 +791,25 @@ std::vector<entity_draw_info> world_entities(const ari::WorldVehicles &v,
     for (const ari::vehicle_archetype &x : v.archetypes())
       if (x.id == e.spec.archetype)
         a = &x;
-    if (!a || ari::vehicle_plant_floats(a->plant))
-      continue; // a boat: its hull, its own node
+    if (!a)
+      continue;
+    const boat_draw *boat = nullptr;
+    if (ari::vehicle_plant_floats(a->plant)) {
+      auto it = boats.find(a->id);
+      if (it == boats.end()) {
+        boat_draw b;
+        try {
+          const ph::dyn_boat_desc desc = ari::boat_desc_of(*a, e.spec.mass, e.spec.max_speed);
+          b.fit = boat_fit_of(desc);
+          b.boat = std::make_shared<const ph::boat_desc>(desc.boat);
+        } catch (const std::exception &) {
+        }
+        it = boats.emplace(a->id, std::move(b)).first;
+      }
+      if (!it->second.fit.ok || a->look.parted())
+        continue; // one it cannot fit, or a model in parts (a car's rig): its own node
+      boat = &it->second;
+    }
     entity_draw_info d;
     d.id = e.id;
     d.fleet = e.fleet;
@@ -814,9 +820,16 @@ std::vector<entity_draw_info> world_entities(const ari::WorldVehicles &v,
       d.color2[k] = e.spec.color2[k];
     }
     d.look = a->look;
-    const ph::vehicle_desc desc = ari::vehicle_desc_of(*a, e.spec.mass, e.spec.max_speed);
-    d.shape = vehicle_shape_of(desc);
-    d.base_z = -ari::stand_height(desc);
+    if (boat) {
+      d.shape = boat->fit.shape; // its hull's box, at its length overall
+      d.base_z = boat->fit.keel;
+      d.fit_length = boat->fit.shape.length;
+      d.boat = boat->boat;
+    } else {
+      const ph::vehicle_desc desc = ari::vehicle_desc_of(*a, e.spec.mass, e.spec.max_speed);
+      d.shape = vehicle_shape_of(desc);
+      d.base_z = -ari::stand_height(desc);
+    }
     d.position = {e.x, e.y, e.z};
     d.has_position = true;
     out.push_back(std::move(d));

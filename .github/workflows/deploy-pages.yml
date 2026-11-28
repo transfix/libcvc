@@ -62,15 +62,12 @@ jobs:
       CVC_EMSDK_DIR: /opt/cvc-wasm/emsdk
       CVC_WASM_DEPS: /opt/cvc-wasm/deps-wasm-mt
       # scene-austin-south-small + vehicle-humvee land here; the wasm build's
-      # CMake --preload-file bakes this dir into nav_city_swarm.data.
+      # CMake --preload-file bakes this dir into nav_scrub.data.
       CVC_WASM_BUNDLE: /opt/cvc-wasm/deps-wasm-mt/share/cvc-scenes/austin_south
-      # grl-snam-weights lands here; --preload-file bakes the trained CoefMLP into
-      # nav_city_swarm.data so the browser swarm drives with the published policy.
-      CVC_WASM_NAV_WEIGHTS: /opt/cvc-wasm/deps-wasm-mt/share/grl-snam-weights/coef_sdf.cvcnav
       # The .ari demos (terrain_lab_ari, lsystem_forest_ari, volren_bunny_ari, volslice_bunny_ari,
       # fem_gallery_ari) are arigl on their documents: arigl is the binary to expect, their own dirs
       # only redirect to it.
-      DEMOS: 'lsystem_forest arigl lsystem_coast volren_bunny volslice_bunny ari arigl_term nav_city_swarm nav_city_drive nav_fog_ghost nav_scrub bunny_shadow'
+      DEMOS: 'lsystem_forest arigl lsystem_coast volren_bunny volslice_bunny ari arigl_term nav_scrub bunny_shadow'
     steps:
       - name: Checkout master
         uses: actions/checkout@v4
@@ -165,10 +162,10 @@ jobs:
           cvcpkg install tvision --prefix "$CVC_WASM_DEPS" \
             --platform wasm --arch wasm32 --config release --link static \
             --no-fallback-to-source || echo "  (tvision for wasm not on the catalog: no ari_tvision page)"
-          cvcpkg install scene-austin-south-small vehicle-humvee grl-snam-weights \
+          cvcpkg install scene-austin-south-small vehicle-humvee \
             --prefix "$CVC_WASM_DEPS" \
             --platform any --config release --link shared \
-            --no-fallback-to-source || echo "  (scene/weights bundles absent — wasm demo falls back to synthetic + default_biased)"
+            --no-fallback-to-source || echo "  (scene bundles absent — nav_scrub falls back to its generated world)"
           # xterm.js for the ari pages, served beside them (src/ari/CMakeLists.txt); without it the
           # configure downloads the same pinned npm packages.
           cvcpkg install xterm-js xterm-js-addon-fit xterm-js-addon-webgl \

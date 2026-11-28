@@ -3,12 +3,14 @@
 #include <cstdint>
 #include <cvc/ariadne/ariadne.h> // register_action_intrinsics
 #include <cvc/ariadne/e2ee_intrinsics.h>
+#include <cvc/ariadne/principal.h> // scope_principal: each principal its own keys
 #include <cvc/core/app.h>
 #include <cvc/net/e2ee.h>
 #include <cvc/state/state_exec/async_host.h> // register_async_fn
 #include <cvc/state/state_exec/builtins.h>   // builtin_json_parse
 #include <cvc/state/state_exec/intrinsics.h> // ictx.host: the calling program's async host
 #include <cvc/state/state_exec/types.h>
+#include <map>
 #include <mutex>
 #include <optional>
 #include <span>
@@ -449,26 +451,90 @@ void register_verbs(const std::shared_ptr<se::environment> &env, se::async_host 
 struct E2eeHost {
   static constexpr const char *app_slot = "cvc.ariadne.e2ee_host";
   std::mutex mutex;
+  // The launcher's (--e2ee-store, register_e2ee_intrinsics): the `local` principal's.
   std::shared_ptr<cvc::net::E2eeStore> store;
   std::string path;        // the store's file ("" in memory)
   std::string unavailable; // why there is no store
+  bool launcher = false;   // the launcher asked for keys at all
   bool registered = false;
+  // docs/roadmap/ARIADNE_SHELL.md 4.12: the stores local applications named of their own
+  // (open_e2ee_store), by file, and why one did not open; each sandboxed principal's own, in
+  // memory, made the first time one of its programs is built.
+  std::map<std::string, std::shared_ptr<cvc::net::E2eeStore>> own;
+  std::map<std::string, std::string> own_unavailable;
+  std::map<std::string, std::shared_ptr<cvc::net::E2eeStore>> sandboxed;
 };
 
-void use_store(cvc::app &app, std::shared_ptr<cvc::net::E2eeStore> store, std::string path,
-               std::string unavailable) {
+// Why this host can keep no store at `spec`, or ""; `path` its file.
+std::string store_refusal(const std::string &spec, std::string &path) {
+#ifdef __EMSCRIPTEN__
+  (void)spec;
+  (void)path;
+  return "a browser host keeps no E2EE store yet";
+#else
+  if (!cvc::net::e2ee_available())
+    return "this host was built without libsodium";
+  if ((path = cvc::net::E2eeStore::resolve_path(spec)).empty())
+    return "no config directory to keep '" + spec +
+           "' in (set XDG_CONFIG_HOME or HOME, or give a path)";
+  return std::string();
+#endif
+}
+
+// What a program whose principal is `p` uses: its store, or why there is none. False when it gets
+// no verbs at all (the launcher asked for no keys, and it names none of its own). Under h.mutex.
+bool store_for(E2eeHost &h, const ScopePrincipal &p, std::shared_ptr<cvc::net::E2eeStore> &store,
+               std::string &unavailable) {
+  if (p.local() && p.e2ee_store.empty()) {
+    store = h.store;
+    unavailable = h.unavailable;
+    return h.launcher;
+  }
+  if (p.local()) { // a local application's own keys
+    std::string path;
+    if (std::string why = store_refusal(p.e2ee_store, path); !why.empty()) {
+      unavailable = std::move(why);
+      return true;
+    }
+    if (h.launcher && h.store && path == h.path) {
+      store = h.store;
+    } else if (const auto it = h.own.find(path); it != h.own.end()) {
+      store = it->second;
+    } else {
+      const auto u = h.own_unavailable.find(path);
+      unavailable = u != h.own_unavailable.end()
+                        ? u->second
+                        : "its end-to-end key store '" + p.e2ee_store + "' was not opened";
+    }
+    return true;
+  }
+  if (!h.launcher)
+    return false;
+  // A sandboxed principal's own keys, in memory: none of the launcher's.
+  std::shared_ptr<cvc::net::E2eeStore> &mine = h.sandboxed[p.principal];
+  if (!mine) {
+    if (!cvc::net::e2ee_available()) {
+      unavailable = "this host was built without libsodium";
+      return true;
+    }
+    auto memory = std::make_shared<cvc::net::E2eeStore>(cvc::net::E2eeStore::Options{});
+    if (!memory->open(&unavailable))
+      return true;
+    mine = std::move(memory);
+  }
+  store = mine;
+  return true;
+}
+
+// Register the verbs' provider once. Under no lock.
+void register_provider(cvc::app &app) {
   E2eeHost &h = app.slot<E2eeHost>();
-  bool register_now = false;
   {
     std::lock_guard<std::mutex> lock(h.mutex);
-    h.store = std::move(store);
-    h.path = std::move(path);
-    h.unavailable = std::move(unavailable);
-    register_now = !h.registered;
+    if (h.registered)
+      return;
     h.registered = true;
   }
-  if (!register_now)
-    return;
   // Warm the lazy per-app pieces on this thread before a background kernel touches them (as
   // register_net_intrinsics does).
   app.computePool();
@@ -481,15 +547,30 @@ void use_store(cvc::app &app, std::shared_ptr<cvc::net::E2eeStore> store, std::s
         // The calling program's async host (td 4.9, B30): the app's in group 0, its own group's
         // for an isolated document, the init lane's inline one in init:.
         se::async_host &host = ictx.host ? *ictx.host : app_ptr->exec_async_host();
+        // Its principal's keys (docs/roadmap/ARIADNE_SHELL.md 4.12), from the scope it runs in.
+        const ScopePrincipal p = scope_principal(*app_ptr, ictx.root_path);
         std::shared_ptr<cvc::net::E2eeStore> store;
         std::string unavailable;
         {
           std::lock_guard<std::mutex> lock(hp->mutex);
-          store = hp->store;
-          unavailable = hp->unavailable;
+          if (!store_for(*hp, p, store, unavailable))
+            return;
         }
         register_verbs(env, host, store, unavailable);
       });
+}
+
+void use_store(cvc::app &app, std::shared_ptr<cvc::net::E2eeStore> store, std::string path,
+               std::string unavailable) {
+  E2eeHost &h = app.slot<E2eeHost>();
+  {
+    std::lock_guard<std::mutex> lock(h.mutex);
+    h.store = std::move(store);
+    h.path = std::move(path);
+    h.unavailable = std::move(unavailable);
+    h.launcher = true;
+  }
+  register_provider(app);
 }
 
 } // namespace
@@ -504,17 +585,8 @@ void register_e2ee_intrinsics(cvc::app &app, std::shared_ptr<cvc::net::E2eeStore
 std::string enable_e2ee(cvc::app &app, const std::string &spec) {
   if (spec.empty())
     return std::string();
-  std::string why;
   std::string path;
-#ifdef __EMSCRIPTEN__
-  why = "a browser host keeps no E2EE store yet";
-#else
-  if (!cvc::net::e2ee_available())
-    why = "this host was built without libsodium";
-  else if ((path = cvc::net::E2eeStore::resolve_path(spec)).empty())
-    why = "no config directory to keep '" + spec +
-          "' in (set XDG_CONFIG_HOME or HOME, or give a path)";
-#endif
+  std::string why = store_refusal(spec, path);
   if (why.empty()) {
     E2eeHost &h = app.slot<E2eeHost>();
     {
@@ -532,6 +604,39 @@ std::string enable_e2ee(cvc::app &app, const std::string &spec) {
   }
   use_store(app, nullptr, path, why);
   return "--e2ee-store: " + why;
+}
+
+std::string open_e2ee_store(cvc::app &app, const std::string &spec) {
+  if (spec.empty())
+    return std::string();
+  std::string path;
+  std::string why = store_refusal(spec, path);
+  E2eeHost &h = app.slot<E2eeHost>();
+  if (why.empty()) {
+    {
+      std::lock_guard<std::mutex> lock(h.mutex);
+      if ((h.store && h.path == path) || h.own.count(path))
+        return std::string(); // the launcher's, or open already: this process holds its lock
+    }
+    cvc::net::E2eeStore::Options o;
+    o.path = path;
+    auto store = std::make_shared<cvc::net::E2eeStore>(o);
+    if (store->open(&why)) {
+      {
+        std::lock_guard<std::mutex> lock(h.mutex);
+        h.own[path] = std::move(store);
+        h.own_unavailable.erase(path);
+      }
+      register_provider(app);
+      return std::string();
+    }
+  }
+  {
+    std::lock_guard<std::mutex> lock(h.mutex);
+    h.own_unavailable[path.empty() ? spec : path] = why;
+  }
+  register_provider(app);
+  return "e2ee_store: " + why;
 }
 
 } // namespace ariadne

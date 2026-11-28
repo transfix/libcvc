@@ -16,8 +16,16 @@
 #if defined(__APPLE__)
 #include <cstdint>
 #include <mach-o/dyld.h>
-#elif defined(__FreeBSD__)
+#elif defined(__FreeBSD__) || defined(__NetBSD__)
 #include <sys/sysctl.h>
+#elif defined(__OpenBSD__)
+#include <algorithm>
+#include <cstdlib>
+#include <string>
+#include <sys/sysctl.h>
+#include <vector>
+#elif defined(__HAIKU__)
+#include <image.h>
 #endif
 extern char **environ;
 #endif
@@ -52,6 +60,59 @@ fs::path self_path() {
   if (sysctl(mib, 4, buf, &size, nullptr, 0) != 0)
     return {};
   return fs::path(buf);
+#elif defined(__NetBSD__)
+  // kern.proc_args.<self>.pathname; procfs (/proc/curproc/exe) is not always mounted.
+  int mib[4] = {CTL_KERN, KERN_PROC_ARGS, -1, KERN_PROC_PATHNAME};
+  char buf[PATH_MAX];
+  size_t size = sizeof buf;
+  if (sysctl(mib, 4, buf, &size, nullptr, 0) == 0 && size > 1)
+    return fs::path(buf);
+  std::error_code ec;
+  const fs::path p = fs::read_symlink("/proc/curproc/exe", ec);
+  return ec ? fs::path() : p;
+#elif defined(__OpenBSD__)
+  // OpenBSD has no procfs and no sysctl for a process's file, only its argv: argv[0] as the
+  // program was started, which is a path (absolute, or relative to the directory it started in)
+  // or a name looked up on PATH. Resolved the way the shell did, as long as nothing moved since.
+  int mib[4] = {CTL_KERN, KERN_PROC_ARGS, static_cast<int>(getpid()), KERN_PROC_ARGV};
+  size_t size = 0;
+  if (sysctl(mib, 4, nullptr, &size, nullptr, 0) != 0 || size == 0)
+    return {};
+  std::vector<char> buf(size);
+  if (sysctl(mib, 4, buf.data(), &size, nullptr, 0) != 0)
+    return {};
+  char **argv = reinterpret_cast<char **>(buf.data());
+  if (argv[0] == nullptr || argv[0][0] == '\0')
+    return {};
+  const std::string arg0 = argv[0];
+  std::error_code ec;
+  if (arg0.find('/') != std::string::npos) {
+    const fs::path p = fs::canonical(arg0, ec);
+    return ec ? fs::path() : p;
+  }
+  const char *path_env = std::getenv("PATH");
+  std::string dirs = path_env != nullptr ? path_env : "/usr/bin:/bin:/usr/sbin:/sbin";
+  size_t start = 0;
+  while (start <= dirs.size()) {
+    const size_t end = std::min(dirs.find(':', start), dirs.size());
+    const std::string dir = dirs.substr(start, end - start);
+    const fs::path candidate = fs::path(dir.empty() ? "." : dir) / arg0;
+    if (access(candidate.c_str(), X_OK) == 0) {
+      const fs::path p = fs::canonical(candidate, ec);
+      if (!ec)
+        return p;
+    }
+    start = end + 1;
+  }
+  return {};
+#elif defined(__HAIKU__)
+  image_info info;
+  int32 cookie = 0;
+  while (get_next_image_info(B_CURRENT_TEAM, &cookie, &info) == B_OK) {
+    if (info.type == B_APP_IMAGE)
+      return fs::path(info.name);
+  }
+  return {};
 #else
   std::error_code ec;
   for (const char *link : {"/proc/self/exe", "/proc/curproc/exe"}) {

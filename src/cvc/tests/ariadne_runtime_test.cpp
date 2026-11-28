@@ -20,9 +20,11 @@
 #include <cvc/ariadne/app_runtime.h> // AppRuntime: host menus, the scene between documents
 #include <cvc/ariadne/ariadne.h>
 #include <cvc/ariadne/backend.h>
+#include <cvc/ariadne/data.h>              // data_status: the shell's catalog
 #include <cvc/ariadne/loader.h>            // §12 end-to-end load: mount through the real Runtime
 #include <cvc/ariadne/net_host.h>          // enable_net: the host's allowlist and credentials
 #include <cvc/ariadne/net_intrinsics.h>    // §13.8 async (http-get-async) intrinsic test
+#include <cvc/ariadne/principal.h>         // ARIADNE_SHELL.md SH11: what a mount runs as
 #include <cvc/ariadne/rich_text.h>         // §5.20 layout_rich_text
 #include <cvc/ariadne/stream/stream.h>     // AR-3b: a producer thread's post on a document's stream
 #include <cvc/ariadne/stream_intrinsics.h> // Phase-2 PR6 (stream-open/stream-info/stream-close)
@@ -56,12 +58,14 @@
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
+#include <iostream> // the shipped examples budget test prints its table
 #include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <set>
 #include <span>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -14150,4 +14154,1092 @@ TEST(AriadneRuntime, UiContextMenuSaysWhetherTheBackendOpensRightClickMenus) {
     rt.set_backend(&be);
     EXPECT_FALSE(rt.has("ui.context_menu"));
   }
+}
+
+// ---- docs/roadmap/ARIADNE_SHELL.md SH1: on-demand mounts (mounts:), their verbs and budgets
+// ------
+
+namespace {
+namespace fs = std::filesystem;
+
+// A document on disk for the mounts: tests, in `dir` (made): its path.
+fs::path write_doc(const fs::path &dir, const std::string &name, const std::string &text) {
+  fs::create_directories((dir / name).parent_path());
+  const fs::path p = dir / name;
+  std::ofstream(p, std::ios::binary) << text;
+  return p;
+}
+
+// The value at `path`, or "" when there is none: unlike sval, it makes no node.
+std::string peek(cvc::app &app, const std::string &path) {
+  const cvc::state *n = cvc::state::instance(app).findDescendant(path);
+  return n ? const_cast<cvc::state *>(n)->value() : std::string();
+}
+
+int ival(cvc::app &app, const std::string &path) {
+  const std::string v = cvc::state::instance(app)(path).value();
+  try {
+    return v.empty() ? 0 : static_cast<int>(std::stod(v));
+  } catch (const std::exception &) {
+    return 0;
+  }
+}
+
+// Every live process whose scope is `scope` or under it.
+std::vector<cvc::state_exec::process_info> live_under(cvc::app &app, const std::string &scope) {
+  std::vector<cvc::state_exec::process_info> out;
+  for (const auto &p : app.exec_scheduler().list_processes())
+    if (!cvc::state_exec::is_finished(p.status) &&
+        (p.scope == scope || p.scope.rfind(scope + ".", 0) == 0))
+      out.push_back(p);
+  return out;
+}
+
+const Runtime::MountState *mount_named(const std::vector<Runtime::MountState> &all,
+                                       const std::string &as) {
+  for (const Runtime::MountState &m : all)
+    if (m.as == as)
+      return &m;
+  return nullptr;
+}
+
+// A worker: init: counts its runs, on_tick: its ticks, a window, and its args' {who}.
+const char *const kWorkerDoc = R"(meta: { name: Worker, min_libcvc: "0.0.0" }
+init: (state-set "inits" (str (+ 1 (int (if (is-null (state-get "inits")) 0 (state-get "inits"))))))
+on_tick: (state-set "ticks" (str (+ 1 (int (if (is-null (state-get "ticks")) 0 (state-get "ticks"))))))
+windows:
+  - window: Worker
+    id: worker
+    children:
+      - text: "for {who}"
+      - text: ticks
+        bind: ticks
+)";
+
+const char *const kShellDoc = R"(meta: { name: Shell, min_libcvc: "0.0.0" }
+root:
+  - mounts: apps
+)";
+} // namespace
+
+// Open, close (its programs stopped, its widgets, budget and slot freed), and open again: it
+// resumes with its state, its init: not run again.
+TEST(AriadneMounts, OpenCloseAndReopenKeepItsState) {
+  const fs::path dir = fs::temp_directory_path() / "ariadne_mounts_open";
+  fs::remove_all(dir);
+  const fs::path worker = write_doc(dir, "worker.ari", kWorkerDoc);
+  const fs::path shell = write_doc(dir, "shell.ari", kShellDoc);
+  cvc::app app;
+  AppRuntime art(app, "ui.shell");
+  TrayBackend be;
+  art.set_backend(be);
+  art.load(shell.string());
+  Runtime &rt = art.runtime();
+  cvc::state &tree = cvc::state::instance(app);
+  tree("ui.shell.apps.w.uri").value(worker.generic_string());
+  ASSERT_TRUE(pump_until(rt, [&] { return ival(app, "ui.shell.includes.w.ticks") >= 3; }))
+      << "status " << sval(app, "ui.shell.apps.w.status") << ": "
+      << sval(app, "ui.shell.apps.w.error");
+  const std::vector<Runtime::MountState> open = rt.mounts();
+  ASSERT_EQ(open.size(), 1u);
+  EXPECT_TRUE(open[0].mounted);
+  EXPECT_EQ(open[0].scope, "ui.shell.includes.w");
+  EXPECT_EQ(open[0].principal.rfind("file:", 0), 0u) << open[0].principal;
+  EXPECT_NE(open[0].principal.find("ariadne_mounts_open"), std::string::npos) << open[0].principal;
+  EXPECT_EQ(open[0].budget.steps, Runtime::default_mount_budget("file:x").steps);
+  EXPECT_EQ(sval(app, "ui.shell.apps.w.status"), "open");
+  EXPECT_EQ(sval(app, "ui.shell.ariadne.apps.w.name"), "Worker") << "an application";
+  EXPECT_EQ(sval(app, "ui.shell.ariadne.apps.w.scope"), "includes.w");
+  EXPECT_EQ(ival(app, "ui.shell.includes.w.inits"), 1);
+  EXPECT_TRUE(be.saw_prefix("begin_window:Worker")) << be.dump();
+  EXPECT_FALSE(live_under(app, "includes.w").empty()) << "its on_tick: resident";
+  EXPECT_FALSE(rt.mount_sources().empty());
+
+  // Close: its entry goes.
+  tree("ui.shell.apps").removeChild("w");
+  ASSERT_TRUE(
+      pump_until(rt, [&] { return rt.mounts().empty() && live_under(app, "includes.w").empty(); }));
+  const int at_close = ival(app, "ui.shell.includes.w.ticks");
+  for (int i = 0; i < 5; ++i) {
+    rt.render();
+    rt.drain();
+  }
+  EXPECT_EQ(ival(app, "ui.shell.includes.w.ticks"), at_close) << "its programs stopped";
+  EXPECT_GE(at_close, 3) << "its state stays";
+  EXPECT_TRUE(rt.mount_sources().empty());
+  EXPECT_EQ(app.exec_scheduler().accounts_seen(), 0u) << "its budget went with its processes";
+  be.log.clear();
+  rt.render();
+  EXPECT_FALSE(be.saw_prefix("begin_window:Worker")) << "its widgets went";
+  EXPECT_EQ(tree.findDescendant("ui.shell.ariadne.apps.w"), nullptr) << "not an application now";
+
+  // Open again: it resumes.
+  tree("ui.shell.apps.w.uri").value(worker.generic_string());
+  ASSERT_TRUE(
+      pump_until(rt, [&] { return ival(app, "ui.shell.includes.w.ticks") >= at_close + 3; }));
+  EXPECT_EQ(ival(app, "ui.shell.includes.w.inits"), 1) << "resumed: its init: did not run again";
+  fs::remove_all(dir);
+}
+
+// docs/ARIADNE.md §6.8, ARIADNE_SHELL.md 4.12: a local file runs as `local` when the slot's
+// catalog: lists it or its entry's catalog flag is set, and as `file:<its directory>` otherwise.
+// The flag set or cleared on an open entry opens it again as its new principal, its state kept and
+// its init: not run again; when catalog: lists it as well, its principal is the same, and it runs
+// on untouched.
+TEST(AriadneMounts, TheCatalogFlagOrCatalogMakesALocalFileLocal) {
+  const fs::path dir = fs::temp_directory_path() / "ariadne_mounts_catalog";
+  fs::remove_all(dir);
+  const fs::path worker = write_doc(dir, "worker.ari", kWorkerDoc);
+  const fs::path listed = write_doc(dir, "listed/worker.ari", kWorkerDoc);
+  const fs::path shell = write_doc(dir, "shell.ari", R"(meta: { name: Shell, min_libcvc: "0.0.0" }
+root:
+  - mounts: apps
+    catalog: [listed/]
+)");
+  cvc::app app;
+  AppRuntime art(app, "ui.shell");
+  TrayBackend be;
+  art.set_backend(be);
+  art.load(shell.string());
+  Runtime &rt = art.runtime();
+  cvc::state &tree = cvc::state::instance(app);
+  const auto principal = [&](const std::string &as) {
+    const std::vector<Runtime::MountState> all = rt.mounts();
+    const Runtime::MountState *m = mount_named(all, as);
+    return m && m->mounted ? m->principal : std::string();
+  };
+  const auto steps = [&](const std::string &as) {
+    const std::vector<Runtime::MountState> all = rt.mounts();
+    const Runtime::MountState *m = mount_named(all, as);
+    return m ? m->budget.steps : 0;
+  };
+  const auto pids = [&](const std::string &as) {
+    std::set<int> out;
+    for (const auto &p : live_under(app, "includes." + as))
+      out.insert(p.pid);
+    return out;
+  };
+  // a: neither; b: its flag; c: under catalog:'s prefix.
+  tree("ui.shell.apps.a.uri").value(worker.generic_string());
+  tree("ui.shell.apps.b.uri").value(worker.generic_string());
+  tree("ui.shell.apps.b.catalog").value(std::string("1"));
+  tree("ui.shell.apps.c.uri").value(listed.generic_string());
+  ASSERT_TRUE(pump_until(rt,
+                         [&] {
+                           return ival(app, "ui.shell.includes.a.ticks") >= 2 &&
+                                  ival(app, "ui.shell.includes.b.ticks") >= 2 &&
+                                  ival(app, "ui.shell.includes.c.ticks") >= 2;
+                         }))
+      << "a " << sval(app, "ui.shell.apps.a.error") << "; b " << sval(app, "ui.shell.apps.b.error")
+      << "; c " << sval(app, "ui.shell.apps.c.error");
+  EXPECT_EQ(principal("a").rfind("file:", 0), 0u) << principal("a");
+  EXPECT_EQ(principal("b"), "local");
+  EXPECT_EQ(principal("c"), "local");
+  EXPECT_EQ(sval(app, "ui.shell.apps.b.principal"), "local");
+  EXPECT_EQ(steps("a"), Runtime::default_mount_budget("file:x").steps);
+  EXPECT_EQ(steps("b"), Runtime::default_mount_budget("local").steps);
+
+  // The flag set on a: it opens again as local, resumed.
+  tree("ui.shell.apps.a.catalog").value(std::string("true"));
+  ASSERT_TRUE(pump_until(rt, [&] {
+    return principal("a") == "local" && ival(app, "ui.shell.includes.a.ticks") >= 4;
+  })) << principal("a");
+  EXPECT_EQ(sval(app, "ui.shell.apps.a.principal"), "local");
+  EXPECT_EQ(steps("a"), Runtime::default_mount_budget("local").steps);
+  EXPECT_EQ(ival(app, "ui.shell.includes.a.inits"), 1) << "resumed: its init: did not run again";
+
+  // Cleared on b: it opens again as file:.
+  tree("ui.shell.apps.b.catalog").value(std::string("0"));
+  ASSERT_TRUE(pump_until(rt, [&] { return principal("b").rfind("file:", 0) == 0; }))
+      << principal("b");
+  EXPECT_EQ(steps("b"), Runtime::default_mount_budget("file:x").steps);
+  EXPECT_EQ(ival(app, "ui.shell.includes.b.inits"), 1);
+
+  // Set on c, which catalog: lists: still local, and its programs run on (the same processes).
+  const std::set<int> before = pids("c");
+  ASSERT_FALSE(before.empty());
+  tree("ui.shell.apps.c.catalog").value(std::string("1"));
+  const int ticks = ival(app, "ui.shell.includes.c.ticks");
+  ASSERT_TRUE(pump_until(rt, [&] { return ival(app, "ui.shell.includes.c.ticks") >= ticks + 3; }));
+  EXPECT_EQ(principal("c"), "local");
+  EXPECT_EQ(pids("c"), before) << "not opened again";
+  fs::remove_all(dir);
+}
+
+// A document from the network runs as `remote:<origin>` whatever the slot says of it: its entry's
+// catalog flag makes only a local file `local`.
+TEST(AriadneMounts, TheCatalogFlagLeavesARemoteDocumentRemote) {
+  cvc::app app;
+  Runtime rt(app);
+  TrayBackend be;
+  rt.set_backend(&be);
+  rt.set_mount_loader([](const MountRequest &rq) { // as a fetched document would load
+    MountResult r;
+    r.ok = true;
+    r.canonical = rq.uri;
+    r.wrapper.scope = "includes." + rq.as;
+    r.wrapper.app_name = "Remote";
+    r.wrapper.children.push_back(text("from the network"));
+    return r;
+  });
+  Widget slot;
+  slot.kind = Kind::Mounts;
+  slot.bind = "apps";
+  std::vector<Widget> root;
+  root.push_back(std::move(slot));
+  rt.set_root(group(std::move(root)));
+  cvc::state &tree = cvc::state::instance(app);
+  tree("apps.r.uri").value(std::string("https://apps.example.org/r.ari"));
+  tree("apps.r.catalog").value(std::string("1"));
+  ASSERT_TRUE(pump_until(rt, [&] { return peek(app, "apps.r.status") == "open"; }))
+      << peek(app, "apps.r.error");
+  const std::vector<Runtime::MountState> all = rt.mounts();
+  const Runtime::MountState *m = mount_named(all, "r");
+  ASSERT_NE(m, nullptr);
+  EXPECT_EQ(m->principal, "remote:https://apps.example.org");
+  EXPECT_EQ(m->budget.steps, Runtime::default_mount_budget("remote:x").steps);
+}
+
+// docs/ARIADNE.md §5.3: a mounts: entry's state: is written at its sub-prefix as it opens, just
+// before its init: (which reads it), as a load: module's is. Reopened, it resumes with its state as
+// it was; Restart drops that state and writes the seeds again.
+TEST(AriadneMounts, AMountsStateBlockIsWrittenAsItOpens) {
+  const fs::path dir = fs::temp_directory_path() / "ariadne_mounts_state";
+  fs::remove_all(dir);
+  const fs::path seeded =
+      write_doc(dir, "seeded.ari", R"(meta: { name: Seeded, min_libcvc: "0.0.0" }
+state:
+  count: 5
+  pos: [1, 2]
+  view: { zoom: 2 }
+init: (state-set "seen" (state-get "count"))
+)");
+  const fs::path shell = write_doc(dir, "shell.ari", R"(meta: { name: Shell, min_libcvc: "0.0.0" }
+menubar:
+  - menu: File
+    children:
+      - menu_item: New
+root:
+  - mounts: apps
+)");
+  cvc::app app;
+  AppRuntime art(app, "ui.shell");
+  TrayBackend be;
+  art.set_backend(be);
+  art.load(shell.string());
+  Runtime &rt = art.runtime();
+  cvc::state &tree = cvc::state::instance(app);
+  tree("ui.shell.apps.s.uri").value(seeded.generic_string());
+  ASSERT_TRUE(pump_until(rt, [&] { return peek(app, "ui.shell.includes.s.seen") == "5"; }))
+      << "status " << sval(app, "ui.shell.apps.s.status") << ": "
+      << sval(app, "ui.shell.apps.s.error") << "; count '" << peek(app, "ui.shell.includes.s.count")
+      << "'";
+  EXPECT_EQ(peek(app, "ui.shell.includes.s.count"), "5");
+  EXPECT_EQ(peek(app, "ui.shell.includes.s.pos"), "1,2");
+  EXPECT_EQ(peek(app, "ui.shell.includes.s.view.zoom"), "2");
+
+  // Closed and opened again: it resumes, its state: not written again.
+  tree("ui.shell.includes.s.count").value("9");
+  tree("ui.shell.apps").removeChild("s");
+  ASSERT_TRUE(pump_until(rt, [&] { return rt.mounts().empty(); }));
+  tree("ui.shell.apps.s.uri").value(seeded.generic_string());
+  ASSERT_TRUE(pump_until(rt, [&] { return sval(app, "ui.shell.apps.s.status") == "open"; }));
+  for (int i = 0; i < 3; ++i) {
+    rt.render();
+    rt.drain();
+  }
+  EXPECT_EQ(peek(app, "ui.shell.includes.s.count"), "9");
+
+  // Restart: its state is dropped, and its state: written again before its init: runs.
+  be.pick = "Restart Seeded";
+  rt.render();
+  rt.drain();
+  be.pick.clear();
+  ASSERT_TRUE(pump_until(rt, [&] { return peek(app, "ui.shell.includes.s.count") == "5"; }))
+      << be.dump();
+  EXPECT_EQ(peek(app, "ui.shell.includes.s.seen"), "5");
+  fs::remove_all(dir);
+}
+
+// (app-open URI [AS [ARGS]]) writes the calling document's entry and returns its id; picking one
+// already open returns it; (app-close AS) removes it. A mounted document's programs may not.
+TEST(AriadneMounts, AppOpenAndAppCloseActOnTheCallingDocument) {
+  const fs::path dir = fs::temp_directory_path() / "ariadne_mounts_verbs";
+  fs::remove_all(dir);
+  const fs::path worker = write_doc(dir, "worker.ari", kWorkerDoc);
+  const fs::path meddler =
+      write_doc(dir, "meddler.ari", R"(meta: { name: Meddler, min_libcvc: "0.0.0" }
+on_tick: (state-set "tried" (try (begin (app-open "x.ari") "opened") (catch (PermissionError e) "refused")))
+)");
+  const std::string w = worker.generic_string(), m = meddler.generic_string();
+  const fs::path shell = write_doc(dir, "shell.ari", R"(meta: { name: Shell, min_libcvc: "0.0.0" }
+windows:
+  - window: Verbs
+    children:
+      - button: Open
+        on: (state-set "id" (app-open ")" + w + R"("))
+      - button: Open as
+        on: (state-set "id2" (app-open ")" + w + R"(" "ada" (dict "who" "ada")))
+      - button: Meddler
+        on: (app-open ")" + m + R"(" "m")
+      - button: Close
+        on: (state-set "closed" (str (app-close "worker")))
+root:
+  - mounts: apps
+)");
+  cvc::app app;
+  AppRuntime art(app, "ui.shell");
+  TrayBackend be;
+  art.set_backend(be);
+  art.load(shell.string());
+  Runtime &rt = art.runtime();
+  const auto click = [&](const char *label) {
+    be.click_button = label;
+    rt.render();
+    rt.drain();
+    be.click_button.clear();
+  };
+  click("Open");
+  ASSERT_TRUE(pump_until(rt, [&] { return ival(app, "ui.shell.includes.worker.ticks") >= 1; }))
+      << sval(app, "ui.shell.id");
+  EXPECT_EQ(sval(app, "ui.shell.id"), "worker") << "its id from the file's name";
+  EXPECT_EQ(sval(app, "ui.shell.apps.worker.uri"), w);
+  click("Open");
+  rt.render();
+  EXPECT_EQ(rt.mounts().size(), 1u) << "picking it again finds it open";
+  click("Open as");
+  ASSERT_TRUE(pump_until(rt, [&] { return be.saw("text_line:for ada"); })) << be.dump();
+  EXPECT_EQ(sval(app, "ui.shell.id2"), "ada");
+  EXPECT_EQ(sval(app, "ui.shell.apps.ada.args.who"), "ada") << "its args: substituted";
+  click("Meddler");
+  ASSERT_TRUE(pump_until(rt, [&] { return !sval(app, "ui.shell.includes.m.tried").empty(); }));
+  EXPECT_EQ(sval(app, "ui.shell.includes.m.tried"), "refused")
+      << "a mounted document opens nothing without a grant";
+  EXPECT_EQ(cvc::state::instance(app).findDescendant("ui.shell.apps.x"), nullptr);
+  click("Close");
+  ASSERT_TRUE(pump_until(rt, [&] { return mount_named(rt.mounts(), "worker") == nullptr; }));
+  EXPECT_EQ(sval(app, "ui.shell.closed"), "#t");
+  EXPECT_EQ(rt.mounts().size(), 2u) << "ada and m stay open";
+  fs::remove_all(dir);
+}
+
+// allow: narrows what may be mounted; a refused URI is posted to the feed and its entry says why.
+TEST(AriadneMounts, ARefusedUriIsPostedToTheFeed) {
+  const fs::path dir = fs::temp_directory_path() / "ariadne_mounts_allow";
+  fs::remove_all(dir);
+  const fs::path ok = write_doc(dir, "allowed/worker.ari", kWorkerDoc);
+  const fs::path no = write_doc(dir, "other/worker.ari", kWorkerDoc);
+  const fs::path shell = write_doc(dir, "shell.ari", R"(meta: { name: Shell, min_libcvc: "0.0.0" }
+root:
+  - mounts: apps
+    allow: [allowed/]
+)");
+  cvc::app app;
+  AppRuntime art(app, "ui.shell");
+  TrayBackend be;
+  art.set_backend(be);
+  art.load(shell.string());
+  Runtime &rt = art.runtime();
+  cvc::state &tree = cvc::state::instance(app);
+  tree("ui.shell.apps.a.uri").value(ok.generic_string());
+  tree("ui.shell.apps.b.uri").value(no.generic_string());
+  ASSERT_TRUE(pump_until(rt, [&] { return rt.mounts().size() == 2; }));
+  const std::vector<Runtime::MountState> both = rt.mounts();
+  const Runtime::MountState *a = mount_named(both, "a");
+  const Runtime::MountState *b = mount_named(both, "b");
+  ASSERT_TRUE(a && b);
+  EXPECT_TRUE(a->mounted) << a->refused;
+  EXPECT_FALSE(b->mounted);
+  EXPECT_NE(b->refused.find("allow:"), std::string::npos) << b->refused;
+  EXPECT_EQ(sval(app, "ui.shell.apps.b.status"), "refused");
+  EXPECT_NE(sval(app, "ui.shell.apps.b.error").find("allow:"), std::string::npos);
+  bool posted = false;
+  for (const cvc::notification_entry &e : cvc::notifications(app))
+    posted = posted || (e.text.find("Not opened") != std::string::npos &&
+                        e.text.find("other") != std::string::npos);
+  EXPECT_TRUE(posted) << "the refusal is in the feed";
+  EXPECT_TRUE(live_under(app, "includes.b").empty()) << "nothing of it runs";
+  // allow: from a key: a list of prefixes.
+  tree("ui.shell.apps").removeChild("b");
+  rt.render();
+  fs::remove_all(dir);
+}
+
+// The requires: check at mount time: what a static load would fail or warn on refuses the mount,
+// named; an optional entry the host lacks does not.
+TEST(AriadneMounts, AnUnmetRequiresRefusesTheMount) {
+  const fs::path dir = fs::temp_directory_path() / "ariadne_mounts_requires";
+  fs::remove_all(dir);
+  write_doc(dir, "needs_scene.ari",
+            "meta: { name: S, min_libcvc: \"0.0.0\" }\nrequires: [gl.scene]\n");
+  write_doc(dir, "calls.ari",
+            "meta: { name: C, min_libcvc: \"0.0.0\" }\non_tick: (no-such-verb-xyz 1)\n");
+  write_doc(dir, "optional.ari",
+            "meta: { name: O, min_libcvc: \"0.0.0\" }\n"
+            "requires: [{name: gl.scene, optional: true}]\n");
+  write_doc(dir, "scene.ari",
+            "meta: { name: Sc, min_libcvc: \"0.0.0\" }\n"
+            "scene:\n  nodes:\n    - { id: box, type: box }\n");
+  const fs::path shell = write_doc(dir, "shell.ari", kShellDoc);
+  cvc::app app;
+  AppRuntime art(app, "ui.shell"); // no scene adapter: no gl.scene
+  TrayBackend be;
+  art.set_backend(be);
+  art.load(shell.string());
+  Runtime &rt = art.runtime();
+  cvc::state &tree = cvc::state::instance(app);
+  for (const char *n : {"needs_scene", "calls", "optional", "scene"})
+    tree(std::string("ui.shell.apps.") + n + ".uri")
+        .value((dir / (std::string(n) + ".ari")).generic_string());
+  ASSERT_TRUE(pump_until(rt, [&] { return rt.mounts().size() == 4; }));
+  const std::vector<Runtime::MountState> all = rt.mounts();
+  const Runtime::MountState *s = mount_named(all, "needs_scene");
+  const Runtime::MountState *c = mount_named(all, "calls");
+  const Runtime::MountState *o = mount_named(all, "optional");
+  const Runtime::MountState *sc = mount_named(all, "scene");
+  ASSERT_TRUE(s && c && o && sc);
+  EXPECT_FALSE(s->mounted);
+  EXPECT_NE(s->refused.find("gl.scene"), std::string::npos) << s->refused;
+  EXPECT_FALSE(c->mounted);
+  EXPECT_NE(c->refused.find("no-such-verb-xyz"), std::string::npos) << c->refused;
+  EXPECT_TRUE(o->mounted) << o->refused;
+  EXPECT_FALSE(sc->mounted);
+  EXPECT_NE(sc->refused.find("gl.scene"), std::string::npos) << sc->refused;
+  fs::remove_all(dir);
+}
+
+// Hot reload: a mount's file that changed is parsed again; its on_tick: resident stays when its
+// program did not change, and starts again when it did.
+TEST(AriadneMounts, HotReloadKeepsTheResidentWhenItsProgramIsTheSame) {
+  const fs::path dir = fs::temp_directory_path() / "ariadne_mounts_reload";
+  fs::remove_all(dir);
+  const fs::path worker = write_doc(dir, "worker.ari", kWorkerDoc);
+  const fs::path shell = write_doc(dir, "shell.ari", kShellDoc);
+  cvc::app app;
+  AppRuntime art(app, "ui.shell");
+  TrayBackend be;
+  art.set_backend(be);
+  art.load(shell.string());
+  Runtime &rt = art.runtime();
+  cvc::state::instance(app)("ui.shell.apps.w.uri").value(worker.generic_string());
+  ASSERT_TRUE(pump_until(rt, [&] { return ival(app, "ui.shell.includes.w.ticks") >= 2; }));
+  std::vector<cvc::state_exec::process_info> before = live_under(app, "includes.w");
+  ASSERT_EQ(before.size(), 1u);
+  const int resident = before[0].pid;
+  const auto touch = [&](const std::string &text, int seconds) {
+    std::ofstream(worker, std::ios::binary | std::ios::trunc) << text;
+    fs::last_write_time(worker, fs::last_write_time(worker) + std::chrono::seconds(seconds));
+  };
+  std::string renamed = kWorkerDoc;
+  renamed.replace(renamed.find("window: Worker"), 14, "window: Renamed");
+  touch(renamed, 5);
+  EXPECT_TRUE(art.reload_if_changed());
+  ASSERT_TRUE(pump_until(rt, [&] { return be.saw_prefix("begin_window:Renamed"); })) << be.dump();
+  const std::optional<cvc::state_exec::process_info> same =
+      app.exec_scheduler().get_process_info(resident);
+  ASSERT_TRUE(same.has_value());
+  EXPECT_FALSE(cvc::state_exec::is_finished(same->status)) << "the same program: the same resident";
+  EXPECT_EQ(ival(app, "ui.shell.includes.w.inits"), 1) << "a reload is no reopen";
+
+  std::string retick = renamed;
+  retick.replace(retick.find("\"ticks\" (str"), 7, "\"tocks\"");
+  retick.replace(retick.find("(state-get \"ticks\")) 0 (state-get \"ticks\")"), 41,
+                 "(state-get \"tocks\")) 0 (state-get \"tocks\")");
+  touch(retick, 10);
+  EXPECT_TRUE(art.reload_if_changed());
+  ASSERT_TRUE(pump_until(rt, [&] { return ival(app, "ui.shell.includes.w.tocks") >= 2; }));
+  const std::optional<cvc::state_exec::process_info> old =
+      app.exec_scheduler().get_process_info(resident);
+  EXPECT_TRUE(!old || cvc::state_exec::is_finished(old->status)) << "a new program: a new resident";
+  EXPECT_EQ(live_under(app, "includes.w").size(), 1u);
+  fs::remove_all(dir);
+}
+
+// A busy mount is held to its budget while the others run: its processes wait for the next frame
+// once its steps are spent (never killed), the other's on_tick: runs every frame, and after a few
+// seconds at its limit the shell's notice is posted, whose Allow more doubles its budget.
+//
+// Its steps alone hold it (no time limit), and few of them: each frame's pump stops at its own
+// backstop (kPumpMaxSeconds, 0.1 s, half of it the thread's CPU time) whatever the mounts' budgets,
+// and a mount the backstop cut short has not spent its budget, so it is not held that frame. A
+// loaded Debug coverage runner fit 4000 to 5000 of the busy loop's steps in a pump, so a budget of
+// 5000 was held some frames and not others there. 250, and the 500 Allow more makes it, fit
+// several times over.
+TEST(AriadneMounts, ABusyMountIsHeldToItsBudgetWhileTheOthersRun) {
+  constexpr std::uint64_t kSteps = 250;
+  const fs::path dir = fs::temp_directory_path() / "ariadne_mounts_budget";
+  fs::remove_all(dir);
+  const fs::path worker = write_doc(dir, "worker.ari", kWorkerDoc);
+  const fs::path busy = write_doc(dir, "busy.ari", R"(meta: { name: Busy, min_libcvc: "0.0.0" }
+on_tick: |
+  (state-set "spins" (str (+ 1 (int (if (is-null (state-get "spins")) 0 (state-get "spins"))))))
+  (set n 0)
+  (while t (set n (+ n 1)))
+)");
+  const fs::path shell = write_doc(dir, "shell.ari", kShellDoc);
+  cvc::app app;
+  AppRuntime art(app, "ui.shell");
+  struct BudgetBackend : TrayBackend {
+    std::string press; // a button whose label starts with it is clicked
+    bool button(const char *l) override {
+      MockBackend::button(l);
+      return !press.empty() && std::string(l).rfind(press, 0) == 0;
+    }
+  } be;
+  art.set_backend(be);
+  art.load(shell.string());
+  Runtime &rt = art.runtime();
+  double clock = 100.0; // a frame clock of the test's: a tenth of a second a frame
+  rt.set_frame_clock(clock);
+  cvc::state &tree = cvc::state::instance(app);
+  tree("ui.shell.apps.busy.budget.steps").value(std::to_string(kSteps));
+  tree("ui.shell.apps.busy.budget.time").value("0"); // steps alone: no wall clock decides it
+  tree("ui.shell.apps.busy.uri").value(busy.generic_string());
+  tree("ui.shell.apps.w.uri").value(worker.generic_string());
+  const auto frame = [&] {
+    clock += 0.1;
+    rt.set_frame_clock(clock);
+    rt.render();
+    rt.drain();
+  };
+  ASSERT_TRUE(pump_until(rt, [&] {
+    return ival(app, "ui.shell.includes.w.ticks") >= 1 &&
+           ival(app, "ui.shell.includes.busy.spins") >= 1;
+  }));
+  const std::vector<cvc::state_exec::process_info> spinning = live_under(app, "includes.busy");
+  ASSERT_EQ(spinning.size(), 1u);
+  const int spinner = spinning[0].pid;
+  const int ticks0 = ival(app, "ui.shell.includes.w.ticks");
+  std::uint64_t most = 0;
+  for (int i = 0; i < 20; ++i) {
+    frame();
+    const std::vector<Runtime::MountState> now = rt.mounts();
+    const Runtime::MountState *b = mount_named(now, "busy");
+    ASSERT_TRUE(b);
+    most = std::max(most, b->steps);
+  }
+  EXPECT_GE(ival(app, "ui.shell.includes.w.ticks"), ticks0 + 15) << "the other runs every frame";
+  const std::vector<Runtime::MountState> after = rt.mounts();
+  const Runtime::MountState *b = mount_named(after, "busy");
+  ASSERT_TRUE(b);
+  EXPECT_TRUE(b->held);
+  EXPECT_GE(b->holds, 10u) << "held every frame";
+  EXPECT_LE(most, kSteps + 64u) << "a frame's steps are its budget's";
+  EXPECT_GE(most, kSteps * 4 / 5) << "and it uses them";
+  const std::optional<cvc::state_exec::process_info> still =
+      app.exec_scheduler().get_process_info(spinner);
+  ASSERT_TRUE(still.has_value());
+  EXPECT_FALSE(cvc::state_exec::is_finished(still->status)) << "held, not killed";
+  EXPECT_EQ(ival(app, "ui.shell.includes.busy.spins"), 1) << "still in its first tick's loop";
+  EXPECT_EQ(sval(app, "ui.shell.ariadne.apps.busy.budget.held"), "1") << "the Processes view's";
+  EXPECT_EQ(sval(app, "ui.shell.ariadne.apps.busy.budget.max_steps"), std::to_string(kSteps));
+
+  // Over 3 seconds at its limit: the notice, once.
+  for (int i = 0; i < 20; ++i)
+    frame();
+  int notices = 0;
+  std::string on;
+  for (const cvc::notification_entry &e : cvc::notifications(app))
+    if (e.text.find("Busy is using all the time it is allowed") != std::string::npos) {
+      ++notices;
+      on = e.on;
+    }
+  EXPECT_EQ(notices, 1);
+  EXPECT_FALSE(on.empty()) << "its click opens the choices";
+  for (const cvc::notification_entry &e : cvc::notifications(app))
+    EXPECT_EQ(e.text.find("Worker is using"), std::string::npos) << "the other is not at its limit";
+  // The notice's choices: Allow more doubles its budget, kept in its entry.
+  tree("ui.shell.tree._budgets.open").value("1");
+  be.press = "Allow more";
+  frame();
+  be.press.clear();
+  frame();
+  EXPECT_EQ(ival(app, "ui.shell.apps.busy.budget.steps"), static_cast<int>(2 * kSteps));
+  const std::vector<Runtime::MountState> doubled = rt.mounts();
+  const Runtime::MountState *more = mount_named(doubled, "busy");
+  ASSERT_TRUE(more);
+  EXPECT_EQ(more->budget.steps, 2 * kSteps);
+  // Quit stops it.
+  be.press = "Quit";
+  frame();
+  be.press.clear();
+  ASSERT_TRUE(pump_until(rt, [&] { return live_under(app, "includes.busy").empty(); }));
+  EXPECT_GE(ival(app, "ui.shell.includes.w.ticks"), ticks0 + 30) << "the other still runs";
+  fs::remove_all(dir);
+}
+
+// A mount's memory: its processes' heap shares, measured as they run and summed by the Runtime,
+// past its budget.memory holds it (it is not killed), and the notice names its memory.
+TEST(AriadneMounts, AMountPastItsMemoryIsHeld) {
+  const fs::path dir = fs::temp_directory_path() / "ariadne_mounts_memory";
+  fs::remove_all(dir);
+  const fs::path hoard = write_doc(dir, "hoard.ari", R"(meta: { name: Hoard, min_libcvc: "0.0.0" }
+on_tick: |
+  (set big (collections.range 0 20000))
+  (state-set "built" (str (length big)))
+  (set n 0)
+  (while #t (set n (+ n 1)))
+)");
+  const fs::path shell = write_doc(dir, "shell.ari", kShellDoc);
+  cvc::app app;
+  AppRuntime art(app, "ui.shell");
+  TrayBackend be;
+  art.set_backend(be);
+  art.load(shell.string());
+  Runtime &rt = art.runtime();
+  double clock = 100.0;
+  rt.set_frame_clock(clock);
+  cvc::state &tree = cvc::state::instance(app);
+  tree("ui.shell.apps.h.budget.memory").value("100000");
+  tree("ui.shell.apps.h.budget.steps").value("0"); // no limit on steps: its memory holds it
+  tree("ui.shell.apps.h.budget.time").value("0");
+  tree("ui.shell.apps.h.uri").value(hoard.generic_string());
+  bool held = false;
+  std::uint64_t memory = 0;
+  for (int i = 0; i < 80 && !held; ++i) {
+    clock += 0.1;
+    rt.set_frame_clock(clock);
+    rt.render();
+    rt.drain();
+    const std::vector<Runtime::MountState> now = rt.mounts();
+    if (const Runtime::MountState *h = mount_named(now, "h")) {
+      memory = h->memory;
+      held = h->held && h->memory > 100000;
+    }
+  }
+  EXPECT_TRUE(held) << "memory " << memory << [&] {
+    std::string all;
+    for (const std::string &w : rt.take_reactive_warnings())
+      all += "; " + w;
+    return all;
+  }();
+  EXPECT_EQ(sval(app, "ui.shell.includes.h.built"), "20000");
+  const std::vector<cvc::state_exec::process_info> live = live_under(app, "includes.h");
+  ASSERT_EQ(live.size(), 1u) << "held, not killed";
+  EXPECT_GT(live[0].heap_memory, 100000u) << "its heap share, measured without a limit of its own";
+  for (int i = 0; i < 40; ++i) {
+    clock += 0.1;
+    rt.set_frame_clock(clock);
+    rt.render();
+    rt.drain();
+  }
+  bool noticed = false;
+  for (const cvc::notification_entry &e : cvc::notifications(app))
+    noticed =
+        noticed || e.text.find("Hoard is using all the memory it is allowed") != std::string::npos;
+  EXPECT_TRUE(noticed);
+  fs::remove_all(dir);
+}
+
+// The budget defaults (Runtime::default_mount_budget) settled against the shipped examples
+// (docs/roadmap/ARIADNE_SHELL.md 4.11): every example document, mounted in a shell as a catalog
+// application (the local principal), runs 60 frames, and none is held to its budget. Its busiest
+// frame's steps and seconds are printed: the numbers ARIADNE.md §6.8 cites. A stub scene adapter
+// lets the documents with a scene mount (their scene is not drawn in a mount yet; their programs
+// run). A document this host refuses (it needs the network, a player, a relay) is listed, and
+// counts as not held.
+//
+// Each entry's budget.time is 0, so a hold is its steps' or its memory's, both held to the
+// defaults in every build. Its seconds are wall-clock time, which a loaded machine stretches
+// without bound while it runs something else: at twice as many busy threads as cores, an optimized
+// build's frames of under a millisecond took up to 184 ms now and then. So they are judged apart,
+// in an optimized build (the one the default is settled for): every frame but its kSpikes busiest
+// within the default. A Debug coverage build's are printed, not checked: a loaded runner spent 9.5
+// to 28.6 ms in nav_fleet_swarm's busiest frame there, around the 25 ms default.
+TEST(AriadneMounts, TheShippedExamplesKeepWithinTheLocalBudget) {
+#if defined(__has_feature)
+#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
+#define CVC_MOUNTS_TEST_SANITIZED 1
+#endif
+#endif
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+#define CVC_MOUNTS_TEST_SANITIZED 1
+#endif
+  // By the optimizer, not NDEBUG, which a Debug build can define; a sanitizer's steps cost more.
+#if (defined(__OPTIMIZE__) || (defined(_MSC_VER) && !defined(_DEBUG))) &&                          \
+    !defined(CVC_MOUNTS_TEST_SANITIZED)
+  constexpr bool kTimed = true;
+#else
+  constexpr bool kTimed = false;
+#endif
+  constexpr std::size_t kSpikes = 5; // frames of 60 a loaded machine may stretch (2 seen)
+  const fs::path root = fs::path(__FILE__).parent_path().parent_path().parent_path().parent_path();
+  const fs::path docs = root / "examples" / "ariadne" / "documents";
+  if (!fs::exists(docs))
+    GTEST_SKIP() << "examples not found at " << docs.string();
+  struct StubScene : SceneAdapter {
+    void realize(const Scene &, const std::string &, std::vector<std::string> *) override {}
+    void sync_visibility(cvc::app &) override {}
+    void tick() override {}
+  } scene;
+  std::vector<fs::path> examples;
+  for (const fs::path &dir : {docs, docs / "apps", root / "examples" / "ariadne" / "terminal"})
+    for (const auto &e : fs::directory_iterator(dir))
+      if (e.path().extension() == ".ari")
+        examples.push_back(e.path());
+  std::sort(examples.begin(), examples.end());
+  ASSERT_GE(examples.size(), 20u);
+  const fs::path dir = fs::temp_directory_path() / "ariadne_mounts_examples";
+  fs::remove_all(dir);
+  std::string catalog;
+  for (const fs::path &p : examples)
+    catalog += "      - \"" + p.generic_string() + "\"\n";
+  const fs::path shell = write_doc(dir, "shell.ari",
+                                   "meta: { name: Shell, min_libcvc: \"0.0.0\" }\n"
+                                   "root:\n  - mounts: apps\n    catalog:\n" +
+                                       catalog);
+  cvc::app app;
+  AppRuntime art(app, "ui.shell", &scene);
+  art.add_component_path((root / "src" / "cvc" / "ariadne").string());
+  TrayBackend be;
+  art.set_backend(be);
+  art.load(shell.string());
+  Runtime &rt = art.runtime();
+  cvc::state &tree = cvc::state::instance(app);
+  std::map<std::string, std::string> names; // id -> file
+  for (const fs::path &p : examples) {
+    std::string id;
+    for (const char c : p.stem().string())
+      id.push_back(std::isalnum(static_cast<unsigned char>(c)) ? c : '_');
+    if (names.count(id))
+      id += "_2";
+    names[id] = p.filename().string();
+    tree("ui.shell.apps." + id + ".budget.time").value("0"); // its seconds are judged below
+    tree("ui.shell.apps." + id + ".uri").value(p.generic_string());
+  }
+  struct Most {
+    std::uint64_t steps = 0;
+    double time = 0.0;
+    std::uint64_t memory = 0;
+    bool held = false;
+    std::vector<double> times; // each frame's seconds
+  };
+  std::map<std::string, Most> most;
+  for (int frame = 0; frame < 60; ++frame) {
+    rt.render();
+    rt.drain();
+    for (const Runtime::MountState &m : rt.mounts()) {
+      Most &x = most[m.as];
+      x.steps = std::max(x.steps, m.steps);
+      x.time = std::max(x.time, m.time);
+      x.times.push_back(m.time);
+      x.memory = std::max(x.memory, m.memory);
+      x.held = x.held || m.held || m.holds > 0;
+    }
+  }
+  const Runtime::MountBudget local = Runtime::default_mount_budget("local");
+  std::uint64_t top_steps = 0;
+  double top_time = 0.0;
+  double top_usual = 0.0;
+  std::cout
+      << "example                          principal  steps/frame  ms/frame  ms/usual  memory\n";
+  for (const Runtime::MountState &m : rt.mounts()) {
+    const Most &x = most[m.as];
+    if (!m.mounted) {
+      std::cout << "  " << names[m.as] << ": refused here (" << m.refused.substr(0, 90) << ")\n";
+      continue;
+    }
+    EXPECT_EQ(m.principal, "local") << names[m.as] << " is in the catalog";
+    EXPECT_FALSE(x.held) << names[m.as] << " was held to its budget: " << x.steps << " steps, "
+                         << x.memory << " bytes at most";
+    EXPECT_LT(x.steps, local.steps / 4) << names[m.as] << ": a quarter of the default at most";
+    std::vector<double> times = x.times; // the busiest first
+    std::sort(times.rbegin(), times.rend());
+    const double usual = times.size() > kSpikes ? times[kSpikes] : 0.0;
+    if (kTimed)
+      EXPECT_LT(usual, local.time) << names[m.as] << ": every frame but its " << kSpikes
+                                   << " busiest within the default (busiest " << x.time << " s)";
+    top_steps = std::max(top_steps, x.steps);
+    top_time = std::max(top_time, x.time);
+    top_usual = std::max(top_usual, usual);
+    char line[256];
+    std::snprintf(line, sizeof line, "  %-30s %-9s %10llu  %8.3f  %8.3f  %llu\n",
+                  names[m.as].c_str(), m.principal.c_str(),
+                  static_cast<unsigned long long>(x.steps), x.time * 1e3, usual * 1e3,
+                  static_cast<unsigned long long>(x.memory));
+    std::cout << line;
+  }
+  std::cout << "busiest: " << top_steps << " steps, " << top_time * 1e3 << " ms in a frame, "
+            << top_usual * 1e3 << " ms in all but " << kSpikes << " (local: " << local.steps
+            << " steps, " << local.time * 1e3
+            << (kTimed ? " ms)\n" : " ms; seconds not checked in this build)\n");
+  fs::remove_all(dir);
+}
+
+// The shell component (components/shell.ari) on the SH1 catalog, as the tmux run drives it on a
+// terminal (src/ari/tests/shell_tmux_test.sh), with a mock backend in place of FTXUI: --open
+// opens two catalog entries at start, the Counter's menu joins the bar and its window shows, the
+// Launcher lists the three, Close frees one, and Open brings it back as it was.
+TEST(AriadneComponents, ShellOpensItsCatalogOnDemand) {
+  const fs::path root = fs::path(__FILE__).parent_path().parent_path().parent_path().parent_path();
+  const fs::path shell = root / "src" / "cvc" / "ariadne" / "components" / "shell.ari";
+  const fs::path catalog = root / "examples" / "ariadne" / "documents" / "shell_apps.json";
+  if (!fs::exists(shell) || !fs::exists(catalog))
+    GTEST_SKIP() << "sources not found at " << shell.string();
+  cvc::app app;
+  AppRuntime art(app, "ui.shell");
+  art.add_component_path((root / "src" / "cvc" / "ariadne").string());
+  TrayBackend be;
+  art.set_backend(be);
+  art.set_document_args({"--catalog", catalog.string(), "--open", "counter,json_feed"},
+                        "ari run shell.ari", true);
+  const std::vector<std::string> warnings = art.load(shell.string());
+  for (const std::string &w : warnings)
+    ADD_FAILURE() << "load warning: " << w;
+  Runtime &rt = art.runtime();
+  ASSERT_TRUE(pump_until(rt,
+                         [&] {
+                           return peek(app, "ui.shell.shell.apps.counter.status") == "open" &&
+                                  peek(app, "ui.shell.shell.apps.json_feed.status") == "open";
+                         }))
+      << "catalog " << data_status(app, "ui.shell.data.catalog") << ", indexed "
+      << sval(app, "ui.shell.shell.indexed") << ", entries " << sval(app, "ui.shell.shell.catalog")
+      << ", open " << sval(app, "ui.shell.args.open") << "; counter "
+      << peek(app, "ui.shell.shell.apps.counter.error") << "; warnings: " << [&] {
+           std::string all;
+           for (const std::string &w : rt.take_reactive_warnings())
+             all += w + "; ";
+           for (const cvc::notification_entry &e : cvc::notifications(app))
+             all += e.text + "; ";
+           if (cvc::state *apps = cvc::state::instance(app).findDescendant("ui.shell.shell.apps"))
+             for (const std::string &c : apps->childNames())
+               all += c + "(" + peek(app, "ui.shell.shell.apps." + c + ".status") + ") ";
+           return all;
+         }();
+  EXPECT_EQ(sval(app, "ui.shell.shell.catalog"), "3");
+  EXPECT_EQ(sval(app, "ui.shell.shell.catalog.2.title"), "Counter");
+  EXPECT_EQ(peek(app, "ui.shell.shell.apps.counter.principal"), "local") << "the catalog's";
+  EXPECT_EQ(peek(app, "ui.shell.shell.apps.counter.catalog"), "1") << "shell-open flags it";
+  be.log.clear();
+  rt.render();
+  EXPECT_TRUE(be.saw("begin_menu:Counter")) << "its menu joins the bar\n" << be.dump();
+  EXPECT_TRUE(be.saw("begin_menu:JSON feed")) << "an application without a bar has a menu too";
+  EXPECT_TRUE(be.saw_prefix("begin_window:Count")) << be.dump();
+  EXPECT_TRUE(be.saw_prefix("begin_window:Feed"));
+  EXPECT_TRUE(be.saw_prefix("begin_window:Launcher"));
+  EXPECT_TRUE(be.saw("menu_action:Tray demo")) << "the Apps menu lists the catalog by title\n"
+                                               << be.dump();
+  EXPECT_EQ(sval(app, "ui.shell.includes.counter.count"), "0") << "its init: ran";
+  // Its menu's Add one, run in its scope.
+  be.pick = "Add one";
+  rt.render();
+  rt.drain();
+  be.pick.clear();
+  ASSERT_TRUE(pump_until(rt, [&] { return sval(app, "ui.shell.includes.counter.count") == "1"; }));
+  // The Launcher's Close on the Counter's row (shell-close 2): freed, its state kept.
+  std::string how = "running";
+  art.run_program("(shell-close 2)", [&](const std::string &h) { how = h; });
+  ASSERT_TRUE(pump_until(rt, [&] { return mount_named(rt.mounts(), "counter") == nullptr; }))
+      << how;
+  be.log.clear();
+  rt.render();
+  EXPECT_FALSE(be.saw("begin_menu:Counter")) << "closed: its menu went";
+  // The Apps menu's Counter opens it again, as it was.
+  be.pick = "Counter";
+  rt.render();
+  rt.drain();
+  be.pick.clear();
+  ASSERT_TRUE(
+      pump_until(rt, [&] { return peek(app, "ui.shell.shell.apps.counter.status") == "open"; }));
+  EXPECT_EQ(sval(app, "ui.shell.includes.counter.count"), "1") << "resumed with its state";
+}
+
+// ---- docs/roadmap/ARIADNE_SHELL.md SH11: a mount reaches the network as its principal
+// ------
+
+namespace {
+
+const char *const kPlainDoc = R"(meta: { name: Plain, min_libcvc: "0.0.0" }
+root:
+  - text: plain
+)";
+
+// Run `program` as a program of the mount at `scope` (start_process with its chroot) and pump
+// frames until it ends: "" or why not.
+std::string run_in_mount(Runtime &rt, const std::string &scope, const std::string &program) {
+  bool ended = false;
+  std::string how = "unset";
+  LaneProcess p;
+  p.program = program;
+  p.name = "sh11";
+  p.scope = scope;
+  p.done = [&](const std::string &h) {
+    ended = true;
+    how = h;
+  };
+  rt.start_process(std::move(p));
+  return pump_until(rt, [&] { return ended; }, 20000) ? how : "timed out";
+}
+
+} // namespace
+
+// Each mounts: entry runs as the principal SH1 fixed for it: the catalog's document as `local`,
+// with the launcher's allowlist and credentials; another file as `file:<its directory>`, which
+// finds none of them and reaches nothing it was not granted. Closing it drops its principal.
+TEST(AriadneMountsNet, AMountReachesTheNetworkAsItsPrincipal) {
+  if (!cvc::net::have_http_backend())
+    GTEST_SKIP() << "libcvc built without an HTTP backend";
+  LocalHttpServer api(txwtf);
+  const fs::path dir = fs::temp_directory_path() / "ariadne_mounts_net";
+  fs::remove_all(dir);
+  const fs::path feed = write_doc(dir / "catalog", "feed.ari", kPlainDoc);
+  const fs::path stranger = write_doc(dir / "downloads", "stranger.ari", kPlainDoc);
+  const fs::path shell = write_doc(
+      dir, "shell.ari",
+      std::string("meta: { name: Shell, min_libcvc: \"0.0.0\" }\nroot:\n  - mounts: apps\n"
+                  "    catalog:\n      - \"") +
+          feed.generic_string() + "\"\n");
+  cvc::app app;
+  ASSERT_EQ(enable_net(app, allow({api.origin()})), "");
+  AppRuntime art(app, "ui.shell");
+  TrayBackend be;
+  art.set_backend(be);
+  art.load(shell.string());
+  Runtime &rt = art.runtime();
+  cvc::state &tree = cvc::state::instance(app);
+  tree("ui.shell.apps.feed.uri").value(feed.generic_string());
+  tree("ui.shell.apps.stranger.uri").value(stranger.generic_string());
+  ASSERT_TRUE(pump_until(rt,
+                         [&] {
+                           return peek(app, "ui.shell.apps.feed.status") == "open" &&
+                                  peek(app, "ui.shell.apps.stranger.status") == "open";
+                         }))
+      << peek(app, "ui.shell.apps.feed.error") << "; " << peek(app, "ui.shell.apps.stranger.error");
+  const std::string feed_scope = "ui.shell.includes.feed",
+                    stranger_scope = "ui.shell.includes.stranger";
+  EXPECT_EQ(cvc::ariadne::scope_principal(app, feed_scope).principal, "local");
+  const std::string theirs = cvc::ariadne::scope_principal(app, stranger_scope).principal;
+  EXPECT_EQ(theirs.rfind("file:", 0), 0u) << theirs;
+  EXPECT_NE(theirs.find("downloads"), std::string::npos) << theirs;
+  EXPECT_EQ(mount_named(rt.mounts(), "stranger")->principal, theirs) << "one spelling";
+
+  ASSERT_EQ(run_in_mount(rt, feed_scope, login_program(api)), "");
+  EXPECT_EQ(sval(app, "ui.shell.includes.feed.login.captured"), "true");
+  ASSERT_EQ(run_in_mount(rt, stranger_scope,
+                         "(begin (state-set \"has\" (net-auth-has? \"txwtf\"))"
+                         " (state-set \"allowed\" (net-allowed? \"" +
+                             api.url("/user/me") +
+                             "\"))"
+                             " (set r (try (http-get \"" +
+                             api.url("/user/me") +
+                             "\" (dict \"auth\" \"txwtf\")) (catch (e) (dict \"status\" -1))))"
+                             " (state-set \"status\" (get-attr r \"status\")))"),
+            "");
+  EXPECT_EQ(sval(app, "ui.shell.includes.stranger.has"), "false");
+  EXPECT_EQ(sval(app, "ui.shell.includes.stranger.allowed"), "false");
+  EXPECT_NE(sval(app, "ui.shell.includes.stranger.status"), "200");
+  EXPECT_EQ(api.requests().size(), 1u) << "only the feed's sign-in reached the site";
+
+  // Closed: its principal goes with it.
+  tree("ui.shell.apps").removeChild("stranger");
+  ASSERT_TRUE(pump_until(rt, [&] { return mount_named(rt.mounts(), "stranger") == nullptr; }));
+  for (const auto &[scope, p] : cvc::ariadne::scope_principals(app))
+    EXPECT_NE(scope, stranger_scope);
+  fs::remove_all(dir);
+}
+
+// A local application's entry may give it a network of its own (shell.apps.<as>.net_policy and
+// .credential_store, as bin/nicotina's flags): it signs in into its own file. One whose policy
+// does not load is refused, and so is a sandboxed one that names a store.
+TEST(AriadneMountsNet, AnEntryGivesALocalApplicationItsOwnNetwork) {
+  if (!cvc::net::have_http_backend())
+    GTEST_SKIP() << "libcvc built without an HTTP backend";
+  LocalHttpServer api(txwtf);
+  const fs::path dir = fs::temp_directory_path() / "ariadne_mounts_own_net";
+  fs::remove_all(dir);
+  const fs::path feed = write_doc(dir / "catalog", "nicotina.ari", kPlainDoc);
+  const fs::path stranger = write_doc(dir / "downloads", "stranger.ari", kPlainDoc);
+  const fs::path policy = write_doc(
+      dir, "fleet.policy", "allow " + api.origin() + "\ncredential txwtf " + api.origin() + "\n");
+  const fs::path store = dir / "nicotina" / "credentials";
+  const fs::path shell = write_doc(
+      dir, "shell.ari",
+      std::string("meta: { name: Shell, min_libcvc: \"0.0.0\" }\nroot:\n  - mounts: apps\n"
+                  "    catalog:\n      - \"") +
+          feed.generic_string() + "\"\n");
+  cvc::app app;
+  ASSERT_EQ(enable_net(app, allow({"https://tx.wtf"})), ""); // the shell's own: not nicotina's site
+  AppRuntime art(app, "ui.shell");
+  TrayBackend be;
+  art.set_backend(be);
+  art.load(shell.string());
+  Runtime &rt = art.runtime();
+  cvc::state &tree = cvc::state::instance(app);
+  tree("ui.shell.apps.nicotina.net_policy").value(policy.string());
+  tree("ui.shell.apps.nicotina.credential_store").value(store.string());
+  tree("ui.shell.apps.nicotina.uri").value(feed.generic_string());
+  tree("ui.shell.apps.bad.net_policy").value((dir / "missing.policy").string());
+  tree("ui.shell.apps.bad.uri").value(feed.generic_string());
+  tree("ui.shell.apps.sneaky.credential_store").value(store.string());
+  tree("ui.shell.apps.sneaky.uri").value(stranger.generic_string());
+  ASSERT_TRUE(pump_until(rt, [&] {
+    return peek(app, "ui.shell.apps.nicotina.status") == "open" &&
+           peek(app, "ui.shell.apps.bad.status") == "refused" &&
+           peek(app, "ui.shell.apps.sneaky.status") == "refused";
+  })) << peek(app, "ui.shell.apps.nicotina.error");
+  EXPECT_NE(peek(app, "ui.shell.apps.bad.error").find("net_policy"), std::string::npos)
+      << peek(app, "ui.shell.apps.bad.error");
+  EXPECT_NE(peek(app, "ui.shell.apps.sneaky.error").find("sandboxed"), std::string::npos)
+      << peek(app, "ui.shell.apps.sneaky.error");
+
+  const std::string scope = "ui.shell.includes.nicotina";
+  const std::optional<NetAccess> own = cvc::ariadne::net_host_access(app, scope);
+  ASSERT_TRUE(own && own->credentials);
+  EXPECT_EQ(fs::path(own->credentials->path()), store);
+  ASSERT_EQ(run_in_mount(rt, scope, login_program(api)), "");
+  EXPECT_EQ(sval(app, "ui.shell.includes.nicotina.login.captured"), "true");
+  std::ostringstream text;
+  {
+    std::ifstream in(store, std::ios::binary); // closed before the directory is removed
+    text << in.rdbuf();
+  }
+  EXPECT_NE(text.str().find("local txwtf " + api.origin() + " "), std::string::npos)
+      << "kept in its own file";
+  EXPECT_FALSE(cvc::ariadne::net_host_access(app)->credentials->has("txwtf"))
+      << "not in the shell's store";
+  fs::remove_all(dir);
+}
+
+// shell.ari: a catalog entry's net_policy and credential_store (relative to the catalog) open it
+// under its slug with that network.
+TEST(AriadneComponents, ShellGivesACatalogEntryItsOwnNetwork) {
+  const fs::path root = fs::path(__FILE__).parent_path().parent_path().parent_path().parent_path();
+  const fs::path shell = root / "src" / "cvc" / "ariadne" / "components" / "shell.ari";
+  if (!fs::exists(shell))
+    GTEST_SKIP() << "sources not found at " << shell.string();
+  const fs::path dir = fs::temp_directory_path() / "ariadne_shell_own_net";
+  fs::remove_all(dir);
+  write_doc(dir, "nicotina.ari", kPlainDoc);
+  write_doc(dir, "fleet.policy", "allow https://tx.wtf\ncredential txwtf https://tx.wtf\n");
+  const fs::path catalog =
+      write_doc(dir, "apps.json",
+                R"({"demos": [{"slug": "nicotina", "title": "nicotina", "desc": "TX.WTF",
+  "doc": "nicotina.ari", "net_policy": "fleet.policy", "credential_store": "nicotina/credentials"}]})");
+  cvc::app app;
+  ASSERT_EQ(enable_net(app, allow({"https://example.test"})), "");
+  AppRuntime art(app, "ui.shell");
+  art.add_component_path((root / "src" / "cvc" / "ariadne").string());
+  TrayBackend be;
+  art.set_backend(be);
+  art.set_document_args({"--catalog", catalog.string(), "--open", "nicotina"}, "ari run shell.ari",
+                        true);
+  for (const std::string &w : art.load(shell.string()))
+    ADD_FAILURE() << "load warning: " << w;
+  Runtime &rt = art.runtime();
+  ASSERT_TRUE(
+      pump_until(rt, [&] { return peek(app, "ui.shell.shell.apps.nicotina.status") == "open"; }))
+      << "catalog " << data_status(app, "ui.shell.data.catalog") << "; "
+      << peek(app, "ui.shell.shell.apps.nicotina.error");
+  const std::string scope = "ui.shell.includes.nicotina";
+  EXPECT_EQ(cvc::ariadne::scope_principal(app, scope).principal, "local");
+  const std::optional<NetAccess> own = cvc::ariadne::net_host_access(app, scope);
+  ASSERT_TRUE(own && own->credentials && own->policy);
+  // weakly_canonical both: the store's path comes back resolved (long names), and the temp
+  // directory may be in its short (8.3) spelling on Windows (RUNNER~1).
+  EXPECT_EQ(fs::weakly_canonical(own->credentials->path()),
+            fs::weakly_canonical(dir / "nicotina" / "credentials"));
+  EXPECT_TRUE(own->policy->allows(*cvc::net::parse_origin("https://tx.wtf")));
+  EXPECT_FALSE(own->policy->allows(*cvc::net::parse_origin("https://example.test")))
+      << "its own policy, not the shell's";
+  fs::remove_all(dir);
 }

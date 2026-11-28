@@ -35,6 +35,13 @@ struct body_desc {
   double angular_damping = 0.05;
   bool allow_sleeping = true;
   std::uint64_t user_data = 0;
+  // The share of its volume that displaces a fluid (field.h), finite and >= 0: 1 for a solid
+  // body, less for one whose shape is bigger than the water it moves aside (an avatar's box,
+  // which displaces its mass over a person's density). It scales the sample cells' buoyancy and
+  // the fluid's damping and drag on them (the body being that share of its shape), not a wind's
+  // drag, nor a hull's pushes (the triangles are the hull's own).
+  // world::set_displacement changes it.
+  double displacement = 1.0;
   // A dynamic body's hull (hull.h): the triangles a fluid pushes on in place of the body's
   // sample cells, apart from the collision shape. Null: the cells (crates, debris).
   std::shared_ptr<const hull_mesh> hull;

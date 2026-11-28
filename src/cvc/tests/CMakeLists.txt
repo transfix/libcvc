@@ -52,6 +52,8 @@ add_executable(net_policy_test net_policy_test.cpp)
 add_executable(e2ee_test e2ee_test.cpp)
 add_executable(ariadne_e2ee_test ariadne_e2ee_test.cpp)
 add_executable(net_oidc_test net_oidc_test.cpp)
+# The network, credentials, end-to-end keys and sign-ins per principal (ARIADNE_SHELL.md 4.12).
+add_executable(ariadne_net_principal_test ariadne_net_principal_test.cpp)
 # The connection engine (cvc/net/net_engine.h): it listens, so native only.
 if(NOT EMSCRIPTEN)
   add_executable(net_engine_test net_engine_test.cpp)
@@ -385,6 +387,7 @@ add_executable(world_terrain_test world_terrain_test.cpp)
 add_executable(world_scatter_test world_scatter_test.cpp)
 add_executable(world_roads_test world_roads_test.cpp)
 add_executable(world_buildings_test world_buildings_test.cpp)
+add_executable(world_theme_test world_theme_test.cpp)
 add_executable(world_sites_test world_sites_test.cpp)
 add_executable(world_road_mesh_test world_road_mesh_test.cpp)
 add_executable(world_road_raster_test world_road_raster_test.cpp)
@@ -467,6 +470,7 @@ set(TEST_TARGETS
   e2ee_test
   ariadne_e2ee_test
   net_oidc_test
+  ariadne_net_principal_test
   uri_http_cache_test
   state_test
   state_lifetime_stress_test
@@ -671,6 +675,7 @@ set(TEST_TARGETS
   world_scatter_test
   world_roads_test
   world_buildings_test
+  world_theme_test
   world_sites_test
   world_road_mesh_test
   world_road_raster_test
@@ -1128,6 +1133,15 @@ if(TARGET net_engine_test)
       GTest::gtest
       GTest::gtest_main
   )
+  # TLS (N3): the test's clients and certificates are OpenSSL's, as the engine's TLS is; the
+  # certificates beside arisrv's tests (src/arisrv/tests/tls) are its fixed ones.
+  get_property(_net_tls GLOBAL PROPERTY CVC_NET_HAVE_TLS)
+  find_package(OpenSSL QUIET COMPONENTS SSL Crypto)
+  if(_net_tls AND TARGET OpenSSL::SSL)
+    target_link_libraries(net_engine_test PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+    target_compile_definitions(net_engine_test PRIVATE CVC_NET_TEST_TLS=1
+      "CVC_NET_TEST_TLS_DIR=\"${CMAKE_SOURCE_DIR}/src/arisrv/tests/tls\"")
+  endif()
 endif()
 
 target_link_libraries(e2ee_test
@@ -1138,6 +1152,13 @@ target_link_libraries(e2ee_test
 )
 
 target_link_libraries(ariadne_e2ee_test
+  PRIVATE
+    cvc
+    GTest::gtest
+    GTest::gtest_main
+)
+
+target_link_libraries(ariadne_net_principal_test
   PRIVATE
     cvc
     GTest::gtest
@@ -1776,7 +1797,7 @@ target_link_libraries(vis_tiler_test
 
 foreach(_lsys_test lsys_rng_test lsys_expr_test lsys_parse_test lsys_derive_test
                    lsys_interp_test lsys_recipes_test lsys_svg_test lsys_forest_test
-                   lsys_fields_test world_surface_test world_heightfield_test world_terrain_test world_scatter_test world_roads_test world_buildings_test world_sites_test world_road_mesh_test world_road_raster_test
+                   lsys_fields_test world_surface_test world_heightfield_test world_terrain_test world_scatter_test world_roads_test world_buildings_test world_theme_test world_sites_test world_road_mesh_test world_road_raster_test
                    world_raster_test world_bundle_test world_bundle_v2_test world_generated_test world_cloud_test world_weather_test world_water_bodies_test algo_distance_transform_test algo_det_math_test ocean_spectrum_test ocean_shore_test ocean_sea_test ocean_ewave_test ocean_wind_test)
   target_link_libraries(${_lsys_test} PRIVATE cvc GTest::gtest GTest::gtest_main)
   target_compile_features(${_lsys_test} PRIVATE cxx_std_17)
@@ -3366,6 +3387,7 @@ cvc_discover_tests(net_policy_test)
 cvc_discover_tests(e2ee_test)
 cvc_discover_tests(ariadne_e2ee_test)
 cvc_discover_tests(net_oidc_test)
+cvc_discover_tests(ariadne_net_principal_test)
 if(TARGET net_engine_test)
   # The fan-out case connects 6000 loopback clients (12000 descriptors; it lowers N to fit the
   # limit): seconds in a Release build, longer in Debug or under a sanitizer.
@@ -3472,7 +3494,7 @@ cvc_discover_tests(vis_grid_test)
 cvc_discover_tests(vis_tiler_test)
 foreach(_lsys_test lsys_rng_test lsys_expr_test lsys_parse_test lsys_derive_test
                    lsys_interp_test lsys_recipes_test lsys_svg_test lsys_forest_test
-                   lsys_fields_test world_surface_test world_heightfield_test world_terrain_test world_scatter_test world_roads_test world_buildings_test world_sites_test world_road_mesh_test world_road_raster_test
+                   lsys_fields_test world_surface_test world_heightfield_test world_terrain_test world_scatter_test world_roads_test world_buildings_test world_theme_test world_sites_test world_road_mesh_test world_road_raster_test
                    world_raster_test world_bundle_test world_bundle_v2_test world_generated_test world_cloud_test world_weather_test world_water_bodies_test algo_distance_transform_test algo_det_math_test ocean_spectrum_test ocean_shore_test ocean_sea_test ocean_wind_test)
   cvc_discover_tests(${_lsys_test})
 endforeach()

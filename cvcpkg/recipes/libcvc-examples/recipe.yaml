@@ -8,7 +8,7 @@ recipe:
   maintainer: "cvcpkg group"
   maintainer_email: "info@cvcpkg.org"
   maintainer_url: "https://cvcpkg.org"
-  description: "libcvc's example programs as ready-to-run commands: the cvcGL scene demos (lsystem_forest, lsystem_coast, terrain_lab, bunny_shadow, volren_bunny, volslice_bunny), the GRL-SNAM navigation demos (nav_city_swarm / nav_city_drive / nav_fog_ghost / nav_finale, the torch-free cvc::nav reactive swarm rendered natively), the headless nav CLIs (nav_swarm_demo / nav_train_demo / nav_material_demo), and the example .ari documents for arigl and ari (share/libcvc-examples/ariadne/). Linux also gets libcvc-examples-web, a launcher that serves the browser gallery from the libcvc-examples-web package cross-origin-isolated (COOP/COEP) and opens a browser."
+  description: "libcvc's example programs as ready-to-run commands: the cvcGL scene demos (lsystem_forest, lsystem_coast, terrain_lab, bunny_shadow, volren_bunny, volslice_bunny), the headless nav CLIs (nav_swarm_demo / nav_train_demo / nav_material_demo), and the example .ari documents for arigl and ari (share/libcvc-examples/ariadne/). Linux also gets libcvc-examples-web, a launcher that serves the browser gallery from the libcvc-examples-web package cross-origin-isolated (COOP/COEP) and opens a browser."
   homepage: https://github.com/transfix/libcvc
   # BSD-3-Clause: the demos link cvcGL statically, which carries code derived
   # from VTK 9.5.0. MIT: lsystem_coast's OceanFFT is a port of ABYSSAL. Both
@@ -84,10 +84,6 @@ package:
     - bin/bunny_shadow*
     - bin/volren_bunny*
     - bin/volslice_bunny*
-    - bin/nav_city_swarm*
-    - bin/nav_city_drive*
-    - bin/nav_fog_ghost*
-    - bin/nav_finale*
     - bin/nav_swarm_demo*
     - bin/nav_train_demo*
     - bin/nav_material_demo*

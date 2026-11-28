@@ -110,6 +110,7 @@ section_stamp write_avatar_archetypes(cvc::app &app, const std::string &room_id,
     w.set_double({idx(i), "body", "mass"}, a.body.mass);
     w.set_double({idx(i), "body", "width"}, a.body.width);
     w.set_double({idx(i), "body", "height"}, a.body.height);
+    w.set_double({idx(i), "body", "density"}, a.body.density);
     for (std::size_t j = 0; j < a.controllers.size(); ++j)
       w.set({idx(i), "controllers", idx(j)}, a.controllers[j]);
     w.set_uint({idx(i), "controllers", "count"}, a.controllers.size());
@@ -137,6 +138,7 @@ bool read_avatar_archetypes(cvc::app &app, const std::string &room_id,
     a.body.mass = r.number({k, "body", "mass"}, a.body.mass);
     a.body.width = r.number({k, "body", "width"}, a.body.width);
     a.body.height = r.number({k, "body", "height"}, a.body.height);
+    a.body.density = r.number({k, "body", "density"}, a.body.density);
     a.controllers.clear();
     const std::uint64_t m = std::min(r.uint({k, "controllers", "count"}, 0), kMaxEntries);
     for (std::uint64_t j = 0; j < m; ++j)

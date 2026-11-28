@@ -101,9 +101,10 @@ struct world_config {
   double penetration_slop = 0.002;  // metres two bodies may overlap before the solver pushes them
                                     // apart (Jolt's own default, 0.02, is sized for game props)
   int threads = 0; // worker threads inside step(): 0 = none (single-threaded job system)
-  // Worker threads for the fields' free-surface reads (each cell a body has in a fluid with a
-  // surface reads its height and velocity there, the field step's main cost): 0 = none, the
-  // calling thread reads them all. The same values in the same order either way, so a run's
+  // Worker threads for the fields' free-surface reads, the field step's main cost: each cell a
+  // body has in a fluid with a surface reads its height and velocity there, and each hull
+  // (hull.h) its vertices' heights and its wetted triangles' velocities, a hull a task. 0 = none,
+  // the calling thread reads them all. The same values in the same order either way, so a run's
   // state_hash does not depend on it. A build without threads (single-threaded WebAssembly)
   // ignores it. Free to change by reconfigure().
   int field_threads = 0;
@@ -306,6 +307,12 @@ public:
   // What the fields did to `id` in the last step: zero for a body no field
   // touched, and for a static, kinematic or sleeping body.
   field_load field_load_on(body_id id) const;
+  // A new share of a dynamic body's volume that displaces a fluid (body_desc::displacement),
+  // from the next step on, waking it; nothing for a body the fields do not push (static,
+  // kinematic, a mesh).
+  // Not part of save(), as the body settings are not. Throws cvc::physics_error for an unknown
+  // body, a vehicle's chassis (its wading sets its own), or a share not finite and >= 0.
+  void set_displacement(body_id id, double share);
   // The water at a world point at the field time (field_time()): the first fluid field, in
   // id order, whose box holds the point in x and y and reaches below it, as a boat's
   // propeller and rudder read it. Dry and still (wet false, density 0) where none does;
