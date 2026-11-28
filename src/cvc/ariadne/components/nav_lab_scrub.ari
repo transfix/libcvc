@@ -152,4 +152,3 @@ units:
         bind: view.camera
         options: [Follow the arm, Orbit]
         values: [follow, orbit]
-        values: [follow, orbit]

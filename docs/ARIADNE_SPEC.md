@@ -11,8 +11,8 @@ contain, and what a reader does with it. It has two halves.
 [ARIADNE.md](ARIADNE.md) is the guide. It explains, shows examples and names the code; it is
 informative. Where it and this file disagree, this file is right and the guide has a defect.
 
-**Status: describes libcvc 4.0.10 (master fc507d7e0).** It covers the document as a whole: its
-text (§2), its version gate (§3), loading (§4), starting (§5), frames (§6), programs and state
+**Status: describes libcvc 4.0.10 as of transfix/libcvc#1609.** It covers the document as a whole:
+its text (§2), its version gate (§3), loading (§4), starting (§5), frames (§6), programs and state
 paths (§7), and every top-level block (§8). The scene's node semantics, the widget types and
 the DSL's built-ins are not written here yet (§10); for those the guide is the reference. Where
 libcvc does not do what this file says, §9 lists the difference. `ariadne_schema_test` checks
@@ -68,14 +68,16 @@ Two words name what a reader does with a problem.
 A document is a [YAML 1.2](https://yaml.org/spec/1.2.2/) file, read by yaml-cpp.
 
 - A document MUST be UTF-8. A reader MAY accept a byte-order mark before it.
-- A file MUST hold one YAML document. A reader reads the first and SHOULD warn about any after it
-  (§9).
+- A file MUST hold one YAML document. A reader reads the first and SHOULD warn about any after it,
+  even one that does not parse.
 - Anchors and aliases MAY be used. An alias stands for a copy of its anchor's node. An alias with
   no anchor is a YAML error.
 - Merge keys are not part of the format: `<<` is an ordinary key, so the schema reports it as an
   unknown key in every closed map.
 - Tags are not part of the format. A reader ignores them.
-- A map MUST NOT repeat a key. A reader SHOULD warn about a repeated key (§9).
+- A map MUST NOT repeat a key. A reader SHOULD warn about a repeated key, and reads the first of
+  them wherever it reads the map: by looking a key up, by going through its keys, or in the
+  schema check.
 - A YAML error in the document refuses the load. A YAML error in a library it imports warns and
   the import is skipped. A YAML error in a fragment it `load:`s warns and the mount is an empty
   group.
@@ -126,7 +128,8 @@ A version is compared as up to three numeric components, `major.minor.patch`.
 A reader MUST refuse a document whose `min_libcvc` is newer than the reader, before it checks or
 reads anything else in it. A document too new for the reader may use keys the reader's schema
 does not know, so it is refused, not checked. Each fragment carries its own `meta:` and is gated
-the same way when it is mounted, on its own (§9). Libraries are not gated.
+the same way when it is mounted, on its own: a `load:` fragment too new for the reader warns and
+is an empty group, and a `mounts:` entry is refused when it opens. Libraries are not gated.
 
 In this version of the format `min_libcvc` selects no behaviour. It is only the gate: no key
 means something different because of it.
@@ -216,8 +219,8 @@ text. The guide's §6 explains each with examples.
 - A library's URI resolves against the importing file's directory. A library's own imports are
   merged before its units.
 - When two libraries define the same name, the later one wins and the reader warns. The
-  document's own unit wins over every library's, without a warning. An import with
-  `fallback: true` only fills names no other import defines.
+  document's own unit wins over every library's, without a warning, unless it is marked
+  `fallback:` (a flag): then it is used only where no library defines its name.
 - A library imported twice, or in a cycle, is read once; the repeat is skipped without a warning.
 - Imports nest at most 32 deep, and at most 4096 libraries are read. Past either warns.
 
@@ -522,16 +525,18 @@ A document with no `channels:` is not checked. **Guide:** §8.
 
 **Schema:** `$defs/document/properties/import`. **When:** load step 6.
 
-Libraries whose `units:` and `functions:` the document uses: each a URI, or a map with the URI,
-`optional:` (a library that cannot be read only warns) and `fallback:` (§4.4). **Guide:** §6.2.
+Libraries whose `units:` and `functions:` the document uses: each a URI, or a map with `uri:` and
+`optional:`, a flag. A library that cannot be found warns, unless it is optional; one that does
+not parse warns either way. **Guide:** §6.2.
 
 #### `units:`
 
 **Schema:** `$defs/document/properties/units`. **When:** load step 6; expanded in step 7.
 
 Widget templates, by name, that `include:` instantiates (§4.4). A unit may declare `args:` with
-defaults. A unit is checked as a widget when it is included, after its args are substituted.
-Units have no effect until included. **Guide:** §6.1.
+defaults, and `fallback:`, a flag, to yield to a library's unit of the same name (§4.4). A unit
+is checked as a widget when it is included, after its args are substituted. Units have no effect
+until included. **Guide:** §6.1, §6.2.
 
 #### `functions:`
 
@@ -681,8 +686,8 @@ backend draws them in its main area. **Guide:** §4, §5.1.
 
 **Schema:** `$defs/widget_list`. **When:** load step 7.
 
-The same as `root:`, which it stands for. A document SHOULD NOT have both; when it does, `root:`
-is used and `children:` is ignored (§9). **Guide:** §5.1.
+The same as `root:`, which it stands for. A document SHOULD NOT have both; when it does, a reader
+warns, uses `root:` and ignores `children:`. **Guide:** §5.1.
 
 #### `context_menu:`
 
@@ -806,17 +811,8 @@ The world's rules (vehicles, spawns, …), read by the world runtime; a bare `wo
 
 ## 9. Where libcvc 4.0.10 differs
 
-Each row is a rule above that libcvc does not yet keep. Each is a defect in libcvc, to be fixed
-in the code.
-
-| Rule | What libcvc does | Where |
-|---|---|---|
-| §3: a `load:` fragment's `min_libcvc` gates it. | Only a `mounts:` entry is gated; a static `load:` fragment is not. | `read_fragment`, `loader.cpp` |
-| §2.1: a reader warns about a repeated key. | It does not. The loader reads the first of the two, and the schema check the last. | yaml-cpp lookups; `yaml_to_json`, `loader.cpp` |
-| §2.1: a reader warns about a second YAML document in a file. | It reads the first and ignores the rest without a warning. | `load_file`, `loader.cpp` |
-| §8.2: `optional:` and `fallback:` on an import are flags (§2.2). | Only the exact text `true` counts. | `parse_imports`, `loader.cpp` |
-| §8.4: a document with both `root:` and `children:` uses `root:` (and SHOULD be warned). | `children:` is ignored without a warning. | `parse_document`, `loader.cpp` |
-| The schema allows `background:` on groups, panels, windows, overlays and mount sites only. | The loader reads it on every widget; the schema check warns where the schema does not allow it. | `common_keys`, `loader.cpp` |
+None known: libcvc keeps every rule above. A difference found later is listed here, as a defect in
+libcvc to be fixed in the code, until it is fixed.
 
 ## 10. Not yet specified
 
