@@ -1,0 +1,109 @@
+# volume_filters.ari — VolumeRover2's Tools > filters as an Ariadne document: VolRover's own Visible
+# Human CT (examples/data/fem/vh4.rawiv, a torso, 128^3 bytes) on three volume_slice planes and in
+# a slice view, filtered by the volume_filters component (docs/roadmap/VOLROVER-TEXMOL-APPS-ROADMAP.md
+# V0): bilateral filtering, contrast enhancement, anisotropic diffusion or GDTV, each a job beside
+# the frame (volume.filter-start, cvc::volume_filter_job).
+#
+# The app holds the CT (data: ct). The planes and the slice view show it, and the Filters window
+# views it too: none of them reads the file or keeps a copy. Pick a filter, set its parameters
+# (VolumeRover2's defaults to start) and press Run; the progress bar names the pass the filter is
+# on, and Stop ends it, leaving the CT as it was. When the job is done, on_tick's
+# (volume-filters-step ...) puts the result back as the CT's volume (data-put): the planes and the
+# slice view redraw on it, and the next Run filters the filtered CT. Original reads the CT again.
+#
+#   ariadne_hello examples/ariadne/documents/volume_filters.ari --component-path src/cvc/ariadne
+#   arigl run --component-path src/cvc/ariadne examples/ariadne/documents/volume_filters.ari
+
+meta:
+  name: Volume filters (Ariadne)
+  author: cvc
+  min_libcvc: 4.0.0
+
+requires:
+  - gl.scene                       # a scene renderer realizes the scene: block (arigl; not ari)
+
+import:
+  - cvc://components/volume/volume_filters.ari
+
+# The app holds the data. The planes, the slice view and the filters show it.
+data:
+  ct: ../../data/fem/vh4.rawiv
+
+# The main view opens on the CT from a little further out than the scene's own bounds; each tick
+# puts a finished job's result back as the CT's volume.
+on_tick: |
+  (if (!= (state-get "vf.opened") "1")
+      (begin (state-set "viewers.main.camera.frame" "-40 -40 -40 168 168 168")
+             (state-set "vf.opened" "1")))
+  (volume-filters-step "volume_filters" "ct")
+
+menubar:
+  - menu: Sim
+    items:
+      - menu_item: Quit
+        on: quit
+  - menu: Tools
+    items:
+      - menu_item: Anisotropic diffusion
+        on: (state-set "volume_filters.filter" "anisotropic")
+      - menu_item: Bilateral filtering
+        on: (state-set "volume_filters.filter" "bilateral")
+      - menu_item: Contrast enhancement
+        on: (state-set "volume_filters.filter" "contrast")
+      - menu_item: GDTV filtering
+        on: (state-set "volume_filters.filter" "gdtv")
+
+windows:
+  - include: volume_filters
+    args: { data: ct, title: Filters }
+    pos: [8, 30]
+    size: [330, 330]
+  # The z plane, looked at straight down: the slice the filters change most visibly.
+  - window: Slice
+    id: slice
+    pos: [8, 370]
+    size: [330, 380]
+    children:
+      - type: viewport
+        view: slice
+        mode: slice
+        axis: z
+        chrome: false
+        clear_color: [0.04, 0.045, 0.06]
+        width: 310
+        height: 310
+        caption: "drag: pan   wheel: zoom"
+      - slider_int: Z plane
+        bind: graphics.root.children.slice_z.slice.index
+        lo: 0
+        hi: 127
+
+scene:
+  chrome: false
+  background: { top: [0.10, 0.12, 0.16], bottom: [0.02, 0.02, 0.03] }
+  nodes:
+    # Three planes of the CT, grey from air to bone. Each follows the dataset itself (its voxels
+    # shared), so each redraws when a filter's result is put back.
+    - node: slice_z
+      type: volume_slice
+      source: { data: ct }
+      axis: z
+      index: 70
+      transfer_function: &ct_tf
+        domain: [0, 160]
+        color: [[0, 0, 0, 0], [0.4, 0.45, 0.42, 0.4], [1, 1, 0.98, 0.94]]
+    - node: slice_y
+      type: volume_slice
+      source: { data: ct }
+      axis: y
+      index: 64
+      transfer_function: *ct_tf
+    - node: slice_x
+      type: volume_slice
+      source: { data: ct }
+      axis: x
+      index: 64
+      transfer_function: *ct_tf
+  lights:
+    - rig: three_point
+      key: { intensity: 1.6, azimuth: -38, elevation: 52 }

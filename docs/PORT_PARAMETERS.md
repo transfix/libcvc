@@ -42,6 +42,7 @@ state key take it. An empty string default prints as two backticks.
 | [`class_surface_params`](#class_surface_params) | [`class_surfaces.h`](../inc/cvc/volume/class_surfaces.h) | `cvc::class_surfaces`, `segment.surfaces`, `pycvc.class_surface_params`, volume_grid's `grid.segment.mesh.*` keys |
 | [`volume_grid_contour_params`](#volume_grid_contour_params) | [`volume_grid_contours.h`](../inc/cvc/volume/volume_grid_contours.h) | volume_grid's `grid.contour.*` keys, `grid-contours.display`, `pycvc.volume_grid_contour_params` |
 | [`grid_contour_object`](#grid_contour_object) | [`volume_grid_contours.h`](../inc/cvc/volume/volume_grid_contours.h) | volume_grid's `grid.objects.<i>.*` rows, `grid-contours.object`, `pycvc.grid_contour_object` |
+| [`volume_filter_params`](#volume_filter_params) | [`volume_filter.h`](../inc/cvc/volume/volume_filter.h) | `cvc::filter_volume` and its job, `cvc filter`, `volume.filter`, `pycvc.volume_filter_params`, the volume_filters component's keys ([ARIADNE.md](ARIADNE.md) §6.5) |
 | [`pocket_tunnel_params`](#pocket_tunnel_params) | [`pocket_tunnel_params.h`](../inc/cvc/geometry/pocket_tunnel_params.h) | `cvc::pocket_tunnel` and its job (C++ only) |
 | [`secondary_params`](#secondary_params) | [`secondary_structures_params.h`](../inc/cvc/geometry/secondary_structures_params.h) | `cvc::find_secondary_structures` and its job (C++ only) |
 
@@ -226,6 +227,27 @@ The shared types' tables (`contour_read_params`, `contour_component`, `point_cla
 | `interpolation` | enum: `linear`, `spline` | `linear` |  |  | how its curves draw between their control points: linear or spline |
 | `samples` | int | `5` |  | 1 .. 64 | points per span of a spline |
 | `visible` | bool | `1` |  |  | whether its curves draw |
+
+## Volume filters
+
+VolumeRover2's Tools menu filters (VOLROVER-TEXMOL-APPS-ROADMAP.md V0). `filter` picks one, and
+each reads only its own fields; the defaults are VolumeRover2's dialogs'. Generated from the V0
+branch, after the rest of this page.
+
+### volume_filter_params
+
+| Key | Type | Default | Unit | Range | Description |
+|---|---|---|---|---|---|
+| `filter` | enum: `bilateral`, `contrast`, `anisotropic`, `gdtv` | `bilateral` |  |  | the filter: bilateral, contrast, anisotropic or gdtv |
+| `radiometric_sigma` | number | `200` | data | 1e-09 ..  | bilateral: how far apart two values may be and still blend (small keeps edges) |
+| `spatial_sigma` | number | `1.5` | voxel | 1e-09 ..  | bilateral: how fast a neighbour's weight falls with its distance |
+| `radius` | int | `2` | voxel | 0 .. 16 | bilateral: the neighbourhood's half-width (radius 2 is 5 x 5 x 5 voxels) |
+| `contrast.resistor` | number | `0.95` |  | 0 .. 1 | contrast: how much of a neighbour's local minimum, maximum and mean carries over (near 1 spreads them far) |
+| `anisotropic.iterations` | int | `20` |  | 1 .. 1000 | anisotropic: how many diffusion steps (more smooths further) |
+| `gdtv.exponent` | number | `1` |  | 0 .. 2 | gdtv: the power of the gradient's magnitude the flow lowers (1 total variation, 2 linear diffusion) |
+| `gdtv.lambda` | number | `1e-04` |  | 1e-09 ..  | gdtv: the penalty factor pulling each voxel back toward the input |
+| `gdtv.iterations` | int | `1` |  | 1 .. 1000 | gdtv: how many Jacobi passes |
+| `gdtv.neighbours` | enum: `six`, `twenty_six` | `six` |  |  | gdtv: the neighbourhood, six (faces) or twenty_six (faces, edges, corners) |
 
 ## PocketTunnel
 

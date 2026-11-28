@@ -4823,6 +4823,9 @@ transfer function is seeded once its first volume arrives, since its `isosurface
 that volume's range.
 [`volume_shared.ari`](../examples/ariadne/documents/volume_shared.ari) shows the bunny in a volren
 and a grid, and smooths it with `volume.filter`.
+[`volume_filters.ari`](../examples/ariadne/documents/volume_filters.ari) runs VolumeRover2's four
+filters (bilateral, contrast enhancement, anisotropic diffusion, GDTV: `volume.filter`'s `filter`)
+on a CT through the `volume_filters` component (§6.5), and puts each result back with `data-put`.
 
 **Region and water (`region:`, `water_level:`).** On a data node with `body:` (and on a
 `generated_world` node, for `region:`), two props shape the world the physics and the navigator
@@ -6502,6 +6505,7 @@ copy (a libcvc checkout's `src/cvc/ariadne`). Each binds state keys a C++ object
 | `transfer_function`, `transfer_function_editor` | any node's `transfer_function` model (args `node`, `id`): the ColorTable2 editor with histogram / contour spectrum / contour tree layers — see [`TRANSFER_FUNCTIONS.md`](TRANSFER_FUNCTIONS.md) |
 | `volume_grid` (+ `volume_grid_views`, `volume_grid_tools`) | a `volume_grid` node (§5.4; args `node`, `title`, `id`, `view_size`, `layout`): VolumeGridRover's slice views under an XY / XZ / ZY switch beside a 3D view (`layout: switch`, the default) or all four in a 2 x 2 grid (`layout: quad`), the tool, and the Probe, Point classes, Contours, Transfer function and Segmentation tabs. `volume_grid_tools`' tabs end in `slot: tabs`; `volume_grid_contours_tab` is the Contours tab alone (objects, the curve being drawn, edits, Tile with its progress and Stop, Save and Load through the app) |
 | `volume_grid_segmentation` (+ `volume_grid_segmentation_tab`) | the Segmentation tab in a window of its own (args `node`, `title`, `id`; the `_tab` unit is the controls alone, a group): thresholds, gamma, automatic seeds, Segment and Stop with a progress bar, the result's classes, how labels and surfaces draw, Save classes and Save labels |
+| `volume_filters` (`volume/volume_filters.ari`) | no node: a dataset's volume (arg `data`, default `volume`: `data.<data>.volume`) and VolumeRover2's four filters on it as a `volume.filter-start` job (§5.17): bilateral, contrast enhancement, anisotropic diffusion and GDTV, each with only its own parameters shown (`volume_filter_params`' keys under arg `keys`, default `volume_filters`), Run, Stop, Apply (the result put back with `data-put`, so every view of the dataset redraws), Original (`data-reload`), and a progress bar naming the filter's pass. Its functions come with the import: call `(volume-filters-step KEYS DATA)` from `on_tick` to apply each result once its job ends (`KEYS.apply`, the *Apply when done* box). Demo: `volume_filters.ari` |
 | `chat`, `chat_panel` | a room's chat and direct messages through the chat verbs (args `id`, `title`, `room`); its functions come with the import: call `(chat-ui-step ID ROOM)` from `on_tick` (§5.16) |
 | `shell` | not a unit but a document of its own: the Ariadne shell, which runs a catalog of documents as applications on demand (§6.8). `ari run cvc://components/shell.ari --catalog shell_apps.json [--open SLUG,...]` |
 | `processes` | the document's running DSL programs, a row each ([ARIADNE_SHELL.md](roadmap/ARIADNE_SHELL.md) 4.10): the application each belongs to (its `(ps)` scope looked up in `ariadne.apps`, §5.25; the document's own rows by its `meta.name`), pid, name, status, steps, what it waits on, memory, and a Kill button (args `id`, `title`, `rows`). Call `(processes-step ROWS)` from `on_tick`: it polls `(ps)` and `(inspect)` twice a second (`ROWS.every`), at most `ROWS.max` rows (50), the rest counted in `ROWS.more`, and each `mounts:` application's share of its budget (§6.8) in `ROWS.apps`. It lists only its own Runtime's processes (the document's and the documents it loads), in execution group 0 too, where it once listed every document's: a program with an owner sees only its owner's processes (§2.5) |
@@ -9538,6 +9542,10 @@ A capture is made repeatable by:
   windows show what it published. A node type says so through `RealizedScene::pending_work`, a
   probe per node (mesh_lab registers one: its skeleton, its colour jobs; contour_lab one: its
   tile). The skeleton and contour tiler goldens wait for their runs this way;
+- where the document has work no node knows of (a DSL job it started with a `-start` form, a
+  dataset it waits on first), the same, for as long as its own `golden.wait` key is `1`: it sets
+  the key in `init:` and clears it in `on_tick:` once the result is shown. The volume_filters
+  golden waits for its filter job this way;
 - where the scene has `volren` nodes, more frames until each shows a finished raycast.
 
 The test then renders one more frame and requires it to be identical, so a UI that is still

@@ -1607,6 +1607,56 @@ TEST_F(CvcCliTest, GdtvFilterVolume) {
   EXPECT_TRUE(fs::exists(out));
 }
 
+// `cvc filter`: the filter jobs (cvc/volume/volume_filter.h, VOLROVER-TEXMOL-APPS-ROADMAP.md V0),
+// flags from the parameter table, voxel for voxel the legacy commands' (compare exits 0 only on an
+// exact match), and a bad parameter refused naming it.
+TEST_F(CvcCliTest, FilterHelpListsTheTablesFlags) {
+  auto r = cvc("filter --help");
+  EXPECT_EQ(0, r.exit_code);
+  for (const char *flag :
+       {"--filter", "--radiometric-sigma", "--contrast-resistor", "--anisotropic-iterations",
+        "--gdtv-exponent", "--gdtv-lambda", "--gdtv-iterations", "--gdtv-neighbours", "--seconds"})
+    EXPECT_NE(std::string::npos, r.output.find(flag)) << flag;
+}
+
+TEST_F(CvcCliTest, FilterMatchesTheLegacyCommands) {
+  struct pair_case {
+    const char *name, *job, *legacy;
+  };
+  // gdtv: --gdtv-exponent p is the legacy --q 2 - p, as VolumeRover2's dialog passes it.
+  const pair_case cases[] = {
+      {"contrast", "--filter contrast --contrast-resistor 0.9", "contrast --resistor 0.9"},
+      {"anisotropic", "--filter anisotropic --anisotropic-iterations 2", "anisotropic -n 2"},
+      {"gdtv", "--filter gdtv --gdtv-exponent 0.5 --gdtv-lambda 0.3 --gdtv-iterations 2",
+       "gdtv --q 1.5 --lambda 0.3 -n 2 --neighbours 0"},
+      {"gdtv26", "--filter gdtv --gdtv-exponent 1 --gdtv-lambda 0.01 --gdtv-neighbours twenty_six",
+       "gdtv --q 1 --lambda 0.01 -n 1 --neighbours 1"},
+  };
+  for (const pair_case &c : cases) {
+    SCOPED_TRACE(c.name);
+    const std::string job = path(std::string("filter_") + c.name + ".rawiv");
+    const std::string legacy = path(std::string("legacy_") + c.name + ".rawiv");
+    auto r = cvc("filter " + test_vol + " " + job + " " + c.job);
+    ASSERT_EQ(0, r.exit_code) << r.output;
+    EXPECT_NE(std::string::npos, r.output.find("Wrote")) << r.output;
+    r = cvc(std::string(c.legacy) + " " + test_vol + " " + legacy);
+    ASSERT_EQ(0, r.exit_code) << r.output;
+    r = cvc("compare -i " + job + " " + legacy);
+    EXPECT_EQ(0, r.exit_code) << r.output;
+  }
+}
+
+TEST_F(CvcCliTest, FilterRefusesABadParameter) {
+  std::string out = path("filter_bad.rawiv");
+  auto r = cvc("filter " + test_vol + " " + out + " --filter contrast --contrast-resistor 2");
+  EXPECT_NE(0, r.exit_code);
+  EXPECT_NE(std::string::npos, r.output.find("contrast.resistor")) << r.output;
+  r = cvc("filter " + test_vol + " " + out + " --filter sharpen");
+  EXPECT_NE(0, r.exit_code);
+  EXPECT_NE(std::string::npos, r.output.find("filter")) << r.output;
+  EXPECT_FALSE(fs::exists(out));
+}
+
 // ===========================================================================
 // Rotate command (single angle and multi-rotation series)
 // ===========================================================================

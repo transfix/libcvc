@@ -21,14 +21,19 @@
 //
 // `vol` is a cvc::volume: a data object holding one, or a state path naming the node whose data
 // channel does (a document's data.<name>.volume, a node's published volume). `params` is a dict of
-// volume_filter_params' fields ("filter", "radiometric_sigma", "spatial_sigma", "radius"), or nil
-// for the defaults; (params.defaults "volume.filter") lists them. The result is a data object
-// holding a new std::shared_ptr<const cvc::volume>; the input is never written. A program stores
-// the result where the views follow it, and every node viewing that key redraws on it:
+// volume_filter_params' fields, or nil for the defaults; (params.defaults "volume.filter") lists
+// them: "filter" (bilateral, contrast, anisotropic or gdtv), bilateral's "radiometric_sigma",
+// "spatial_sigma" and "radius", "contrast.resistor", "anisotropic.iterations", and "gdtv.exponent",
+// "gdtv.lambda", "gdtv.iterations" and "gdtv.neighbours". The result is a data object holding a
+// new std::shared_ptr<const cvc::volume>; the input is never written. A program stores the result
+// where the views follow it, and every node viewing that key redraws on it:
 //
-//   (volume.filter-start "data.head.volume" (dict "radius" 1) "filtering")
-//   ... once (state-get "filtering.status") is "done":
-//   (state-data-set "data.head.volume" (state-data-get "filtering.result"))
+//   (volume.filter-start "data.head.volume" (dict "filter" "anisotropic"
+//                                                 "anisotropic.iterations" 10) "filtering")
+//   ... once (state-get "filtering.busy") is "0" and filtering.result holds the volume:
+//   (data-put "head" "volume" (state-data-get "filtering.result"))
+//
+// The volume_filters component (components/volume/volume_filters.ari) is a window over these.
 //
 // Like every intrinsic, none of these reads or writes a file.
 

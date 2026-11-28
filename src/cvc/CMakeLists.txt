@@ -821,6 +821,21 @@ else()
                               PROPERTIES COMPILE_OPTIONS "/fp:precise")
 endif()
 
+# The volume filter jobs (volume/volume_filter.cpp, docs/roadmap/VOLROVER-TEXMOL-APPS-ROADMAP.md
+# V0) match VolMagick's one-shot filters voxel for voxel: the same expressions, cut into rows. A
+# compiler that contracts multiply-adds (GCC's default, and Clang's on aarch64) could fuse them
+# differently on the two sides, so both are built without contraction.
+set(_cvc_filter_exact_sources volume/volume_filter.cpp processing/bilateral_filter.cpp
+                              processing/contrast_enhancement.cpp
+                              processing/anisotropic_diffusion.cpp processing/gdtv_filter.cpp)
+if(NOT MSVC)
+  set_source_files_properties(${_cvc_filter_exact_sources}
+                              PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+else()
+  set_source_files_properties(${_cvc_filter_exact_sources}
+                              PROPERTIES COMPILE_OPTIONS "/fp:precise")
+endif()
+
 # state_transport_ipc is POSIX-only (Unix domain sockets, poll()); the IPC
 # header itself is portable but the implementation is not. Drop it on Windows.
 if(WIN32)

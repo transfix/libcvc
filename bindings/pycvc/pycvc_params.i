@@ -26,6 +26,17 @@
 %{
 #include <cvc/core/param_table.h>
 #include <stdexcept>
+
+namespace pycvc {
+// A field's table name from its Python keyword ("gdtv_neighbours" is "gdtv.neighbours"), so
+// set_text and get_text take either; a name that is neither comes back as it is.
+template <class P> std::string param_field_name(const std::string &name) {
+  for (const std::string &n : cvc::param_names<P>())
+    if (n == name || cvc::param_keyword_name(n) == name)
+      return n;
+  return name;
+}
+} // namespace pycvc
 %}
 
 %pythoncode %{
@@ -110,12 +121,12 @@ def _pycvc_install_params(cls):
   }
   void set_text(const std::string &name, const std::string &text) {
     std::string why;
-    if (!cvc::param_set_text(*$self, name, text, why))
+    if (!cvc::param_set_text(*$self, pycvc::param_field_name< P >(name), text, why))
       throw std::invalid_argument(why);
   }
   std::string get_text(const std::string &name) const {
     std::string out;
-    if (!cvc::param_get_text(*$self, name, out))
+    if (!cvc::param_get_text(*$self, pycvc::param_field_name< P >(name), out))
       throw std::invalid_argument("unknown parameter '" + name + "'");
     return out;
   }

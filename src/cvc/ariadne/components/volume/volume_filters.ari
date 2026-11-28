@@ -1,0 +1,200 @@
+# volume_filters.ari — a REUSABLE Ariadne component: VolumeRover2's Tools > filters on a volume the
+# app holds (docs/roadmap/VOLROVER-TEXMOL-APPS-ROADMAP.md V0): bilateral filtering, contrast
+# enhancement, anisotropic diffusion and GDTV, each cvc::volume_filter_job (cvc/volume/
+# volume_filter.h) run as volume.filter-start beside the frame.
+#
+# The window views a dataset the app put on the state tree (its data: entry's volume,
+# data.<data>.volume) and never loads a file or keeps a copy. Run filters that volume as a sliced
+# job on the app's scheduler (cooperative on single-threaded wasm, so the frame loop keeps
+# drawing); the progress bar names the filter's pass, and Stop ends the job at its next step,
+# leaving the dataset as it was. The result lands on the state tree where every -start job puts
+# its result, <keys>.job.result (a data object holding the new volume); the input is never
+# written. Apply puts it back as the dataset's volume (data-put), and every view of that dataset
+# (a volren, a volume_grid, a volume_slice) redraws on it; Apply when done does that for each job
+# once it ends, when the document calls (volume-filters-step KEYS DATA) from its on_tick. Original
+# makes the dataset again from its source (data-reload).
+#
+# The parameters are volume_filter_params' (its parameter table: VolumeRover2's dialogs'
+# defaults), one key each under <keys>, named as the table names them: filter, radiometric_sigma,
+# spatial_sigma, radius, contrast.resistor, anisotropic.iterations, gdtv.exponent, gdtv.lambda,
+# gdtv.iterations, gdtv.neighbours. Only the chosen filter's are shown. A key that no widget has
+# seeded yet is left out of the job's parameters, so the table's default applies.
+#
+# Args (every one has a default, so a bare include works):
+#   data    the dataset whose volume is filtered: data.<data>.volume (default volume)
+#   keys    the state prefix for the parameters and the job (default volume_filters); give each
+#           include its own when a document filters several datasets
+#   title   the window's title (default Filters)
+#   id      the instance id: the window's geometry persists under tree.<id> (default
+#           volume_filters)
+#
+# The job's keys, under <keys>.job (cvc/core/job_keys.h): busy, stoppable, status, progress
+# (0-100), phase, pid, result (on the data channel); <keys>.job.applied is the pid of the last job
+# whose result was put back.
+#
+# Functions (they come with the import):
+#   (volume-filters-run KEYS DATA)    Run: starts the job, returns its pid
+#   (volume-filters-apply KEYS DATA)  Apply: the last result as DATA's volume; #f when there is none
+#   (volume-filters-step KEYS DATA)   from on_tick: once a job ends, Apply when KEYS.apply is 1
+#   (volume-filters-params KEYS)      the parameters dict the job is given
+#
+# Use it:
+#     import: cvc://components/volume/volume_filters.ari
+#     data:
+#       ct: ../../data/fem/vh4.rawiv
+#     on_tick: (volume-filters-step "volume_filters" "ct")
+#     windows:
+#       - include: volume_filters
+#         args: { data: ct }
+
+functions: |
+  ; The parameters for volume.filter from the keys under KEYS: each key a widget has seeded or the
+  ; user set, as text (volume.filter reads text through the table); a key not set yet is left out,
+  ; so the table's default applies.
+  (defun volume-filters-params (keys)
+    (set d (dict))
+    (for name (list "filter" "radiometric_sigma" "spatial_sigma" "radius" "contrast.resistor"
+                    "anisotropic.iterations" "gdtv.exponent" "gdtv.lambda" "gdtv.iterations"
+                    "gdtv.neighbours")
+      (set v (state-get (str-concat keys "." name)))
+      (if (and (not (is-null v)) (!= v "")) (set-attr d name v) #f))
+    d)
+  ; Run: DATA's volume filtered as a job beside the frame, its keys under KEYS.job.
+  (defun volume-filters-run (keys data)
+    (volume.filter-start (str-concat "data." data ".volume") (volume-filters-params keys)
+                         (str-concat keys ".job")))
+  ; Apply: the last job's result put back as DATA's volume, where every view of it follows.
+  (defun volume-filters-apply (keys data)
+    (set r (state-data-get (str-concat keys ".job.result")))
+    (state-set (str-concat keys ".job.applied") (or (state-get (str-concat keys ".job.pid")) ""))
+    (if r (begin (data-put data "volume" r) #t) #f))
+  ; From on_tick: once a job has ended (busy 0, a pid not seen yet), Apply when KEYS.apply is 1. A
+  ; stopped or failed job leaves no result (-start clears it when a job starts), so nothing is put.
+  (defun volume-filters-step (keys data)
+    (set pid (or (state-get (str-concat keys ".job.pid")) ""))
+    (if (and (= (state-get (str-concat keys ".apply")) "1")
+             (= (state-get (str-concat keys ".job.busy")) "0")
+             (!= pid "")
+             (!= pid (or (state-get (str-concat keys ".job.applied")) "")))
+        (volume-filters-apply keys data)
+        #f))
+
+units:
+  volume_filters:
+    args: { data: volume, keys: volume_filters, title: Filters, id: volume_filters }
+    window: "{title}"
+    id: "{id}"
+    children:
+      - text: "volume"
+        bind: data.{data}.status
+        tooltip: "the dataset filtered (data.{data}.volume) and its state"
+      - combo: Filter
+        bind: "{keys}.filter"
+        options: [bilateral, contrast, anisotropic, gdtv]
+        default: bilateral
+        tooltip: "VolumeRover2's filters: bilateral, contrast enhancement, anisotropic diffusion, GDTV"
+      # bilateral (voxels::bilateralFilter)
+      - type: group
+        visible_when: (or (= (state-get "{keys}.filter") "bilateral") (= (or (state-get "{keys}.filter") "") ""))
+        children:
+          - slider_float: Radiometric sigma
+            bind: "{keys}.radiometric_sigma"
+            lo: 1.0
+            hi: 2000.0
+            def: 200.0
+            log: true
+            fmt: "%.1f"
+            tooltip: "how far apart two values may be and still blend, in data units (small keeps edges)"
+          - slider_float: Spatial sigma
+            bind: "{keys}.spatial_sigma"
+            lo: 0.1
+            hi: 8.0
+            def: 1.5
+            fmt: "%.2f"
+            tooltip: "how fast a neighbour's weight falls with its distance, in voxels"
+          - slider_int: Radius
+            bind: "{keys}.radius"
+            lo: 0
+            hi: 16
+            def: 2
+            tooltip: "the neighbourhood's half-width in voxels (2 is 5 x 5 x 5)"
+      # contrast enhancement (voxels::contrastEnhancement)
+      - type: group
+        visible_when: (= (state-get "{keys}.filter") "contrast")
+        children:
+          - slider_float: Resistor
+            bind: "{keys}.contrast.resistor"
+            lo: 0.0
+            hi: 1.0
+            def: 0.95
+            fmt: "%.3f"
+            tooltip: "how much of a neighbour's local minimum, maximum and mean carries over (near 1 spreads them far)"
+      # anisotropic diffusion (voxels::anisotropicDiffusion)
+      - type: group
+        visible_when: (= (state-get "{keys}.filter") "anisotropic")
+        children:
+          - slider_int: Iterations
+            bind: "{keys}.anisotropic.iterations"
+            lo: 1
+            hi: 200
+            def: 20
+            tooltip: "how many diffusion steps (more smooths further; up to 1000, ctrl-click to type)"
+      # GDTV (voxels::gdtvFilter)
+      - type: group
+        visible_when: (= (state-get "{keys}.filter") "gdtv")
+        children:
+          - slider_float: Exponent
+            bind: "{keys}.gdtv.exponent"
+            lo: 0.0
+            hi: 2.0
+            def: 1.0
+            fmt: "%.2f"
+            tooltip: "p in the flow of |grad u|^p: 1 is total variation, 2 linear diffusion"
+          - slider_float: Penalty factor
+            bind: "{keys}.gdtv.lambda"
+            lo: 0.000001
+            hi: 1.0
+            def: 0.0001
+            log: true
+            fmt: "%.2e"
+            tooltip: "lambda: how strongly each voxel is pulled back toward the input"
+          - slider_int: Iterations
+            bind: "{keys}.gdtv.iterations"
+            lo: 1
+            hi: 50
+            def: 1
+            tooltip: "how many Jacobi passes (up to 1000, ctrl-click to type)"
+          - combo: Neighbours
+            bind: "{keys}.gdtv.neighbours"
+            options: [six, twenty_six]
+            default: six
+            tooltip: "the faces' six neighbours, or all twenty-six (faces, edges and corners)"
+      - separator
+      - type: group
+        layout: { kind: horizontal }
+        children:
+          - button: Run
+            on: (volume-filters-run "{keys}" "{data}")
+            disabled_when: (or (= (state-get "{keys}.job.busy") "1") (!= (state-get "data.{data}.status") "ready"))
+            tooltip: "filter the dataset's volume with these parameters, as a job beside the frame"
+          - button: Stop
+            on: (job.cancel (int (state-get "{keys}.job.pid")))
+            enabled_when: (= (state-get "{keys}.job.stoppable") "1")
+            tooltip: "end the job at its next step; the dataset stays as it was"
+          - button: Apply
+            on: (volume-filters-apply "{keys}" "{data}")
+            disabled_when: (or (= (state-get "{keys}.job.busy") "1") (= (or (state-get "{keys}.job.pid") "") "") (= (state-get "{keys}.job.pid") (state-get "{keys}.job.applied")))
+            tooltip: "put the result back as the dataset's volume: every view of it redraws"
+          - button: Original
+            on: (data-reload "{data}")
+            tooltip: "make the dataset again from its source"
+      - checkbox: Apply when done
+        bind: "{keys}.apply"
+        def: true
+        tooltip: "put each result back once its job ends (the document calls volume-filters-step from on_tick)"
+      - progress: progress
+        bind: "{keys}.job.progress"
+        hi: 100
+        overlay: "{keys}.job.phase"
+      - text: "status"
+        bind: "{keys}.job.status"

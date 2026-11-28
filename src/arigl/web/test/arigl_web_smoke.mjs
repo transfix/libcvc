@@ -570,6 +570,23 @@ console.log = function(...a) { window.__out.push(a.join(' ')); return log.apply(
     check: v => v.state === 'running' && v.warnings.length === 0 &&
                 v.out.some(l => /volume_grid segment: segmented: 1 classes, [1-9]\d* voxels labelled, 1 surfaces \([1-9]\d* triangles\)/.test(l)),
   });
+  // The volume filters (VOLROVER-TEXMOL-APPS-ROADMAP.md V0): the volume_filters component runs
+  // contrast enhancement, anisotropic diffusion and GDTV on the bunny's field in turn, each a
+  // sliced task on the page, each result put back as the dataset's volume (rev 1 made, then 2, 3,
+  // 4); it prints one line once the last is back. Its `vf:` lines say where a failing run stopped.
+  const filtersDone = v => v.state === 'running' && v.warnings.length === 0 &&
+      v.out.some(l => /volume_filters: contrast, anisotropic and gdtv applied, rev 4; gdtv: 32 x 32 x 32 voxels/.test(l));
+  cases.push({
+    name: 'the volume filters run contrast, anisotropic and GDTV jobs and put each back (VolumeRover2\'s Tools)',
+    url: `${ORIGIN}/apps/app/?src=volume_filters.ari`,
+    inject: LOGGED,
+    check: filtersDone,
+    report: v => filtersDone(v) ? [] : [
+      ...v.warnings.map(w => 'warning: ' + w),
+      ...(v.warning ? ['page warning: ' + v.warning] : []),
+      ...v.out.slice(-12).map(l => 'out: ' + l),
+    ],
+  });
   // The volume_grid's contours (P10): its document traces the bunny's field on every other plane,
   // the tiler tiles the curves as a sliced task on the page, then three clicks draw a curve and a
   // fourth closes it; it prints one line once the tile is done and the curve closed. Its `vgc:`
