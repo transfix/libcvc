@@ -14433,7 +14433,15 @@ TEST(AriadneMounts, HotReloadKeepsTheResidentWhenItsProgramIsTheSame) {
 // A busy mount is held to its budget while the others run: its processes wait for the next frame
 // once its steps are spent (never killed), the other's on_tick: runs every frame, and after a few
 // seconds at its limit the shell's notice is posted, whose Allow more doubles its budget.
+//
+// Its steps alone hold it (no time limit), and few of them: each frame's pump stops at its own
+// backstop (kPumpMaxSeconds, 0.1 s, half of it the thread's CPU time) whatever the mounts' budgets,
+// and a mount the backstop cut short has not spent its budget, so it is not held that frame. A
+// loaded Debug coverage runner fit 4000 to 5000 of the busy loop's steps in a pump, so a budget of
+// 5000 was held some frames and not others there. 250, and the 500 Allow more makes it, fit
+// several times over.
 TEST(AriadneMounts, ABusyMountIsHeldToItsBudgetWhileTheOthersRun) {
+  constexpr std::uint64_t kSteps = 250;
   const fs::path dir = fs::temp_directory_path() / "ariadne_mounts_budget";
   fs::remove_all(dir);
   const fs::path worker = write_doc(dir, "worker.ari", kWorkerDoc);
@@ -14459,8 +14467,8 @@ on_tick: |
   double clock = 100.0; // a frame clock of the test's: a tenth of a second a frame
   rt.set_frame_clock(clock);
   cvc::state &tree = cvc::state::instance(app);
-  tree("ui.shell.apps.busy.budget.steps").value("5000");
-  tree("ui.shell.apps.busy.budget.time").value("0"); // steps alone: a slow machine holds the same
+  tree("ui.shell.apps.busy.budget.steps").value(std::to_string(kSteps));
+  tree("ui.shell.apps.busy.budget.time").value("0"); // steps alone: no wall clock decides it
   tree("ui.shell.apps.busy.uri").value(busy.generic_string());
   tree("ui.shell.apps.w.uri").value(worker.generic_string());
   const auto frame = [&] {
@@ -14491,15 +14499,15 @@ on_tick: |
   ASSERT_TRUE(b);
   EXPECT_TRUE(b->held);
   EXPECT_GE(b->holds, 10u) << "held every frame";
-  EXPECT_LE(most, 5000u + 64u) << "a frame's steps are its budget's";
-  EXPECT_GE(most, 4000u) << "and it uses them";
+  EXPECT_LE(most, kSteps + 64u) << "a frame's steps are its budget's";
+  EXPECT_GE(most, kSteps * 4 / 5) << "and it uses them";
   const std::optional<cvc::state_exec::process_info> still =
       app.exec_scheduler().get_process_info(spinner);
   ASSERT_TRUE(still.has_value());
   EXPECT_FALSE(cvc::state_exec::is_finished(still->status)) << "held, not killed";
   EXPECT_EQ(ival(app, "ui.shell.includes.busy.spins"), 1) << "still in its first tick's loop";
   EXPECT_EQ(sval(app, "ui.shell.ariadne.apps.busy.budget.held"), "1") << "the Processes view's";
-  EXPECT_EQ(sval(app, "ui.shell.ariadne.apps.busy.budget.max_steps"), "5000");
+  EXPECT_EQ(sval(app, "ui.shell.ariadne.apps.busy.budget.max_steps"), std::to_string(kSteps));
 
   // Over 3 seconds at its limit: the notice, once.
   for (int i = 0; i < 20; ++i)
@@ -14521,11 +14529,11 @@ on_tick: |
   frame();
   be.press.clear();
   frame();
-  EXPECT_EQ(ival(app, "ui.shell.apps.busy.budget.steps"), 10000);
+  EXPECT_EQ(ival(app, "ui.shell.apps.busy.budget.steps"), static_cast<int>(2 * kSteps));
   const std::vector<Runtime::MountState> doubled = rt.mounts();
   const Runtime::MountState *more = mount_named(doubled, "busy");
   ASSERT_TRUE(more);
-  EXPECT_EQ(more->budget.steps, 10000u);
+  EXPECT_EQ(more->budget.steps, 2 * kSteps);
   // Quit stops it.
   be.press = "Quit";
   frame();
@@ -14605,7 +14613,31 @@ on_tick: |
 // lets the documents with a scene mount (their scene is not drawn in a mount yet; their programs
 // run). A document this host refuses (it needs the network, a player, a relay) is listed, and
 // counts as not held.
+//
+// Each entry's budget.time is 0, so a hold is its steps' or its memory's, both held to the
+// defaults in every build. Its seconds are wall-clock time, which a loaded machine stretches
+// without bound while it runs something else: at twice as many busy threads as cores, an optimized
+// build's frames of under a millisecond took up to 184 ms now and then. So they are judged apart,
+// in an optimized build (the one the default is settled for): every frame but its kSpikes busiest
+// within the default. A Debug coverage build's are printed, not checked: a loaded runner spent 9.5
+// to 28.6 ms in nav_fleet_swarm's busiest frame there, around the 25 ms default.
 TEST(AriadneMounts, TheShippedExamplesKeepWithinTheLocalBudget) {
+#if defined(__has_feature)
+#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
+#define CVC_MOUNTS_TEST_SANITIZED 1
+#endif
+#endif
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+#define CVC_MOUNTS_TEST_SANITIZED 1
+#endif
+  // By the optimizer, not NDEBUG, which a Debug build can define; a sanitizer's steps cost more.
+#if (defined(__OPTIMIZE__) || (defined(_MSC_VER) && !defined(_DEBUG))) &&                          \
+    !defined(CVC_MOUNTS_TEST_SANITIZED)
+  constexpr bool kTimed = true;
+#else
+  constexpr bool kTimed = false;
+#endif
+  constexpr std::size_t kSpikes = 5; // frames of 60 a loaded machine may stretch (2 seen)
   const fs::path root = fs::path(__FILE__).parent_path().parent_path().parent_path().parent_path();
   const fs::path docs = root / "examples" / "ariadne" / "documents";
   if (!fs::exists(docs))
@@ -14647,6 +14679,7 @@ TEST(AriadneMounts, TheShippedExamplesKeepWithinTheLocalBudget) {
     if (names.count(id))
       id += "_2";
     names[id] = p.filename().string();
+    tree("ui.shell.apps." + id + ".budget.time").value("0"); // its seconds are judged below
     tree("ui.shell.apps." + id + ".uri").value(p.generic_string());
   }
   struct Most {
@@ -14654,6 +14687,7 @@ TEST(AriadneMounts, TheShippedExamplesKeepWithinTheLocalBudget) {
     double time = 0.0;
     std::uint64_t memory = 0;
     bool held = false;
+    std::vector<double> times; // each frame's seconds
   };
   std::map<std::string, Most> most;
   for (int frame = 0; frame < 60; ++frame) {
@@ -14663,6 +14697,7 @@ TEST(AriadneMounts, TheShippedExamplesKeepWithinTheLocalBudget) {
       Most &x = most[m.as];
       x.steps = std::max(x.steps, m.steps);
       x.time = std::max(x.time, m.time);
+      x.times.push_back(m.time);
       x.memory = std::max(x.memory, m.memory);
       x.held = x.held || m.held || m.holds > 0;
     }
@@ -14670,7 +14705,9 @@ TEST(AriadneMounts, TheShippedExamplesKeepWithinTheLocalBudget) {
   const Runtime::MountBudget local = Runtime::default_mount_budget("local");
   std::uint64_t top_steps = 0;
   double top_time = 0.0;
-  std::cout << "example                          principal  steps/frame  ms/frame  memory\n";
+  double top_usual = 0.0;
+  std::cout
+      << "example                          principal  steps/frame  ms/frame  ms/usual  memory\n";
   for (const Runtime::MountState &m : rt.mounts()) {
     const Most &x = most[m.as];
     if (!m.mounted) {
@@ -14679,19 +14716,28 @@ TEST(AriadneMounts, TheShippedExamplesKeepWithinTheLocalBudget) {
     }
     EXPECT_EQ(m.principal, "local") << names[m.as] << " is in the catalog";
     EXPECT_FALSE(x.held) << names[m.as] << " was held to its budget: " << x.steps << " steps, "
-                         << x.time << " s in its busiest frame";
+                         << x.memory << " bytes at most";
     EXPECT_LT(x.steps, local.steps / 4) << names[m.as] << ": a quarter of the default at most";
+    std::vector<double> times = x.times; // the busiest first
+    std::sort(times.rbegin(), times.rend());
+    const double usual = times.size() > kSpikes ? times[kSpikes] : 0.0;
+    if (kTimed)
+      EXPECT_LT(usual, local.time) << names[m.as] << ": every frame but its " << kSpikes
+                                   << " busiest within the default (busiest " << x.time << " s)";
     top_steps = std::max(top_steps, x.steps);
     top_time = std::max(top_time, x.time);
+    top_usual = std::max(top_usual, usual);
     char line[256];
-    std::snprintf(line, sizeof line, "  %-30s %-9s %10llu  %8.3f  %llu\n", names[m.as].c_str(),
-                  m.principal.c_str(), static_cast<unsigned long long>(x.steps), x.time * 1e3,
+    std::snprintf(line, sizeof line, "  %-30s %-9s %10llu  %8.3f  %8.3f  %llu\n",
+                  names[m.as].c_str(), m.principal.c_str(),
+                  static_cast<unsigned long long>(x.steps), x.time * 1e3, usual * 1e3,
                   static_cast<unsigned long long>(x.memory));
     std::cout << line;
   }
-  std::cout << "busiest: " << top_steps << " steps, " << top_time * 1e3
-            << " ms in a frame (local: " << local.steps << " steps, " << local.time * 1e3
-            << " ms)\n";
+  std::cout << "busiest: " << top_steps << " steps, " << top_time * 1e3 << " ms in a frame, "
+            << top_usual * 1e3 << " ms in all but " << kSpikes << " (local: " << local.steps
+            << " steps, " << local.time * 1e3
+            << (kTimed ? " ms)\n" : " ms; seconds not checked in this build)\n");
   fs::remove_all(dir);
 }
 
