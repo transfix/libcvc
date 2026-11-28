@@ -84,6 +84,8 @@ void avatar_panel::update(const holon &h, cvc::app &app, const std::string &room
   _policy = h.energy_policy();
   _body = h.body();
   _controller = h.controller().id;
+  if (!h.motion(pid, _motion))
+    _motion = avatar_motion::walking;
   const cvc::physics::vec3 g = h.rules().physics.gravity;
   _gravity = std::sqrt(g.x * g.x + g.y * g.y + g.z * g.z);
   refresh_look(app, room, pid);
@@ -147,6 +149,9 @@ void avatar_panel::publish(cvc::app &app, const std::string &prefix) const {
   put("body", printf_str("%.2f x %.2f x %.2f m box, ", _body.width, _body.width, _body.height) +
                   printf_str("%.0f kg", _body.mass));
   put("controller", _controller);
+  put("density", printf_str("%.0f kg/m^3", _body.density) +
+                     (_body.density < 1000.0 ? ": floats head-out" : ": sinks in fresh water"));
+  put("motion", avatar_motion_name(_motion));
 
   const avatar_energy_policy &p = _policy;
   const double carry =
@@ -218,6 +223,9 @@ void avatar_panel::publish(cvc::app &app, const std::string &prefix) const {
           (b.distance >= 10.0 ? printf_str(", %.1f kJ/km", spent / 1000.0 / (b.distance / 1000.0))
                               : std::string()) +
           "; peak " + watts(b.peak_power) + "; exhausted " + duration(b.exhausted_time));
+  put("ledger.swam", b.swam_distance > 0.0 || b.swam > 0.0
+                         ? printf_str("%.0f m for ", b.swam_distance) + joules(b.swam)
+                         : std::string("none"));
   const double out = b.work + b.carried + b.overflow;
   put("ledger.share.work", printf_str("%.4f", out > 0.0 ? b.work / out : 0.0));
   put("ledger.share.carried", printf_str("%.4f", out > 0.0 ? b.carried / out : 0.0));

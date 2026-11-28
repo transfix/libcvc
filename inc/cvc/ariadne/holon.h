@@ -221,6 +221,8 @@ public:
   // pid is ignored -- a client cannot drive a peer). Either way the intent passes
   // sanitize_intent first.
   void set_intent(const std::string &pid, const avatar_intent &in);
+  // PID's intent now (the last set_intent, or the queued one in force); false for an unknown pid.
+  bool intent(const std::string &pid, avatar_intent &out) const;
 
   // The server's VETO over a proposed intent (§5h propose -> veto -> override), under the policy
   // in force now: a non-finite move is no move, a non-finite yaw faces +X, the vertical is dropped

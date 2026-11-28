@@ -1168,6 +1168,14 @@ bool holon::energy(const std::string &pid, avatar_energy &out) const {
   return true;
 }
 
+bool holon::intent(const std::string &pid, avatar_intent &out) const {
+  const auto it = _participants.find(pid);
+  if (it == _participants.end())
+    return false;
+  out = it->second.intent;
+  return true;
+}
+
 bool holon::motion(const std::string &pid, avatar_motion &out) const {
   if (!_world || !_world->has_avatar(pid))
     return false;

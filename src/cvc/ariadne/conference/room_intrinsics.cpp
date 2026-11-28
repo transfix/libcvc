@@ -812,10 +812,12 @@ void register_room_intrinsics(cvc::app &app) {
                                 return se::make_dict({{"ok", se::value_t(true)}});
                               });
 
-    // (room-set-intent HANDLE MOVE-X MOVE-Y MOVE-Z) -> { ok #t/#f }. The caller
+    // (room-set-intent HANDLE MOVE-X MOVE-Y MOVE-Z [YAW [JUMP]]) -> { ok #t/#f }. The caller
     // PROPOSES its own avatar's desired motion by writing only its own .intent.*
     // (the server holon is the sole writer of the authoritative .pose). The handle
-    // supplies the caller's pid, so a client cannot propose for another participant.
+    // supplies the caller's pid, so a client cannot propose for another participant. MOVE-Z is a
+    // swimmer's dive (below 0) or rise, a share from -1 to 1 (walker@2); JUMP (#t or not 0) holds
+    // the jump, a swimmer's stroke up.
     se::builtins::register_fn(
         env, "room-set-intent", [&app, doc](std::span<const se::value_t> args) -> se::value_t {
           if (!doc)
@@ -824,7 +826,8 @@ void register_room_intrinsics(cvc::app &app) {
           if (!tbl)
             return err("room-set-intent: internal: room-table slot unavailable");
           if (args.size() < 4)
-            return err("room-set-intent: (room-set-intent HANDLE MOVE-X MOVE-Y MOVE-Z [YAW])");
+            return err(
+                "room-set-intent: (room-set-intent HANDLE MOVE-X MOVE-Y MOVE-Z [YAW [JUMP]])");
           room_handle *rh = tbl->find(handle_token(args[0]));
           if (!rh)
             return err("room-set-intent: ROOM must be a room-join handle (needs the caller's pid)");
@@ -835,6 +838,12 @@ void register_room_intrinsics(cvc::app &app) {
             in.yaw = get_num(&args[4]);
           else if (in.move.x != 0.0 || in.move.y != 0.0)
             in.yaw = std::atan2(in.move.y, in.move.x);
+          if (args.size() >= 6) {
+            if (const bool *b = std::get_if<bool>(&args[5].v))
+              in.jump = *b;
+            else
+              in.jump = get_num(&args[5]) != 0.0;
+          }
           cvc::ariadne::write_intent(app, rh->room_id, rh->self_pid, in);
           return se::make_dict({{"ok", se::value_t(true)}});
         });

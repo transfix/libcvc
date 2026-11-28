@@ -34,8 +34,12 @@ namespace ariadne {
 // reverse and steering: neither can strafe). Getting in switches the participant to its
 // vehicle's scheme, getting out back to walking.
 //
-//   walk   forward, backward, strafe_left, strafe_right, jump, mouse_look (toggles it), interact,
-//          look_left, look_right, look_up, look_down
+//   walk   forward, backward, strafe_left, strafe_right, jump, dive, mouse_look (toggles it),
+//          interact, look_left, look_right, look_up, look_down
+//
+// A person swims with the walk scheme (walker@2, ARIADNE_WORLDS.md section 18.10): the walk keys
+// swim, jump is a stroke up (surfacing, climbing out), and dive (C or Left Ctrl, the left stick
+// pressed) dives while held. There is no scheme of its own to switch to at the shore.
 //   car    throttle, reverse, brake, steer_left, steer_right, interact, and the look_ four
 //   boat   the car's, with no brake (its reverse is the propeller astern)
 //
@@ -52,9 +56,9 @@ namespace ariadne {
 //   sticks   LeftX, LeftY, RightX, RightY: -1 to 1, Y down; a binding takes one half of an axis
 //            by its sign, "LeftY-" the left stick pushed forward, "LeftX+" pushed right
 //
-// By default a gamepad walks on the left stick and looks around on the right, jumps on A and gets
-// in and out on X held; driving, the left stick steers, RT is the throttle, LT the brake (a
-// boat's reverse), LB a car's reverse.
+// By default a gamepad walks on the left stick and looks around on the right, jumps on A, dives on
+// the left stick pressed and gets in and out on X held; driving, the left stick steers, RT is the
+// throttle, LT the brake (a boat's reverse), LB a car's reverse.
 //
 // A host keeps each scheme's bindings in its state so the Controls window can change them
 // (arigl: <viewer>.avatar.keys.<action> for walk, as before, and
