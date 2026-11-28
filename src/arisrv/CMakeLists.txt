@@ -610,6 +610,51 @@ if(CVC_BUILD_TESTS AND NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
       set_tests_properties(arisrvx_rcon_admin_role PROPERTIES
                            SKIP_REGULAR_EXPRESSION "No module named '(fastapi|uvicorn|starlette)';built without yaml-cpp;needs pycvc beside arisrvx;no pycvc to convert"
                            TIMEOUT 120)
+      # A program's connections in the client list (ID5b, ID4c): tests/clients_program_service.py
+      # opens them through host.clients as an NMDC hub would, the admin lists them, and
+      # server.kick and server.ban reach them through the program's closer.
+      set(_id_clients_relay --relay-arg=--python
+                            "--relay-arg=${_srv_tests}/clients_program_service.py"
+                            --relay-arg=--rcon-password-file
+                            "--relay-arg=${_srv_tests}/rcon_password.txt")
+      foreach(_a IN LISTS CVC_ARIADNE_PYTHON_TEST_PATH)
+        list(APPEND _id_clients_relay "--relay-arg=${_a}")
+      endforeach()
+      add_test(NAME arisrvx_clients_program
+               COMMAND ${_id_pair} --relay $<TARGET_FILE:arisrvx> --client $<TARGET_FILE:ari>
+                       --scheme grpc ${_id_relay} ${_id_clients_relay} --client-only
+                       --client-arg=--relay-room --client-arg=ctest
+                       "--client-arg=${_srv_tests}/clients_program.ari")
+      cvc_ariadne_python_test_properties(arisrvx_clients_program)
+      set_tests_properties(arisrvx_clients_program PROPERTIES
+                           SKIP_REGULAR_EXPRESSION "No module named '(fastapi|uvicorn|starlette)';built without yaml-cpp;needs pycvc beside arisrvx;no pycvc to convert"
+                           TIMEOUT 120)
+      # A guest password through the authenticate hook (ID4c): tests/guest_hook_service.py admits a
+      # connection whose bearer host.guest_password_ok accepts (the relay compares it), and
+      # refuses a wrong one.
+      set(_id_guest_hook --relay-arg=--python "--relay-arg=${_srv_tests}/guest_hook_service.py")
+      foreach(_a IN LISTS CVC_ARIADNE_PYTHON_TEST_PATH)
+        list(APPEND _id_guest_hook "--relay-arg=${_a}")
+      endforeach()
+      add_test(NAME arisrvx_guest_password_hook
+               COMMAND ${_id_pair} --relay $<TARGET_FILE:arisrvx> --client $<TARGET_FILE:ari>
+                       --scheme grpc ${_id_relay} ${_id_guest} ${_id_guest_hook} --client-only
+                       "--client-env=CVC_ARIADNE_GUEST_PASSWORD=correct horse battery staple"
+                       --client-arg=--relay-room --client-arg=ctest
+                       "--client-arg=${_srv_tests}/guest_hook.ari")
+      add_test(NAME arisrvx_guest_password_hook_refuses
+               COMMAND ${_id_pair} --relay $<TARGET_FILE:arisrvx> --client $<TARGET_FILE:ari>
+                       --scheme grpc ${_id_relay} ${_id_guest} ${_id_guest_hook} --client-only
+                       --client-status 1 "--client-expect=refused this host \\(unauthenticated"
+                       "--client-env=CVC_ARIADNE_GUEST_PASSWORD=wrong horse battery staple"
+                       --client-arg=--relay-room --client-arg=ctest
+                       "--client-arg=${_srv_tests}/guest_hook.ari")
+      cvc_ariadne_python_test_properties(arisrvx_guest_password_hook)
+      cvc_ariadne_python_test_properties(arisrvx_guest_password_hook_refuses)
+      set_tests_properties(arisrvx_guest_password_hook arisrvx_guest_password_hook_refuses
+                           PROPERTIES
+                           SKIP_REGULAR_EXPRESSION "No module named '(fastapi|uvicorn|starlette)';built without yaml-cpp;needs pycvc beside arisrvx;no pycvc to convert"
+                           TIMEOUT 120)
     endif()
   endif()
 endif()

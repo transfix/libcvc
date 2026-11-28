@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cvc/state/state.h>
+#include <cvc/state/state_identity.h> // constant_time_equal
 #include <iterator>
 #include <memory>
 #include <unordered_set>
@@ -271,6 +272,28 @@ std::vector<ServerLink::BridgeOp> ServerLink::take_bridge_ops(std::size_t max) {
   out.assign(std::make_move_iterator(bridge_ops_.begin()), std::make_move_iterator(end));
   bridge_ops_.erase(bridge_ops_.begin(), end);
   return out;
+}
+
+void ServerLink::client_op(ClientOp op) {
+  std::lock_guard<std::mutex> lk(client_ops_mu_);
+  client_ops_.push_back(std::move(op));
+}
+
+std::vector<ServerLink::ClientOp> ServerLink::take_client_ops(std::size_t max) {
+  std::lock_guard<std::mutex> lk(client_ops_mu_);
+  std::vector<ClientOp> out;
+  if (max == 0 || client_ops_.size() <= max) {
+    out.swap(client_ops_);
+    return out;
+  }
+  const auto end = client_ops_.begin() + static_cast<std::ptrdiff_t>(max);
+  out.assign(std::make_move_iterator(client_ops_.begin()), std::make_move_iterator(end));
+  client_ops_.erase(client_ops_.begin(), end);
+  return out;
+}
+
+bool ServerLink::guest_password_ok(const std::string &bearer) const {
+  return !guest_bearer_.empty() && cvc::constant_time_equal(bearer, guest_bearer_);
 }
 
 void ServerLink::disconnect(std::string principal) {

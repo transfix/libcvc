@@ -1,0 +1,12 @@
+# The client for ctest arisrvx_guest_password_hook (ARISRV_IDENTITY.md 2.4, ID4c): arisrvx with
+# --guest-password-file and tests/guest_hook_service.py's authenticate hook, which admits a
+# connection whose bearer host.guest_password_ok accepts. This client sends the password's hash
+# (CVC_ARIADNE_GUEST_PASSWORD), so the hook admits it as its guest principal.
+meta: { name: a guest password through arisrvx's authenticate hook, min_libcvc: 4.0.9 }
+tests:
+  a_the_hook_admits_the_guest_password: |
+    (while (not (= (state-get "relay.status") "joined")) (sleep 0.05))
+    (let ((me (room-call "me")))
+      (assert (= (get-attr me "id") "guest") me)
+      (assert (= (nth (get-attr me "roles") 0) "guest") me)
+      (assert (not (get-attr me "other_bearer")) me))

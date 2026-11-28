@@ -1,0 +1,82 @@
+# The client for ctest arisrvx_clients_program (ARISRV_IDENTITY.md 2.8, ID4c): connections the
+# relay's Python program serves (as an NMDC hub's users would be) are in the relay's client list,
+# under the program's keys, with their kind, capabilities and nick, and an admin's server.kick and
+# server.ban reach them through the program's closer, which is told the reason and which it was.
+# The program reads the list too (host.clients, ctx.client), and its geolocate hook places this
+# client's connection.
+meta: { name: a program's connections in arisrvx's client list, min_libcvc: 4.0.9 }
+tests:
+  a_an_admin_logs_in: |
+    (while (not (= (state-get "relay.status") "joined")) (sleep 0.05))
+    (assert (get-attr (room-call "server.rcon" "rcon test password") "admin"))
+  b_a_programs_connection_is_listed: |
+    (let ((id (room-call "open_nmdc" "nmdc:1" "198.51.100.9:41234" "nmdcuser")))
+      (assert (not (= id "")) id)
+      (let ((rec (room-call "server.client" id)))
+        (assert (= (get-attr rec "username") "nmdcuser") rec)
+        (assert (= (get-attr rec "kind") "nmdc") rec)
+        (assert (get-attr rec "active") rec)
+        (assert (= (nth (get-attr rec "capabilities") 2) "files.share") rec)
+        (let ((c (nth (get-attr rec "connections") 0)))
+          (assert (get-attr c "engine") c)
+          (assert (= (get-attr c "key") "nmdc:1") c)
+          (assert (= (get-attr c "transport") "nmdc") c)
+          (assert (= (get-attr c "public") "198.51.100.9") c)
+          (assert (= (get-attr c "version") "<DC++ V:0.868>") c)
+          (assert (= (get-attr (get-attr c "geo") "city") "Austin") c)))
+      (assert (>= (length (room-call "server.clients")) 2)))
+  c_the_registry_refuses_what_it_should: |
+    (assert (= (room-call "try_open" "nmdc:1" "198.51.100.9:41234") "invalid") "a key open already")
+    (assert (= (room-call "try_open" "no key" "198.51.100.9:41234") "invalid") "a bad key")
+    (let ((other (room-call "try_open" "nmdc:2" "198.51.100.10:5000")))
+      (assert (not (= other (room-call "client_of" "nmdc:1"))) "another address's client"))
+    (assert (= (room-call "try_name" "nmdc:2" "nmdcuser") "invalid") "another client has it")
+    (assert (= (room-call "try_name" "nmdc:9" "x") "unavailable") "no such connection")
+    (let ((twice (room-call "close_twice" "nmdc:2")))
+      (assert (nth twice 0) twice)
+      (assert (not (nth twice 1)) twice))
+  d_server_kick_reaches_the_programs_closer: |
+    (let ((id (room-call "client_of" "nmdc:1")))
+      (assert (= (room-call "server.kick" id "spam") 1))
+      (while (< (length (room-call "closed_log")) 1) (sleep 0.05))
+      (let ((e (nth (room-call "closed_log") 0)))
+        (assert (= (nth e 0) "nmdc:1") e)
+        (assert (= (nth e 1) "spam") e)
+        (assert (= (nth e 2) "kick") e))
+      (while (get-attr (room-call "server.client" id) "active") (sleep 0.05))
+      (assert (not (get-attr (nth (get-attr (room-call "server.client" id) "connections") 0)
+                             "active"))))
+  e_server_ban_closes_it_and_refuses_the_next: |
+    (let ((id (room-call "open_nmdc" "nmdc:3" "198.51.100.9:41300" "nmdcuser")))
+      (assert (= id (room-call "client_of" "nmdc:1")) "the same address's client")
+      (assert (get-attr (room-call "server.ban" id "go away") "banned"))
+      (while (< (length (room-call "closed_log")) 2) (sleep 0.05))
+      (let ((e (nth (room-call "closed_log") 1)))
+        (assert (= (nth e 0) "nmdc:3") e)
+        (assert (= (nth e 1) "go away") e)
+        (assert (= (nth e 2) "ban") e))
+      (assert (= (room-call "try_open" "nmdc:4" "198.51.100.9:41301") "forbidden"))
+      (assert (not (get-attr (room-call "server.unban" id) "banned")))
+      (assert (= (room-call "try_open" "nmdc:5" "198.51.100.9:41302") id))
+      (assert (nth (room-call "close_twice" "nmdc:5") 0)))
+  f_the_program_reads_the_list: |
+    (let ((me (get-attr (room-call "server.whoami") "client_id"))
+          (ctx (room-call "my_client")))
+      (assert (= (get-attr ctx "client_id") me) ctx)
+      (assert (= (get-attr ctx "kind") "unknown") "this ari sends no Hello.client yet")
+      (assert (get-attr ctx "admin") "rcon made this connection an admin")
+      (let ((nmdc (room-call "client_of" "nmdc:1")))
+        (let ((r (room-call "record" nmdc)))
+          (assert (= (get-attr r "username") "nmdcuser") r)
+          (assert (= (get-attr r "kind") "nmdc") r)
+          (assert (not (get-attr r "active")) r)
+          (assert (get-attr r "engine") r))
+        (let ((ids (room-call "active_ids")))
+          (assert (= (length ids) 1) ids)
+          (assert (= (nth ids 0) me) ids)))
+      (assert (= (room-call "record" "cnobody") nil)))
+  g_the_geolocate_hook_places_this_connection: |
+    (let ((me (get-attr (room-call "server.whoami") "client_id")))
+      (while (not (= (get-attr (room-call "record" me) "city") "loopback")) (sleep 0.1))
+      (let ((c (nth (get-attr (room-call "server.client" me) "connections") 0)))
+        (assert (= (get-attr (get-attr c "geo") "country") "ZZ") c)))
