@@ -11,7 +11,7 @@ contain, and what a reader does with it. It has two halves.
 [ARIADNE.md](ARIADNE.md) is the guide. It explains, shows examples and names the code; it is
 informative. Where it and this file disagree, this file is right and the guide has a defect.
 
-**Status: describes libcvc 4.0.10 (master daf6367fc).** It covers the document as a whole: its
+**Status: describes libcvc 4.0.10 (master fc507d7e0).** It covers the document as a whole: its
 text (§2), its version gate (§3), loading (§4), starting (§5), frames (§6), programs and state
 paths (§7), and every top-level block (§8). The scene's node semantics, the widget types and
 the DSL's built-ins are not written here yet (§10); for those the guide is the reference. Where
@@ -386,7 +386,7 @@ A mounted module sees nothing of its parent's state unless the mount grants it a
 - `name: target` grants `name`, inside the module's scope, as a read-write view of `target`,
   which resolves in the scope the mount stands in.
 - `name: {to: target, mode: ro|rw}` grants it read-only unless the mode is `rw`. A missing mode
-  is read-only (§9). Any mode but `ro` or `rw` warns and is read-only. Modes compare without
+  is read-only. Any mode but `ro` or `rw` warns and is read-only. Modes compare without
   regard to case.
 - A hole name with a leading `/` would escape the module's scope: it warns and is skipped.
 - A read through a hole reads the target; a write through a read-write hole writes the target,
@@ -811,7 +811,6 @@ in the code.
 
 | Rule | What libcvc does | Where |
 |---|---|---|
-| §7.3: a map-form `link:` hole with no `mode:` is read-only. | It is read-write: the mode defaults to `rw`. No shipped document has a map-form hole without a mode. | `expand_load`, `loader.cpp` |
 | §3: a `load:` fragment's `min_libcvc` gates it. | Only a `mounts:` entry is gated; a static `load:` fragment is not. | `read_fragment`, `loader.cpp` |
 | §2.1: a reader warns about a repeated key. | It does not. The loader reads the first of the two, and the schema check the last. | yaml-cpp lookups; `yaml_to_json`, `loader.cpp` |
 | §2.1: a reader warns about a second YAML document in a file. | It reads the first and ignores the rest without a warning. | `load_file`, `loader.cpp` |

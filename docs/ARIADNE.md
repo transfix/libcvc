@@ -6818,8 +6818,7 @@ A mounted module is sandboxed to its sub-prefix. Access to the parent's state is
 - scalar `name: target` grants read-write;
 - map `name: {to:, mode: ro|rw}` **fails closed** — only an exact `"rw"` mode is
   writable (`expand_load`, [`loader.cpp`](../src/cvc/ariadne/loader.cpp)); anything else is
-  read-only. A hole whose name starts with `/` is rejected. (libcvc 4.0.10 still reads a
-  *missing* mode as `rw`, against this rule; [`ARIADNE_SPEC.md`](ARIADNE_SPEC.md) §9.)
+  read-only, a missing mode too. A hole whose name starts with `/` is rejected.
 
 At reconcile, `wire_holes` ([`ariadne.cpp`](../src/cvc/ariadne/ariadne.cpp)) plants a
 transparent link at `resolve_bind(sub_prefix, name)` pointing to
