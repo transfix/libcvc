@@ -168,6 +168,22 @@ void write_avatar_reserve(cvc::app &app, const std::string &room_id, const std::
 bool read_avatar_reserve(cvc::app &app, const std::string &room_id, const std::string &pid,
                          double &joules, std::uint64_t &server_tick);
 
+// ----------------
+// Each avatar's motion (walker@2, ARIADNE_WORLDS.md section 18.10, OW9c)
+// ----------------
+//   conf.rooms.<room>.participants.<pid>.motion   "walking" | "wading" | "swimming", relay-owned
+//
+// What its controller is doing in the water, for drawing it (a swimmer lies forward). The relay
+// writes it when it changes; never for an avatar that has only walked, so a dry world's tree is
+// as it was.
+
+void write_avatar_motion(cvc::app &app, const std::string &room_id, const std::string &pid,
+                         avatar_motion motion);
+// False when the relay has published none for PID (it has only walked), or one this build does
+// not know.
+bool read_avatar_motion(cvc::app &app, const std::string &room_id, const std::string &pid,
+                        avatar_motion &out);
+
 } // namespace conference
 } // namespace ariadne
 } // namespace cvc

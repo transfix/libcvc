@@ -14,6 +14,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cvc/ariadne/ariadne.h> // register_action_intrinsics
+#include <cvc/ariadne/net_intrinsics.h> // NetAccess: each principal's policy and credentials
 #include <cvc/ariadne/oidc_host.h>
 #include <cvc/core/app.h>
 #include <cvc/core/sliced_task.h> // threads_available
@@ -176,9 +177,12 @@ public:
     revoke,        // a revocation is out
   };
 
-  Session(const std::shared_ptr<Host> &host, std::string name);
+  // A sign-in of credential `name` for the programs that `access` is for (its owner: their
+  // principal), with their policy and their view of the store.
+  Session(const std::shared_ptr<Host> &host, std::string name, const NetAccess &access);
 
   const std::string &name() const { return name_; }
+  const std::shared_ptr<cvc::net::CredentialStore> &store() const { return store_; }
   std::string refresh_name() const { return name_ + ".refresh"; }
   std::string id_name() const { return name_ + ".id"; }
 
@@ -264,6 +268,7 @@ private:
   std::shared_ptr<cvc::net::CredentialStore> store_;
   OidcHostConfig config_;
   std::string name_;
+  std::string owner_;      // NetAccess::owner: whose sign-in this is
   mutable std::mutex m_;   // status_, version_, provider_, opts_, status_path_
   std::mutex renew_mutex_; // one renewal at a time
   Status status_;
@@ -323,18 +328,27 @@ struct CachedProvider {
 
 struct Host : std::enable_shared_from_this<Host> {
   cvc::app *app = nullptr;
-  std::shared_ptr<const cvc::net::NetPolicy> policy;
-  std::shared_ptr<cvc::net::CredentialStore> store;
+  // The launcher's access (the `local` principal's), and each program's by its scope
+  // (docs/roadmap/ARIADNE_SHELL.md 4.12): a sign-in is kept under its program's principal, with
+  // that principal's policy.
+  NetAccess base;
+  NetAccessFor for_scope;
   std::shared_ptr<const std::atomic<bool>> live;
   OidcHostConfig config;
   std::mutex m; // sessions, providers
+  // By owner and credential name (session_key): one principal's sign-in is not another's.
   std::map<std::string, std::shared_ptr<Session>> sessions;
-  std::map<std::string, CachedProvider> providers;
+  std::map<std::string, CachedProvider> providers; // by owner and issuer
   std::chrono::steady_clock::time_point last_open{};
-
-  // The pinned issuers: the flags' and the policy's oidc lines. Empty: any the policy allows.
-  bool pinned() const { return !policy->oidc_issuers().empty(); }
 };
+
+// The pinned issuers: the flags' and the policy's oidc lines. Empty: any the policy allows.
+bool pinned(const cvc::net::NetPolicy &policy) { return !policy.oidc_issuers().empty(); }
+
+// A session's key, and a cached provider's: its owner's, then its name (or issuer).
+std::string owned_key(const std::string &owner, const std::string &name) {
+  return owner + '\n' + name;
+}
 
 // The origins besides the issuer's its endpoints may be at (the policy's oidc line).
 std::vector<cvc::net::Origin> endpoint_origins(const cvc::net::NetPolicy &policy,
@@ -351,9 +365,9 @@ void run_job(cvc::app *app, std::function<void()> job) {
   job();
 }
 
-Session::Session(const std::shared_ptr<Host> &host, std::string name)
-    : host_(host), app_(host->app), policy_(host->policy), store_(host->store),
-      config_(host->config), name_(std::move(name)) {}
+Session::Session(const std::shared_ptr<Host> &host, std::string name, const NetAccess &access)
+    : host_(host), app_(host->app), policy_(access.policy), store_(access.credentials),
+      config_(host->config), name_(std::move(name)), owner_(access.owner) {}
 
 // An app's sign-in host: set while enable_oidc has it on.
 struct oidc_slot {
@@ -382,8 +396,11 @@ void Session::set_status(const std::function<void(Status &)> &edit, bool termina
     path = status_path_;
   }
   // A program waiting with (msg-recv "oidc#NAME") hears of the end. On group 0: a document that
-  // uses oidc is never isolated (S1-Q6), and a "#" key is never scoped to a document anyway.
-  if (terminal && app_)
+  // uses oidc is never isolated (S1-Q6), and a "#" key is never scoped to a document anyway. So
+  // only the launcher's own principal's sign-ins are posted there: another principal's program
+  // could listen on the same key (docs/roadmap/ARIADNE_SHELL.md 4.12), so a mounted document's
+  // sign-in reports at its status path and (oidc-status NAME) only.
+  if (terminal && app_ && (owner_.empty() || owner_ == cvc::net::kLocalPrincipal))
     app_->exec_scheduler().post_message("oidc#" + name_, status_dict(copy, name_));
 }
 
@@ -496,7 +513,7 @@ std::string Session::start(SignInOptions opts, std::string status_path) {
   // A provider read within the hour is used again.
   if (const std::shared_ptr<Host> host = host_.lock()) {
     std::lock_guard<std::mutex> lock(host->m);
-    const auto it = host->providers.find(opts_.issuer);
+    const auto it = host->providers.find(owned_key(owner_, opts_.issuer));
     if (it != host->providers.end() && steady::now() - it->second.at < std::chrono::hours(1)) {
       std::lock_guard<std::mutex> l2(m_);
       provider_ = it->second.provider;
@@ -1200,7 +1217,7 @@ void Session::handle(cvc::net::HttpResponse &reply) {
       return fail("discovery_failed", why);
     if (const std::shared_ptr<Host> host = host_.lock()) {
       std::lock_guard<std::mutex> lock(host->m);
-      host->providers[opts_.issuer] = CachedProvider{*p, steady::now()};
+      host->providers[owned_key(owner_, opts_.issuer)] = CachedProvider{*p, steady::now()};
     }
     {
       std::lock_guard<std::mutex> lock(m_);
@@ -1410,7 +1427,7 @@ std::string credential_option(const std::string &name, const char *verb) {
   return name;
 }
 
-SignInOptions parse_sign_in(const Host &host, std::span<const se::value_t> args) {
+SignInOptions parse_sign_in(const cvc::net::NetPolicy &policy, std::span<const se::value_t> args) {
   const char *verb = "oidc-sign-in";
   SignInOptions o;
   bool scope_given = false;
@@ -1480,15 +1497,15 @@ SignInOptions parse_sign_in(const Host &host, std::span<const se::value_t> args)
     o.scope = "openid";
   if (const std::string why = oidc::check_issuer(o.issuer); !why.empty())
     throw std::runtime_error("oidc-sign-in: " + why);
-  if (!host.policy->allows(*cvc::net::parse_origin(o.issuer)))
+  if (!policy.allows(*cvc::net::parse_origin(o.issuer)))
     throw std::runtime_error("oidc-sign-in: the host does not allow " +
                              cvc::net::parse_origin(o.issuer)->str() +
                              " (its launcher allows an issuer with --oidc-issuer, --net-allow or "
                              "an oidc policy line)");
-  const cvc::net::OidcIssuer *pin = host.policy->oidc_issuer(o.issuer);
-  if (host.pinned() && !pin) {
+  const cvc::net::OidcIssuer *pin = policy.oidc_issuer(o.issuer);
+  if (pinned(policy) && !pin) {
     std::string names;
-    for (const cvc::net::OidcIssuer &i : host.policy->oidc_issuers())
+    for (const cvc::net::OidcIssuer &i : policy.oidc_issuers())
       names += (names.empty() ? "" : ", ") + i.issuer;
     throw std::runtime_error("oidc-sign-in: this host signs in only with " + names + ", not " +
                              o.issuer);
@@ -1507,21 +1524,26 @@ std::string absolute_path(se::intrinsics_context &ictx, const std::string &path)
   return root.empty() ? path : root + cvc::state::SEPARATOR + path;
 }
 
-std::shared_ptr<Session> session_for(Host &host, const std::string &name, bool make) {
+// The sign-in of credential `name` that the programs `access` is for keep (made with `make`).
+std::shared_ptr<Session> session_for(Host &host, const NetAccess &access, const std::string &name,
+                                     bool make) {
+  const std::string key = owned_key(access.owner, name);
   std::lock_guard<std::mutex> lock(host.m);
-  const auto it = host.sessions.find(name);
+  const auto it = host.sessions.find(key);
   if (it != host.sessions.end())
     return it->second;
   if (!make)
     return nullptr;
-  auto s = std::make_shared<Session>(host.shared_from_this(), name);
-  host.sessions.emplace(name, s);
+  auto s = std::make_shared<Session>(host.shared_from_this(), name, access);
+  host.sessions.emplace(key, s);
   return s;
 }
 
-void register_verbs(const std::weak_ptr<Host> &weak_host,
+void register_verbs(const std::weak_ptr<Host> &weak_host, const NetAccess &access,
                     const std::shared_ptr<se::environment> &env, se::intrinsics_context &ictx) {
   se::intrinsics_context *ctx = &ictx;
+  if (!access.policy || !access.credentials)
+    return; // a principal whose network could not be built: no sign-in
   const auto live_host = [weak_host](const char *verb) {
     std::shared_ptr<Host> h = weak_host.lock();
     if (!h || (h->live && !h->live->load()))
@@ -1530,23 +1552,24 @@ void register_verbs(const std::weak_ptr<Host> &weak_host,
   };
   // (oidc-sign-in OPTS): start (or resume) a sign-in. Returns "started", or "in_progress" when one
   // is already under way for that credential.
-  se::builtins::register_fn(env, "oidc-sign-in",
-                            [live_host, ctx](std::span<const se::value_t> args) -> se::value_t {
-                              std::shared_ptr<Host> h = live_host("oidc-sign-in");
-                              SignInOptions o = parse_sign_in(*h, args);
-                              const std::string path = absolute_path(*ctx, o.status);
-                              std::shared_ptr<Session> s = session_for(*h, o.credential, true);
-                              return se::value_t(s->start(std::move(o), path));
-                            });
+  se::builtins::register_fn(
+      env, "oidc-sign-in",
+      [live_host, ctx, access](std::span<const se::value_t> args) -> se::value_t {
+        std::shared_ptr<Host> h = live_host("oidc-sign-in");
+        SignInOptions o = parse_sign_in(*access.policy, args);
+        const std::string path = absolute_path(*ctx, o.status);
+        std::shared_ptr<Session> s = session_for(*h, access, o.credential, true);
+        return se::value_t(s->start(std::move(o), path));
+      });
   // (oidc-cancel NAME): stop a sign-in in progress. #t if there was one.
   se::builtins::register_fn(
-      env, "oidc-cancel", [live_host](std::span<const se::value_t> args) -> se::value_t {
+      env, "oidc-cancel", [live_host, access](std::span<const se::value_t> args) -> se::value_t {
         std::shared_ptr<Host> h = live_host("oidc-cancel");
         if (args.empty())
           throw std::runtime_error("oidc-cancel: name the credential");
         const std::string name =
             credential_option(string_option(args[0], "oidc-cancel", "name"), "oidc-cancel");
-        std::shared_ptr<Session> s = session_for(*h, name, false);
+        std::shared_ptr<Session> s = session_for(*h, access, name, false);
         return se::value_t(s && s->cancel());
       });
   // (oidc-sign-out NAME [OPTS]): forget the credential and its refresh and ID tokens; OPTS
@@ -1554,7 +1577,8 @@ void register_verbs(const std::weak_ptr<Host> &weak_host,
   // the provider's end_session_endpoint) and "post_logout_redirect_uri". Returns whether a
   // revocation was sent ("sent" or "no").
   se::builtins::register_fn(
-      env, "oidc-sign-out", [live_host, ctx](std::span<const se::value_t> args) -> se::value_t {
+      env, "oidc-sign-out",
+      [live_host, ctx, access](std::span<const se::value_t> args) -> se::value_t {
         std::shared_ptr<Host> h = live_host("oidc-sign-out");
         if (args.empty())
           throw std::runtime_error("oidc-sign-out: name the credential");
@@ -1573,22 +1597,22 @@ void register_verbs(const std::weak_ptr<Host> &weak_host,
           else
             throw std::runtime_error("oidc-sign-out: unknown option '" + key + "'");
         }
-        std::shared_ptr<Session> s = session_for(*h, name, true);
+        std::shared_ptr<Session> s = session_for(*h, access, name, true);
         // A session no sign-in of this run started reports at the default path.
         s->set_status_path(absolute_path(*ctx, std::string("oidc") + cvc::state::SEPARATOR + name));
         return se::value_t(s->sign_out(revoke, end_session, post_logout));
       });
   // (oidc-status NAME): the sign-in's status, as a dict (no secret in it).
   se::builtins::register_fn(
-      env, "oidc-status", [live_host](std::span<const se::value_t> args) -> se::value_t {
+      env, "oidc-status", [live_host, access](std::span<const se::value_t> args) -> se::value_t {
         std::shared_ptr<Host> h = live_host("oidc-status");
         if (args.empty())
           throw std::runtime_error("oidc-status: name the credential");
         const std::string name =
             credential_option(string_option(args[0], "oidc-status", "name"), "oidc-status");
-        std::shared_ptr<Session> s = session_for(*h, name, false);
+        std::shared_ptr<Session> s = session_for(*h, access, name, false);
         Status st = s ? s->status() : Status{};
-        if (!s && h->store->has(name))
+        if (!s && access.credentials->has(name))
           st.phase = "stored"; // kept, but not resumed by a sign-in yet
         return status_dict(st, name);
       });
@@ -1606,15 +1630,14 @@ OidcFlows oidc_flows(cvc::app &app) {
   return f;
 }
 
-void enable_oidc(cvc::app &app, std::shared_ptr<const cvc::net::NetPolicy> policy,
-                 std::shared_ptr<cvc::net::CredentialStore> store, const OidcHostConfig &config,
-                 std::shared_ptr<const std::atomic<bool>> live) {
+void enable_oidc(cvc::app &app, NetAccess base, NetAccessFor for_scope,
+                 const OidcHostConfig &config) {
   disable_oidc(app);
   auto host = std::make_shared<Host>();
   host->app = &app;
-  host->policy = std::move(policy);
-  host->store = std::move(store);
-  host->live = std::move(live);
+  host->live = base.live;
+  host->base = std::move(base);
+  host->for_scope = std::move(for_scope);
   host->config = config;
   cvc::net::set_browser_disabled(app, config.no_browser);
   oidc_slot &slot = app.slot<oidc_slot>();
@@ -1634,7 +1657,7 @@ void enable_oidc(cvc::app &app, std::shared_ptr<const cvc::net::NetPolicy> polic
         std::shared_ptr<Host> h = weak.lock();
         if (!h || (h->live && !h->live->load()))
           return; // turned off: later programs do not get the verbs
-        register_verbs(weak, env, ictx);
+        register_verbs(weak, h->for_scope ? h->for_scope(ictx.root_path) : h->base, env, ictx);
       },
       se::provider_affinity::host_proxied);
 }
@@ -1655,9 +1678,9 @@ void disable_oidc(cvc::app &app) {
     std::lock_guard<std::mutex> lock(host->m);
     sessions.swap(host->sessions);
   }
-  for (auto &[name, s] : sessions) {
+  for (auto &[key, s] : sessions) {
     s->shutdown();
-    host->store->set_renewer(name, nullptr);
+    s->store()->set_renewer(s->name(), nullptr);
   }
   cvc::net::set_browser_disabled(app, false);
 }

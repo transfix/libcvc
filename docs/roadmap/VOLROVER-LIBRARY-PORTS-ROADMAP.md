@@ -32,7 +32,27 @@ Revised on 2026-11-17 for Joe's answer on ContourTiler's parity ("Tolerance (Rec
 compares the tiler's surfaces by topology and a Hausdorff tolerance, exactly away from untiled
 regions, and P3b does not reproduce CGAL's convex partition (§3, §9 item 2).
 
-Nothing of the ports has landed. §9 lists the decisions still open.
+**What has landed (2026-11-27).** P0a-P10 are on master, and P11's docs; the transfix/libcvc PRs
+for each phase are:
+- P0a: #1107, #1119, #1137, #1152, #1203, #1276, #1281.
+- P0b: #1110, #1113, #1115.
+- P0c: #1112, with the packages in cy-pca/cvcpkg#578 and #597.
+- P0d: #1156, #1160.
+- P1: #1157, #1167, #1171.
+- P2: #1402.
+- P3a: #1164, which carries #1158 and #1162.
+- P3b: #1332, #1334; #1411 counts tile_stepper's phases by vertex.
+- P4: #1397.
+- P5: #1248, #1250, #1252.
+- P6: #1292, which carries #1291.
+- P7: #1249, #1251, #1254, #1257.
+- P8: #1400, #1401, #1423, and the follow-ups #1443 and #1446.
+- P9: #1452.
+- P10: #1451.
+- P11: the docs (§7). Retiring the legacy libraries from transfix/volrover waits for Joe's plan for
+  VolumeRover's remaining libraries and an arirov app.
+
+§9 lists the decisions still open.
 **Based on:** libcvc `origin/master @ 921c4254` (§1's facts) and `@ 7a09366f` (the rest),
 transfix/libcvc#1080 (libcvc without CGAL), and volrover `master @ b4a172c` (the legacy
 libraries live under `src/<Lib>` and `inc/<Lib>` there).
@@ -1803,7 +1823,7 @@ not as follow-ups.
 | P8 volume_grid v1 | M | Navigation, the view switch and the quad layout, probe, point classes (mark, select, move, delete, save, load), sessions, the transfer function; parameters from tables and data on the data channel; golden images and scripted-pick tests; two grids in one document (T6). *Built:* `cvc/volume/volume_grid.h`, `VolumeGridNode` and `type: volume_grid`, `volume_grid.ari` (§4, "What P8 built") | P7, P0d |
 | P9 volume_grid v2 | M | Segmentation tab: `segment`, labels on the slices, class surfaces in the 3D view, `save_segments`. *Built:* `cvc::class_surfaces`, `volume_grid_segment.h`, `VolumeGridSegmentation`, `volume_grid_segmentation.ari`, the demo `volume_grid_segment.ari` on the Visible Human CT (§4, "What P9 built"); `save_segments` is the app's data-save of the class volumes as one multi-variable file | P8, P5 |
 | P10 volume_grid v3 | M | Contours: draw and edit per object, linear and spline, export; `tile` puts surfaces in the 3D view. *Built:* `cvc/volume/volume_grid_contours.h`, `grid-contours.*`, `VolumeGridContours`, the Contours tab (§4, "What P10 built") | P8, P3b |
-| P11 Wrap-up | S | Docs: ARIADNE.md §5.4 rows, INDEX.ari entries, the generated parameter tables. volrover3 picks it all up through libcvc. Retire the legacy libraries from volrover `master` once parity holds, together with #123's VolUtils leftovers | P2, P4, P9, P10 |
+| P11 Wrap-up | S | Docs: ARIADNE.md §5.4 rows, INDEX.ari entries, the generated parameter tables. volrover3 picks it all up through libcvc. Retire the legacy libraries from volrover `master` once parity holds, together with #123's VolUtils leftovers. *Docs done:* ARIADNE.md §5.4's `contour_lab` section, the `volume_slice`, `volume_grid` and mesh_lab `skeleton` rows checked against the code and corrected, `contour_tiler` in §6.5; INDEX.ari's `demos:` lists (mesh_tools, contour_tiler, transfer_function, volume_grid, volume_grid_segmentation); [PORT_PARAMETERS.md](../PORT_PARAMETERS.md), the 16 port tables as `cvc::params_markdown<P>()` prints them. *Waiting:* the retirement, for Joe's plan for VolumeRover's remaining libraries and an arirov app (2026-11-27) | P2, P4, P9, P10 |
 
 **Parallel tracks.**
 - P0a, P0b and P0c touch different files, so they can run at once. P0d follows P0a and P0b.

@@ -14,7 +14,9 @@
 #include <cvc/ariadne/uri.h>
 #include <cvc/ariadne/uri_http_cache.h>
 #include <cvc/core/app.h>
+#include <cvc/net/credentials.h> // kLocalPrincipal
 #include <cvc/net/http_client.h>
+#include <cvc/net/net_policy.h>
 #include <deque>
 #include <exception>
 #include <list>
@@ -278,13 +280,29 @@ FetchResult fetch_result(cvc::net::HttpResponse reply) {
 
 } // namespace
 
+// Whether a request to `uri` passes `access`'s policy when that is not the launcher's (a mounted
+// document's principal's): the launcher's own is checked by the request itself.
+static bool own_policy_allows(cvc::app &app, const NetAccess &access, const std::string &uri,
+                              std::string &why) {
+  const std::optional<NetAccess> launcher = net_host_access(app);
+  if (!access.policy || (launcher && launcher->policy == access.policy))
+    return true;
+  return access.policy->allows_url(uri, &why);
+}
+
 FetchResult fetch_bytes(cvc::app &app, const std::string &uri, const std::string &auth,
-                        const std::string &base) {
+                        const std::string &base, const std::string &scope) {
   FetchResult r;
   const std::string scheme = scheme_of(uri);
   try {
     if (scheme == "http" || scheme == "https") {
-      if (const std::optional<NetAccess> access = net_host_access(app)) {
+      if (const std::optional<NetAccess> access = net_host_access(app, scope)) {
+        // The widget's principal's (docs/roadmap/ARIADNE_SHELL.md 4.12): its allowlist holds
+        // before the cache's (the launcher's), and a credential is found among its own only.
+        if (std::string why; !own_policy_allows(app, *access, uri, why)) {
+          r.error = why;
+          return r;
+        }
         // Without a credential, through the app's HTTP cache when it has one (enable_net's), on
         // the same allowlist: a picture or a video asked for again is not fetched again while it
         // is fresh. A request with a credential never goes through it.
@@ -330,11 +348,17 @@ namespace {
 // called later, from the browser's event loop. False when this can't start it (another scheme:
 // local, read in place).
 bool start_fetch(cvc::app &app, const std::string &uri, const std::string &auth,
-                 const std::string &base, FetchDone done) {
+                 const std::string &base, const std::string &scope, FetchDone done) {
   const std::string scheme = scheme_of(uri);
   if (!cvc::net::http_starts_async(app) || (scheme != "http" && scheme != "https"))
     return false;
-  if (const std::optional<NetAccess> access = net_host_access(app)) {
+  if (const std::optional<NetAccess> access = net_host_access(app, scope)) {
+    if (std::string why; !own_policy_allows(app, *access, uri, why)) {
+      FetchResult r;
+      r.error = why;
+      done(std::move(r));
+      return true;
+    }
     if (auth.empty() && http_cache_start(app, uri, [done](cvc::net::HttpResponse reply) {
           done(fetch_result(std::move(reply)));
         }))
@@ -420,9 +444,21 @@ struct ImageCache::Impl {
 
   explicit Impl(cvc::app &a) : app(a) {}
 
-  static std::string base_key(const ImageRequest &r) { return r.uri + '\n' + r.auth; }
-  static std::string variant_key(const ImageRequest &r) {
-    return base_key(r) + '\n' + std::to_string(r.w) + 'x' + std::to_string(r.h) + '/' +
+  // A picture is fetched as its widget's principal (net_host_access(app, scope)): one fetched
+  // with a credential, or on an allowlist, of one principal is never shown to another. The
+  // launcher's own principal keys as before.
+  std::string owner_of(const ImageRequest &r) const {
+    const std::string scheme = scheme_of(r.uri);
+    if (r.scope.empty() || (scheme != "http" && scheme != "https"))
+      return std::string();
+    const std::optional<NetAccess> a = net_host_access(app, r.scope);
+    return a && a->owner != cvc::net::kLocalPrincipal ? a->owner : std::string();
+  }
+  static std::string base_key(const ImageRequest &r, const std::string &owner) {
+    return r.uri + '\n' + r.auth + (owner.empty() ? std::string() : '\n' + owner);
+  }
+  static std::string variant_key(const ImageRequest &r, const std::string &owner) {
+    return base_key(r, owner) + '\n' + std::to_string(r.w) + 'x' + std::to_string(r.h) + '/' +
            std::to_string(static_cast<int>(r.fit)) + '/' +
            std::to_string(static_cast<int>(r.shape));
   }
@@ -538,14 +574,16 @@ struct ImageCache::Impl {
       fetcher(v->req.uri, v->req.auth, std::move(done));
       return;
     }
-    const std::string uri = v->req.uri, auth = v->req.auth, dir = base_dir;
+    const std::string uri = v->req.uri, auth = v->req.auth, dir = base_dir, scope = v->req.scope;
     // A browser build without threads starts the request, and the frame loop goes on while it is
     // out; the reply is decoded when the browser hands it over, between frames.
     // The work runs on the app's background pool, which the app stops before it goes.
     cvc::app *const a = &app;
-    if (!kThreaded && start_fetch(*a, uri, auth, dir, done))
+    if (!kThreaded && start_fetch(*a, uri, auth, dir, scope, done))
       return;
-    run([a, uri, auth, dir, done = std::move(done)] { done(fetch_bytes(*a, uri, auth, dir)); });
+    run([a, uri, auth, dir, scope, done = std::move(done)] {
+      done(fetch_bytes(*a, uri, auth, dir, scope));
+    });
   }
 
   void start_variant(const std::shared_ptr<Variant> &v, const cvc::image &decoded,
@@ -600,16 +638,19 @@ ImageCache::~ImageCache() = default;
 void ImageCache::set_base(std::string dir) { m_->base_dir = std::move(dir); }
 void ImageCache::set_fetcher(Fetcher f) { m_->fetcher = std::move(f); }
 
-void ImageCache::fetch(const std::string &uri, const std::string &auth, FetchDone done) {
+void ImageCache::fetch(const std::string &uri, const std::string &auth, const std::string &scope,
+                       FetchDone done) {
   if (m_->fetcher) {
     m_->fetcher(uri, auth, std::move(done));
     return;
   }
   cvc::app *const a = &m_->app;
   const std::string dir = m_->base_dir;
-  if (!kThreaded && start_fetch(*a, uri, auth, dir, done))
+  if (!kThreaded && start_fetch(*a, uri, auth, dir, scope, done))
     return;
-  m_->run([a, uri, auth, dir, done = std::move(done)] { done(fetch_bytes(*a, uri, auth, dir)); });
+  m_->run([a, uri, auth, dir, scope, done = std::move(done)] {
+    done(fetch_bytes(*a, uri, auth, dir, scope));
+  });
 }
 void ImageCache::set_limits(const Limits &limits) { m_->limits = limits; }
 const ImageCache::Limits &ImageCache::limits() const { return m_->limits; }
@@ -629,8 +670,9 @@ ImageView ImageCache::image(const ImageRequest &req) {
     m.clock += std::min(std::max(0.0, wall - m.last_request), Impl::kMaxStep);
   m.last_request = wall;
   const double now = m.clock; // drawing time (Impl::clock)
-  const std::string vkey = Impl::variant_key(req);
-  const std::string bkey = Impl::base_key(req);
+  const std::string owner = m.owner_of(req);
+  const std::string vkey = Impl::variant_key(req, owner);
+  const std::string bkey = Impl::base_key(req, owner);
   std::shared_ptr<Impl::Variant> v;
   std::shared_ptr<Impl::Base> b;
   bool start_b = false;
