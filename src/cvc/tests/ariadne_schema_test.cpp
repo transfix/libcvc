@@ -1,6 +1,7 @@
 // The .ari schema (docs/ARIADNE.md §14): the file the library carries, its shape (every built-in
 // widget type and top-level block in it, in the validator's subset), what validate_* and a load
-// find (with where), what they accept, and the shipped documents, which must all be valid.
+// find (with where), what they accept, and the shipped documents, which must all be valid. Also
+// that the spec (docs/ARIADNE_SPEC.md) gives each top-level block of the schema its entry.
 
 #include <algorithm>
 #include <cvc/ariadne/loader.h>
@@ -165,6 +166,31 @@ TEST(AriSchema, EveryBuiltinBlockIsInTheSchema) {
   const njson &doc = s["$defs"]["document"]["properties"];
   for (const std::string &b : builtin_ari_blocks())
     EXPECT_TRUE(doc.contains(b)) << b;
+}
+
+// The schema is the spec's structural half (docs/ARIADNE_SPEC.md §1): the spec's §8 gives each
+// top-level key the schema allows one entry, a "#### `key:`" heading, and no other key one.
+TEST(AriSpec, EveryTopLevelBlockHasItsEntry) {
+  const njson s = schema();
+  std::set<std::string> keys;
+  for (const auto &kv : s["$defs"]["document"]["properties"].items())
+    keys.insert(kv.key());
+  ASSERT_FALSE(keys.empty());
+  const std::string spec = read_file(kSource / "docs" / "ARIADNE_SPEC.md");
+  const auto from = spec.find("\n## 8. ");
+  ASSERT_NE(from, std::string::npos) << "docs/ARIADNE_SPEC.md has no §8";
+  const auto to = spec.find("\n## 9. ", from);
+  std::istringstream in(spec.substr(from, to == std::string::npos ? std::string::npos : to - from));
+  std::multiset<std::string> entries;
+  for (std::string line; std::getline(in, line);)
+    if (line.rfind("#### `", 0) == 0 && line.size() > 8 &&
+        line.compare(line.size() - 2, 2, ":`") == 0)
+      entries.insert(line.substr(6, line.size() - 8));
+  for (const std::string &k : keys)
+    EXPECT_EQ(entries.count(k), 1u) << "ARIADNE_SPEC.md §8 needs one entry for " << k << ":";
+  for (const std::string &e : entries)
+    EXPECT_TRUE(keys.count(e)) << "ARIADNE_SPEC.md §8 has an entry for " << e
+                               << ":, which is not a top-level key of the schema";
 }
 #endif // CVC_SCHEMA_TEST_HAVE_JSON
 
