@@ -6763,9 +6763,10 @@ item (`argv.0`, `argv.1`, ...).
     `delegate.keys` (its `on_key:`, and its `keys:` bindings at its own `keys.<id>`; the release
     goes where the press went). None goes to an application while a text field outside it has the
     keyboard (`Backend::item_has_keyboard`), nor while the Keys window waits for a key;
-  - the focus is the application whose window has it (`Backend::window_focused`, which ImGui
-    answers): it moves off every application when the focus goes to the document's own window or
-    to none. A program of the document's sets it with `(app-focus AS)`, until the focused window
+  - the focus is the application whose window has it (`Backend::window_focused`: in ImGui the
+    focused window; in FTXUI the window holding the focused widget, else the one last clicked or
+    raised; in tvision the desktop's current window): it moves off every application when the
+    focus goes to the document's own window or to none. A program of the document's sets it with `(app-focus AS)`, until the focused window
     changes. The document reads it at `ariadne.focus` (`includes.<id>`, "" for none);
   - the pointer over an application's window (`Backend::window_hovered`) goes to its
     `on_pointer:` when it holds `delegate.pointer`; a button's moves and release go where it went
@@ -6776,8 +6777,9 @@ item (`argv.0`, `argv.1`, ...).
     run in the next drain, and the host's default still ends the shell. With one, it passes a
     signal on itself with `(app-signal AS NAME)`.
 
-  A host whose UI takes an event (arigl, where ImGui wants it) posts it with `InputEvent::ui`:
-  never the document's own, it can still reach the application that has the focus or the window.
+  A host whose UI takes an event (arigl, where ImGui wants it; `ari`, where FTXUI or tvision
+  used it) posts it with `InputEvent::ui`: never the document's own, it can still reach the
+  application that has the focus or the window.
   A static `load:` granted the tokens takes input the same way, focused by `(app-focus <its as>)`.
 
 **The verbs.** A document's own programs open and close entries in its first `mounts:` slot:

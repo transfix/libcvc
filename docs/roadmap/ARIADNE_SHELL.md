@@ -490,9 +490,12 @@ root:
   focused application (its `on_key:`, its `keys:` bindings at `<sub>.keys.<id>`, seeded as it
   opens), its release where its press went; none while a text field outside it holds the keyboard
   or the Keys window waits. The backend says where the keyboard and the pointer are
-  (`Backend::window_focused`, `window_hovered`, `item_has_keyboard`, `reports_focus`; ImGui
-  answers them, the terminal backends do not yet, so there only `(app-focus)` moves the focus).
-  `InputEvent::ui` marks what the host's UI took: arigl now posts what ImGui wants, marked, in
+  (`Backend::window_focused`, `window_hovered`, `item_has_keyboard`, `reports_focus`), and ImGui
+  and the terminal backends answer them alike: on FTXUI the focus is in the window holding the
+  focused widget, else the one last clicked or raised, the pointer over the window at its cell; on
+  tvision the desktop's current window and the frontmost under the pointer
+  (`FtxuiBackend::set_window_focus`). `InputEvent::ui` marks what the host's UI took: arigl posts
+  what ImGui wants, and `ari` what FTXUI or tvision used (`FtxuiBackend::post_taken`), marked, in
   place of dropping it, so a focused application's window gets its keys while the document's own
   handlers still never see them. The pointer over the main view waits for SH6's front
   application.

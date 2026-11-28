@@ -1160,6 +1160,10 @@ struct FtxuiBackend::Impl {
   std::map<std::string, fx::Elements> win_popups; // hosted: popups by owning window, this walk
   std::map<std::string, int> body_h;              // hosted: each body's last rendered height
   std::string host_window;                        // hosted: the window the current input is for
+  // ARIADNE_SHELL.md 4.6 the window the keyboard focus is in ("" the body outside every window):
+  // the focused widget's, else the one last clicked or raised; hosted, the host's, as is the
+  // window under the pointer (standalone that is the window at ptr_x, ptr_y).
+  std::string focus_win, host_hover;
   long walks = 0;               // walks finished (hosted menus join from the second)
   std::string background;       // the published image drawn behind everything ("" = none)
   cvc::image background_scaled; // that image resampled to the screen's cells
@@ -1626,8 +1630,11 @@ struct FtxuiBackend::Impl {
     if (!focused.empty() && edits.count(focused))
       blur_commit.insert(focused); // the field it leaves commits on the next walk
     focused = id;
-    if (const Item *it = find_item(last, id))
+    if (const Item *it = find_item(last, id)) {
       raise(it->win);
+      if (!opt.hosted)
+        focus_win = it->win;
+    }
   }
 
   void focus_step(int dir) {
@@ -2356,6 +2363,8 @@ struct FtxuiBackend::Impl {
         return;
       }
     const std::string win = opt.hosted ? host_window : window_at(x, y);
+    if (!opt.hosted)
+      focus_win = win; // a click puts the focus in its window, or outside every one (4.6)
     if (!win.empty() && !opt.hosted) { // a hosted window's chrome is the host's
       raise(win);
       if (shown.closable.count(win) && on_title("winx|" + win)) {
@@ -3143,8 +3152,10 @@ bool FtxuiBackend::begin_window(const char *title, const char *id, const Size &s
   // Raised (focus_next_window): to the top of the stack, or, hosted, the host is told to.
   const bool raise = m.raise_next;
   m.raise_next = false;
-  if (raise && !m.opt.hosted)
+  if (raise && !m.opt.hosted) {
     m.raise(wid);
+    m.focus_win = wid;
+  }
   // Keep it on screen where it is DRAWN, never by moving where it is placed: a frame drawn on a
   // momentarily tiny screen (a terminal or browser page before its first resize) must not pile
   // every window into the corner for good.
@@ -3207,6 +3218,24 @@ WindowGeom FtxuiBackend::window_geometry() const {
     g.h = static_cast<float>(w.h * m.opt.cell_px_h);
   }
   return g;
+}
+
+bool FtxuiBackend::reports_focus() const { return true; }
+
+bool FtxuiBackend::window_focused() const {
+  const Impl &m = *m_;
+  return !m.last_window.empty() && m.last_window == m.focus_win;
+}
+
+bool FtxuiBackend::window_hovered() const {
+  const Impl &m = *m_;
+  return !m.last_window.empty() &&
+         m.last_window == (m.opt.hosted ? m.host_hover : m.window_at(m.ptr_x, m.ptr_y));
+}
+
+bool FtxuiBackend::item_has_keyboard() const {
+  const Impl &m = *m_;
+  return !m.last_item.empty() && m.has_focus(m.last_item);
 }
 
 void FtxuiBackend::end_window() {
@@ -5142,6 +5171,11 @@ bool FtxuiBackend::feed_window(Runtime &rt, const std::string &id, const TermEve
   return feed(rt, ev);
 }
 
+void FtxuiBackend::set_window_focus(const std::string &focused, const std::string &hovered) {
+  m_->focus_win = focused;
+  m_->host_hover = hovered;
+}
+
 void FtxuiBackend::activate_menu_item(Runtime &rt, const std::string &item_id) {
   Impl &m = *m_;
   m.ev_live = false;
@@ -5475,35 +5509,65 @@ FtxuiBackend::RunExit FtxuiBackend::run(Runtime &rt, const RunOptions &opts) {
 
 FtxuiBackend::RunExit FtxuiBackend::run(AppRuntime &app) { return run(app, RunOptions{}); }
 
-void FtxuiBackend::forward_to_document(AppRuntime &app, const TermEvent &e) const {
-  const int cw = m_->opt.cell_px_w, ch = m_->opt.cell_px_h;
-  // Keys carry SDL's modifier bits (shift 0x1, ctrl 0x40, alt 0x100) and go as a press + release
-  // pair (a terminal reports no key-up).
+namespace {
+
+// A terminal event as the Runtime's input: keys with SDL's modifier bits (shift 0x1, ctrl 0x40,
+// alt 0x100) as a press + release pair (a terminal reports no key-up), pointer events at the
+// cell's centre in px.
+std::vector<InputEvent> input_events(const TermEvent &e, int cw, int ch, bool ui) {
+  std::vector<InputEvent> out;
   if (e.kind != TermEvent::Kind::Mouse) {
     if (e.key.empty())
-      return;
-    const int mods = (e.shift ? 0x1 : 0) | (e.ctrl ? 0x40 : 0) | (e.alt ? 0x100 : 0);
-    app.post_key(true, e.key, mods);
-    app.post_key(false, e.key, mods);
-    return;
+      return out;
+    InputEvent k;
+    k.kind = InputEvent::Kind::KeyDown;
+    k.key = e.key;
+    k.mods = (e.shift ? 0x1u : 0u) | (e.ctrl ? 0x40u : 0u) | (e.alt ? 0x100u : 0u);
+    k.ui = ui;
+    out.push_back(k);
+    k.kind = InputEvent::Kind::KeyUp;
+    out.push_back(k);
+    return out;
   }
-  const double x = e.x * cw + cw / 2.0, y = e.y * ch + ch / 2.0;
+  InputEvent p;
+  p.x = static_cast<float>(e.x * cw + cw / 2.0);
+  p.y = static_cast<float>(e.y * ch + ch / 2.0);
+  p.ui = ui;
   switch (e.mouse) {
   case TermEvent::Mouse::Press:
-    app.post_pointer(static_cast<int>(InputEvent::Kind::MouseButtonDown), x, y, 0, 0, e.button, 1);
+    p.kind = InputEvent::Kind::MouseButtonDown;
+    p.button = e.button;
+    p.clicks = 1;
     break;
   case TermEvent::Mouse::Release:
-    app.post_pointer(static_cast<int>(InputEvent::Kind::MouseButtonUp), x, y, 0, 0, e.button, 1);
+    p.kind = InputEvent::Kind::MouseButtonUp;
+    p.button = e.button;
+    p.clicks = 1;
     break;
   case TermEvent::Mouse::Move:
-    app.post_pointer(static_cast<int>(InputEvent::Kind::MouseMove), x, y, 0, 0, e.button, 0);
+    p.kind = InputEvent::Kind::MouseMove;
+    p.button = e.button;
     break;
   case TermEvent::Mouse::WheelUp:
   case TermEvent::Mouse::WheelDown:
-    app.post_pointer(static_cast<int>(InputEvent::Kind::MouseWheel), x, y, 0,
-                     e.mouse == TermEvent::Mouse::WheelUp ? 1.0 : -1.0, 0, 0);
+    p.kind = InputEvent::Kind::MouseWheel;
+    p.dy = e.mouse == TermEvent::Mouse::WheelUp ? 1.0f : -1.0f;
     break;
   }
+  out.push_back(p);
+  return out;
+}
+
+} // namespace
+
+void FtxuiBackend::forward_to_document(AppRuntime &app, const TermEvent &e) const {
+  for (const InputEvent &ev : input_events(e, m_->opt.cell_px_w, m_->opt.cell_px_h, false))
+    app.runtime().post_input(ev);
+}
+
+void FtxuiBackend::post_taken(Runtime &rt, const TermEvent &e) const {
+  for (const InputEvent &ev : input_events(e, m_->opt.cell_px_w, m_->opt.cell_px_h, true))
+    rt.post_input(ev);
 }
 
 FtxuiBackend::RunExit FtxuiBackend::run(AppRuntime &app, const RunOptions &opts) {
@@ -5677,6 +5741,12 @@ FtxuiBackend::RunExit FtxuiBackend::run(Runtime &, const RunOptions &) { return 
 FtxuiBackend::RunExit FtxuiBackend::run(AppRuntime &) { return {}; }
 FtxuiBackend::RunExit FtxuiBackend::run(AppRuntime &, const RunOptions &) { return {}; }
 void FtxuiBackend::forward_to_document(AppRuntime &, const TermEvent &) const {}
+void FtxuiBackend::post_taken(Runtime &, const TermEvent &) const {}
+void FtxuiBackend::set_window_focus(const std::string &, const std::string &) {}
+bool FtxuiBackend::reports_focus() const { return false; }
+bool FtxuiBackend::window_focused() const { return false; }
+bool FtxuiBackend::window_hovered() const { return false; }
+bool FtxuiBackend::item_has_keyboard() const { return false; }
 bool FtxuiBackend::available() { return false; }
 
 #endif
@@ -5688,7 +5758,9 @@ void FtxuiBackend::route(Runtime &rt, const TermEvent &ev,
     unhandled(ev);
     return;
   }
-  if (!feed(rt, ev) && !(background && background(ev)) && unhandled)
+  if (feed(rt, ev))
+    post_taken(rt, ev); // never the document's; a mounted application's, if it holds it (4.6)
+  else if (!(background && background(ev)) && unhandled)
     unhandled(ev);
 }
 

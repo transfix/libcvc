@@ -437,13 +437,31 @@ struct Host {
       dirty = true;
       return true;
     }
+    tell_focus();
     bool used = be.feed_window(rt, id, e);
+    if (used)
+      be.post_taken(rt, e); // never the document's; a mounted application's, if it holds it
     if (!used && id.empty() && opts.background_input && opts.background_input(e))
       used = true; // e.g. cvcGL's TerminalScene steering its camera from the desktop
     if (!used && unhandled)
       unhandled(e);
     dirty = true;
     return used;
+  }
+
+  // ARIADNE_SHELL.md 4.6 the window the keyboard focus is in (the desktop's current one) and the
+  // one under the pointer (the frontmost holding it), for the backend to report as ImGui does.
+  void tell_focus() {
+    TDeskTop *desk = TProgram::deskTop;
+    std::string focused, hovered;
+    if (auto *w = dynamic_cast<ContentWindow *>(desk->current))
+      focused = w->id;
+    const TPoint at = desk->makeLocal(mouse);
+    for (TView *v = desk->first(); v && hovered.empty(); v = v->nextView())
+      if (auto *w = dynamic_cast<ContentWindow *>(v);
+          w && (v->state & sfVisible) && v->getBounds().contains(at))
+        hovered = w->id;
+    be.set_window_focus(focused, hovered);
   }
 
   void activate(ushort command) {
@@ -467,6 +485,7 @@ struct Host {
     for (auto &[id, w] : windows)
       be.set_window_geometry(id, w->origin.x, w->origin.y, w->size.x, w->size.y, w->user_sized);
     be.set_screen_size(desk->size.x, desk->size.y);
+    tell_focus();
     rt.render();
     dirty = false;
     last_sync = std::chrono::steady_clock::now();
