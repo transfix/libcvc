@@ -814,6 +814,7 @@ private:
   bool _water_trimmed = false; // _water_after lost its oldest: _water is older than any kept
   void avatar_water_for(std::uint64_t tick);
   SceneWorld *_scene = nullptr;             // SERVER: the world attached (attach_world)
+  std::uint64_t _scene_ground = 0;          // ... its ground_rev when everyone last spawned
   const void *_scene_world = nullptr;       // ... its physics world when the avatars went in
   void scene_step();                        // SERVER with a world attached: the due steps
   void update_rides();                      // ... each driver's ride, from its vehicle
@@ -822,6 +823,10 @@ private:
   // SERVER with physics: PID back at a spawn point (where it joined, when the world has no avatar
   // spawns) when it has fallen off the world.
   void respawn_if_lost(const std::string &pid, participant &p);
+  // SERVER with a world attached: its ground changed (SceneWorld::ground_rev: a switch, a
+  // Regenerate, a dataset loaded), so drives end (get_out) and every avatar respawns (spawn_for)
+  // on the new ground. One whose own body is a vehicle stays in it.
+  void respawn_all_on_new_ground();
   std::vector<const spawn_point *> avatar_points() const; // the spawns that serve avatars now
   cvc::physics::body_state grounded(cvc::physics::body_state s) const; // s's feet on the ground
   spawn_rules _avatar_spawns;                                          // SERVER: set_avatar_spawns

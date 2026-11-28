@@ -9431,10 +9431,10 @@ scene:
       body: static
 )";
 
-LoadResult load_drivable() {
+LoadResult load_drivable(const std::string &text = kDrivable) {
   cvc::app app;
   register_world_block(app);
-  LoadResult r = load_string(app, kDrivable);
+  LoadResult r = load_string(app, text);
   if (r.ok)
     if (const Value *world = find_world_block(r)) {
       world_rules rules = default_world_rules();
@@ -10665,6 +10665,172 @@ TEST(AriadneOneWorld, AJoinerStandsOnAGeneratedWorldsGround) {
   EXPECT_NEAR(at.z, ground, 0.3) << "standing on it";
   EXPECT_NEAR(at.x, px, 0.5);
   EXPECT_NEAR(at.y, py, 0.5);
+}
+
+// Everyone respawns on a world change (ARISRV_SCENES SC1): a Regenerate under a walker who has
+// walked away from the spawn point puts it back there, on the new world's ground, at the next
+// step. Without it the walker would stay where it was (or fall onto the new ground there).
+TEST(AriadneOneWorld, ARegenerateRespawnsEveryoneOnTheNewGround) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  LoadResult r = fresh_load(kGenerated);
+  ASSERT_TRUE(r.ok) << r.error;
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "", &warnings);
+  ASSERT_NE(w, nullptr);
+  w->sync(&warnings);
+  const auto first_static = [&](double x, double y) {
+    const std::optional<cvc::physics::ray_hit> h =
+        w->world().raycast({x, y, 400.0}, {x, y, -400.0});
+    return h ? h->point.z : std::nan("");
+  };
+  const double px = 40.0, py = -40.0; // the spawn point
+  const double qx = -40.0, qy = 40.0; // where the walker is when the world changes
+  const double ground_q = first_static(qx, qy);
+  ASSERT_TRUE(std::isfinite(ground_q));
+
+  holon h(holon_role::server, one_world_holon());
+  std::string why;
+  ASSERT_TRUE(h.attach_world(w.get(), &why)) << why;
+  spawn_rules spawns;
+  spawns.points.push_back({px, py, 0.0, -1, "avatar", ""});
+  h.set_avatar_spawns(spawns);
+  cvc::physics::body_state there;
+  there.position = {qx, qy, ground_q + 0.05};
+  h.add_participant("walker", false, there);
+  for (int i = 0; i < 30; ++i)
+    h.advance(1.0 / 60.0);
+  const cvc::physics::vec3 before = h.state("walker").position;
+  ASSERT_NEAR(before.x, qx, 0.5) << "it stays where it was put while the world doesn't change";
+  ASSERT_NEAR(before.y, qy, 0.5);
+
+  const double ground_old = first_static(px, py); // nobody stands there yet
+  ASSERT_TRUE(std::isfinite(ground_old));
+  const std::uint64_t ground_was = w->ground_rev();
+  cvc::world::generated_world_params p;
+  ASSERT_TRUE(w->generated_params("world", p));
+  p.seed = 9;
+  ASSERT_TRUE(w->follow_generated("world", p, &warnings)) << "a new world from seed 9";
+  for (int i = 0; i < 6; ++i)
+    h.advance(1.0 / 60.0);
+  EXPECT_GT(w->ground_rev(), ground_was) << "the new world's ground went in";
+  // The ground under the spawn point now, past the walker standing on it (a ray from above hits
+  // its head first).
+  double ground_p = 0.0;
+  ASSERT_TRUE(h.ground_at(px, py, 400.0, ground_p));
+  EXPECT_GT(std::fabs(ground_p - ground_old), 0.5) << "seed 9's ground differs there";
+  const cvc::physics::vec3 at = h.state("walker").position;
+  std::printf("  the walker was at (%.0f, %.0f, %.2f); after the Regenerate it is at "
+              "(%.1f, %.1f, %.2f), the spawn point, whose ground went from z %.2f to %.2f\n",
+              before.x, before.y, before.z, at.x, at.y, at.z, ground_old, ground_p);
+  EXPECT_NEAR(at.x, px, 0.5) << "back at the spawn point";
+  EXPECT_NEAR(at.y, py, 0.5);
+  EXPECT_NEAR(at.z, ground_p, 0.3) << "on the new ground there";
+}
+
+// ... and a switch to another of the scene's worlds: the walker on the slab respawns at the spawn
+// point on the dome's top, where the slab's ground has gone from the world.
+TEST(AriadneOneWorld, AWorldSwitchRespawnsEveryoneOnItsGround) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  namespace fs = std::filesystem;
+  const fs::path dir = fs::temp_directory_path() / "cvc_sc1_switch_respawn";
+  fs::create_directories(dir);
+  const fs::path doc = dir / "two.ari";
+  {
+    std::ofstream out(doc, std::ios::binary);
+    out << kTwoWorlds;
+  }
+  cvc::app app;
+  register_world_block(app);
+  LoadResult r = load_file(app, doc.string());
+  ASSERT_TRUE(r.ok) << r.error;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "relay", "", &warnings);
+  ASSERT_NE(w, nullptr);
+  ASSERT_EQ(w->world_on(), "flat");
+  w->sync(&warnings);
+
+  holon h(holon_role::server, one_world_holon());
+  std::string why;
+  ASSERT_TRUE(h.attach_world(w.get(), &why)) << why;
+  spawn_rules spawns;
+  spawns.points.push_back({0.0, 0.0, 0.0, -1, "avatar", ""});
+  h.set_avatar_spawns(spawns);
+  cvc::physics::body_state there;
+  there.position = {12.0, 12.0, 0.05}; // on the slab, off the dome's 20 m square
+  h.add_participant("walker", false, there);
+  for (int i = 0; i < 30; ++i)
+    h.advance(1.0 / 60.0);
+  const cvc::physics::vec3 before = h.state("walker").position;
+  ASSERT_NEAR(before.z, 0.0, 0.1) << "standing on the slab";
+  ASSERT_NEAR(before.x, 12.0, 0.5);
+
+  ASSERT_TRUE(w->set_world("dome", &warnings));
+  for (int i = 0; i < 3; ++i)
+    h.advance(1.0 / 60.0);
+  const cvc::physics::vec3 at = h.state("walker").position;
+  std::printf("  on the slab at (%.1f, %.1f, %.2f); switched to the dome: (%.1f, %.1f, %.2f)\n",
+              before.x, before.y, before.z, at.x, at.y, at.z);
+  EXPECT_NEAR(at.x, 0.0, 0.5) << "at the spawn point";
+  EXPECT_NEAR(at.y, 0.0, 0.5);
+  EXPECT_NEAR(at.z, 1.0, 0.15) << "on the dome's top, not falling from where the slab was";
+  std::error_code ec;
+  fs::remove_all(dir, ec);
+}
+
+// ... and a driver's drive ends with the world: out of the humvee, it respawns at the spawn point
+// on the new world's deck like everyone else (ARISRV_SCENES 3.1: "seats and drives end").
+TEST(AriadneOneWorld, AWorldSwitchEndsADriveAndRespawnsTheDriver) {
+  REQUIRE_YAML();
+  if (!jolt())
+    GTEST_SKIP() << "no Jolt in this build";
+  // The square, and a second world: a deck 2 m up.
+  LoadResult r = load_drivable(std::string(kDrivable) + R"(    - node: deck
+      world: deck
+      source: { box: { size: [160, 160, 1] } }
+      transform: { position: [0, 0, 1.5] }
+      body: static
+)");
+  ASSERT_TRUE(r.ok) << r.error;
+  cvc::app app;
+  std::vector<std::string> warnings;
+  std::unique_ptr<SceneWorld> w = SceneWorld::from_scene(app, r.scene, "", "physics", &warnings);
+  ASSERT_NE(w, nullptr);
+  ASSERT_EQ(w->world_on(), "square");
+  WorldVehicles &v = *w->vehicles();
+  w->sync(&warnings);
+  const std::uint64_t id = spawn_kind(v, "humvee", -40.0, 0.0);
+  holon h(holon_role::server, one_world_holon());
+  std::string why;
+  ASSERT_TRUE(h.attach_world(w.get(), &why)) << why;
+  spawn_rules spawns;
+  spawns.points.push_back({10.0, 20.0, 0.0, -1, "avatar", ""});
+  h.set_avatar_spawns(spawns);
+  cvc::physics::body_state feet;
+  feet.position = {-40.0, 3.0, 0.0};
+  h.add_participant("ann", false, feet);
+  for (int i = 0; i < 30; ++i)
+    h.advance(1.0 / 60.0);
+  ASSERT_TRUE(h.get_in("ann", id, &why)) << why;
+  for (int i = 0; i < 10; ++i)
+    h.advance(1.0 / 60.0);
+  ASSERT_EQ(h.drives("ann"), id);
+
+  ASSERT_TRUE(w->set_world("deck", &warnings));
+  for (int i = 0; i < 3; ++i)
+    h.advance(1.0 / 60.0);
+  const cvc::physics::vec3 at = h.state("ann").position;
+  std::printf("  driving the humvee at (-40, 0) on the square; switched to the deck: drives %llu, "
+              "at (%.1f, %.1f, %.2f)\n",
+              static_cast<unsigned long long>(h.drives("ann")), at.x, at.y, at.z);
+  EXPECT_EQ(h.drives("ann"), 0u) << "the drive ended";
+  EXPECT_NEAR(at.x, 10.0, 0.5) << "at the spawn point";
+  EXPECT_NEAR(at.y, 20.0, 0.5);
+  EXPECT_NEAR(at.z, 2.0, 0.2) << "on the deck";
 }
 
 // A lab joined to a relay that runs the same generated_world node (ARIADNE_WORLDS section 18.8,

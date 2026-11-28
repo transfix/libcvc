@@ -403,6 +403,7 @@ struct SceneWorld::impl {
   std::set<std::string> off;
   double grid_cell = 0.0, grid_half = 0.0;
   std::uint64_t world_rev = 0;
+  std::uint64_t ground_rev = 0; // ground_rev(): a switch, or a ground node's new bodies
   std::string on_sig;      // what the world on was made from at the last rev
   std::string refused;     // a source key's value that names no world, warned about once
   std::string enabled_key; // <stats_key>.enabled, or ""
@@ -714,6 +715,8 @@ struct SceneWorld::impl {
   void apply(tracked &t, std::vector<std::string> *w) {
     if (t.colliders->geometry && set_in_place(t, w))
       return;
+    if (!t.data_path.empty()) // a generated world's or a dataset's: the ground (a water has none)
+      ++ground_rev;
     for (auto it = bodies.begin(); it != bodies.end();) {
       if (it->node == t.node) {
         world->remove_body(it->id);
@@ -1938,9 +1941,12 @@ bool SceneWorld::set_world(const std::string &name, std::vector<std::string> *wa
       d.add_bodies_of(node, warnings);
   d.on = name;
   d.refused.clear();
+  ++d.ground_rev;
   publish_worlds(true);
   return true;
 }
+
+std::uint64_t SceneWorld::ground_rev() const noexcept { return _impl->ground_rev; }
 
 void SceneWorld::publish_worlds(bool force) {
   impl &d = *_impl;

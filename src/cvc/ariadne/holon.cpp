@@ -285,6 +285,25 @@ void holon::respawn_if_lost(const std::string &pid, participant &p) {
   }
 }
 
+void holon::respawn_all_on_new_ground() {
+  const std::uint64_t now = _scene->ground_rev();
+  if (now == _scene_ground)
+    return;
+  _scene_ground = now;
+  for (auto &kv : _participants) {
+    participant &p = kv.second;
+    if (p.drives != 0 && p.drives != p.body)
+      get_out(kv.first, p); // drives end; the vehicle is placed again by the world's vehicles
+    if (!_world->has_avatar(kv.first))
+      continue; // in its own body (a vehicle archetype), which the world's vehicles place
+    const cvc::physics::body_state back = spawn_for(kv.first);
+    _world->place(kv.first, back);
+    p.last_feet = back;
+    p.last_ground_z = back.position.z;
+    p.stood = false;
+  }
+}
+
 void holon::remove_participant(const std::string &pid) {
   const auto it = _participants.find(pid);
   if (it != _participants.end() && _role == holon_role::client && it->second.have_seen) {
@@ -819,6 +838,7 @@ bool holon::attach_world(SceneWorld *world, std::string *why) {
   _world = std::move(next);
   _scene = world;
   _scene_world = world ? static_cast<const void *>(&world->world()) : nullptr;
+  _scene_ground = world ? world->ground_rev() : 0; // the ground they were placed on
   _avatar_water_gen =
       ~std::uint64_t{0}; // a world of its own again takes the water at its next step
   return true;
@@ -901,6 +921,7 @@ void holon::scene_step() {
         }
       },
       [this, &drive](std::uint64_t) {
+        respawn_all_on_new_ground(); // a switch or a Regenerate: everyone on the new ground
         for (auto &kv : _participants) {
           if (!_world->has_avatar(kv.first))
             continue;
