@@ -93,6 +93,17 @@
   const termEl = document.getElementById('term');
   term.open(termEl);
   term.focus();
+  // Pictures in real pixels: xterm.js's image addon draws Sixel and iTerm2 inline images. ari can't
+  // ask the page what it draws, so the page config's flags say which ari sends (--graphics iterm,
+  // or sixel with --cell-size); without them ari draws pictures in half-blocks and the addon has
+  // nothing to do. No size reports: ari asks the terminal nothing in a browser.
+  if (typeof ImageAddon !== 'undefined') {
+    try {
+      term.loadAddon(new ImageAddon.ImageAddon({enableSizeReports: false}));
+    } catch (e) {
+      console.warn(LABEL + ': image addon unavailable, pictures stay half-blocks:', e);
+    }
+  }
   // OSC 52 (ESC ] 52 ; c ; base64 BEL): a document's (clipboard-set TEXT). xterm.js leaves it to
   // the page. The browser writes the clipboard within the key press or click that ran the action
   // (its user activation lasts past the frame it takes). A read (`?`, a context menu's Paste,
@@ -135,7 +146,20 @@
   term.onBinary((s) => { for (let i = 0; i < s.length; ++i) stdin.push(s.charCodeAt(i) & 0xff); });
 
   // stdout: one terminal write per frame (the program ends each frame with a NUL). Anything
-  // written without one goes out at the next animation frame.
+  // written without one goes out at the next animation frame. A frame with pictures in pixels
+  // (Sixel, iTerm2) is a synchronized update (ESC [ ? 2026 h ... ESC [ ? 2026 l): ari sends the
+  // pictures after the repaint's NUL, then ends the update. xterm.js 5.5 doesn't do synchronized
+  // updates, so the page does: the whole update is one write. Split at the NUL, the pictures went
+  // out with the next frame's repaint, which painted over them before the terminal showed them.
+  const SYNC_ON = [0x1b, 0x5b, 0x3f, 0x32, 0x30, 0x32, 0x36, 0x68]; // ESC [ ? 2 0 2 6 h
+  const SYNC_OFF = [0x1b, 0x5b, 0x3f, 0x32, 0x30, 0x32, 0x36, 0x6c]; // ESC [ ? 2 0 2 6 l
+  const endsWith = (f, seq) => {
+    if (f.length < seq.length) return false;
+    for (let i = 0, j = f.length - seq.length; i < seq.length; ++i, ++j)
+      if (f[j] !== seq[i]) return false;
+    return true;
+  };
+  let inSync = false;
   let frame = [];
   const flush = () => {
     if (frame.length) {
@@ -180,7 +204,19 @@
   const Module = window.Module = {
     arguments: [], // none: the baked document; configure() sets them for a document by URL
     stdin: () => (stdin.length ? stdin.shift() : null),
-    stdout: (c) => { if (c === 0) flush(); else frame.push(c); },
+    stdout: (c) => {
+      if (c === 0) {
+        if (!inSync) flush();
+        return;
+      }
+      frame.push(c);
+      if (c === 0x68 && endsWith(frame, SYNC_ON)) {
+        inSync = true;
+      } else if (c === 0x6c && endsWith(frame, SYNC_OFF)) {
+        inSync = false;
+        flush();
+      }
+    },
     stderr: (c) => {
       if (c === 10) {
         const line = new TextDecoder().decode(new Uint8Array(errLine));
@@ -263,6 +299,18 @@
     // --instance {origin}). Not in the URL's ?arg=: those are taken as given.
     const here = (s) => s.split('{origin}').join(location.origin);
     const flags = list(config.flags, 'flags').map(here);
+    // Sixel pictures go pixel for pixel, cut to the terminal's cell size, which only this page
+    // knows: --graphics sixel without --cell-size gets this terminal's, in CSS pixels, measured
+    // once the terminal has its size. (ari keeps cutting at this size: after a zoom the pictures
+    // keep their pixels and no longer fill their cells exactly. iterm has no such limit.)
+    const g = flags.indexOf('--graphics');
+    if (g >= 0 && flags[g + 1] === 'sixel' && !flags.includes('--cell-size')) {
+      const screen = termEl.querySelector('.xterm-screen');
+      const box = screen && screen.getBoundingClientRect();
+      const w = box ? Math.round(box.width / term.cols) : 0;
+      const h = box ? Math.round(box.height / term.rows) : 0;
+      if (w > 0 && h > 0) flags.push('--cell-size', w + 'x' + h);
+    }
     Module.arguments = ['run'].concat(flags, [url.href], list(config.args, 'args').map(here),
                                       params.getAll('arg'));
     const env = Object.assign({}, config.env || {});
